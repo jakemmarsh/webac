@@ -173,24 +173,24 @@ describe.skipIf(!domWindow)('webac#25 — the toolbar shortcut slots carry the U
     expect(ui.refreshItemShortcutOverlays()).toBe(false);
   });
 
-  it('eras: Dark Majesty (the EoL exe) keeps the bar; a 1999 world draws none, on the bar or in the pack (UI_Item draw @ 0x004e7d20)', async () => {
+  it('eras: end of retail, Dark Majesty and AC1999 all draw the uses bar and the fullness bar on a shortcut (1999 UI_Item update @ 0x004e6ed0)', async () => {
     const { eraClientRules } = await import('../packages/renderer/src/era/EraFeatures.js');
     const { eraProfile } = await import('../packages/renderer/src/era/EraProfiles.js');
-    expect(eraClientRules(null).itemIconMeters).toBe(true);
-    expect(eraClientRules(eraProfile('classicace-customdm')).itemIconMeters).toBe(true);
-    expect(eraClientRules(eraProfile('ac1999-retail')).itemIconMeters).toBe(false);
     try {
-      ui.setClientRules(eraClientRules(eraProfile('classicace-customdm')));
-      put(0, KIT);
-      expect(fillPx(bar(slot(0)))).toBe('15px');
-      ui.setClientRules(eraClientRules(eraProfile('ac1999-retail')));
-      put(0, KIT);
-      put(1, PACK);
-      ui.setInventoryData([...ITEMS(), inv(0x8000b001, { containerId: PACK })], [], 1, 100, 102);
-      expect(bar(slot(0))).toBeNull();
-      expect(slot(1).querySelector('[data-capacity-bar]')).toBeNull();
-      expect(ui.buildStructureBarEl(15, 30, 32)).toBeNull();
-      expect(ui.buildCapacityBarEl(24, 3, 32)).toBeNull();
+      for (const profile of [null, eraProfile('classicace-customdm'), eraProfile('ac1999-retail')]) {
+        ui.setClientRules(eraClientRules(profile));
+        objects = new Array(18).fill(0);
+        put(0, KIT);
+        put(1, PACK);
+        put(2, PICK);
+        ui.setInventoryData([...ITEMS(), inv(0x8000b001, { containerId: PACK })], [], 1, 100, 102);
+        expect(fillPx(bar(slot(0)))).toBe('15px');
+        expect(fillPx(slot(1).querySelector('[data-capacity-bar]') as HTMLElement)).toBe(`${Math.round((1 / 24) * 30)}px`);
+        // Inverse, every era: a fresh lockpick (ratio exactly 1.0, hidden in 1999 too) has none.
+        expect(bar(slot(2))).toBeNull();
+        expect(ui.buildStructureBarEl(15, 30, 32)).not.toBeNull();
+        expect(ui.buildCapacityBarEl(24, 3, 32)).not.toBeNull();
+      }
     } finally {
       ui.setClientRules(eraClientRules(null));
     }
@@ -256,6 +256,24 @@ describe.skipIf(!domWindow || !hasDats)('webac#25 sweep — every item list\'s U
     expect(fillPx(bar(cell(KIT)))).toBe('15px');
     expect(bar(cell(GEM))).toBeNull();
     expect(bar(cell(PICK))).toBeNull();
+  });
+
+  it('AC1999 pack grid: the used kit keeps its bar, as before webac#25 (1999 UI_Item update @ 0x004e6ed0)', async () => {
+    const { eraClientRules } = await import('../packages/renderer/src/era/EraFeatures.js');
+    const { eraProfile } = await import('../packages/renderer/src/era/EraProfiles.js');
+    try {
+      for (const profile of [eraProfile('ac1999-retail'), eraProfile('classicace-customdm')]) {
+        ui.setClientRules(eraClientRules(profile));
+        if (!ui.inventoryVisible) ui.toggleInventory(); else ui.renderInventoryPanel();
+        const cell = (g: number) => domWindow.document.querySelector(`[data-inv-guid="${g}"]`) as HTMLElement;
+        expect(fillPx(bar(cell(KIT)))).toBe('15px');
+        expect(bar(cell(GEM))).toBeNull();
+        expect(bar(cell(PICK))).toBeNull();
+      }
+    } finally {
+      ui.setClientRules(eraClientRules(null));
+      ui.renderInventoryPanel();
+    }
   });
 
   it('paperdoll: a wielded item with uses left shows the bar on its wear slot; one without shows none', () => {

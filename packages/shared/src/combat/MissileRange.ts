@@ -18,6 +18,27 @@ export const METERS_TO_YARDS = 1.094;               // Creature_Missile.cs:402
 export const MISSILE_RANGE_CAP = 85.0 / METERS_TO_YARDS; // :403 ≈ 77.697m
 export const DEFAULT_MAX_VELOCITY = 20.0;           // :404
 
+/**
+ * The velocity an appraised WeaponProfile's Range line and reach stand for (BUG.ace-thrown-weapon-range-1yd).
+ *
+ * Retail's client prints the profile's max_velocity as it comes (ItemExamineUI::Appraisal_ShowWeaponAndArmorData
+ * @ 0x4b10e0: pow(v, 2) × 0.10204 × 1.094, capped at 85 yds, " (based on STRENGTH 100)" when max_velocity_estimated);
+ * it has no estimate of its own. Retail's server filled a thrown weapon's velocity in at appraisal time (the weenies
+ * store none: ACE-World-16PY wcid 316 Throwing Dart / 304 Throwing Axe carry no float 26), from Strength.
+ * Emulators that store no velocity send a placeholder instead and then throw with 20 m/s:
+ * - ACE: `MaxVelocity = MaximumVelocity ?? 1.0f`, flag never set (WeaponProfile.cs:57), and
+ *   `MaximumVelocity ?? DefaultMaxVelocity (20)` in combat (Creature_Missile.cs:404–408);
+ * - GDLE / GDL (Seedsow, ClassicDereth): `InqFloatQuality(MAXIMUM_VELOCITY_FLOAT, 0)`, flag 0 (ObjectMsgs.cpp), and
+ *   `InqFloatQuality(MAXIMUM_VELOCITY_FLOAT, 20.0)` in combat (AttackManager.cpp:884, MissileAttackEventData.cpp:160).
+ * So an un-estimated 1.0 or 0 is "no velocity stored", and the reach those servers really give it is 20 m/s
+ * (40 yds.). No stored velocity is exactly 1.0 or 0 (the EoL world DB's lowest is 2.0), ClassicACE sends its
+ * Strength estimate (≥ 5.45) with the flag, and the AC1999 server its examiner's (≥ 5.4 m/s), so real values pass.
+ */
+export function appraisedMissileVelocity(maxVelocity: number, estimated: number | boolean = 0): number {
+  if (!estimated && (maxVelocity === 1.0 || maxVelocity === 0)) return DEFAULT_MAX_VELOCITY;
+  return maxVelocity;
+}
+
 export function getMaxMissileRange(maximumVelocity: number | null | undefined): number {
   const maxVelocity = maximumVelocity ?? DEFAULT_MAX_VELOCITY;
   const missileRange = Math.pow(maxVelocity, 2.0) * 0.1020408163265306;

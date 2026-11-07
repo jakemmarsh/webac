@@ -3538,6 +3538,14 @@ export interface CreateObjectData {
    */
   initialMotion?: ParsedMovementData;
   /**
+   * BUG.server-object-placement-default-vs-set-description — the PhysicsDesc
+   * carried a Movement buffer of non-zero length, whether or not it parsed
+   * (initialMotion). CPhysicsObj::set_description @ 0x00514f40 keys its branch
+   * on the buffer length: present keeps Resting, absent / empty poses at
+   * animframe_id.
+   */
+  hasMovement?: boolean;
+  /**
    * BUG.createobject-movement-placement-skipped — IsAutonomous uint32
    * written after a non-empty Movement blob (client- vs server-initiated
    * motion). Undefined when no Movement blob was present.
@@ -3769,9 +3777,11 @@ export function parseCreateObjectFromReader(r: BinaryReader): CreateObjectData {
     let initialMotion: ParsedMovementData | undefined;
     let isAutonomous: boolean | undefined;
     let placement: number | undefined;
+    let hasMovement = false;
     if (physFlags & PhysicsDescFlag.Movement) {
       const movLen = r.readUInt32();
       if (movLen > 0) {
+        hasMovement = true;
         initialMotion = parseMovementData(r.readBytes(movLen), false) ?? undefined;
         isAutonomous = r.readUInt32() !== 0;
       }
@@ -4082,6 +4092,7 @@ export function parseCreateObjectFromReader(r: BinaryReader): CreateObjectData {
       targetType,
       spellDid,
       initialMotion,
+      ...(hasMovement ? { hasMovement } : {}),
       isAutonomous,
       placement,
       timestamps,

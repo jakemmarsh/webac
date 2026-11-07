@@ -653,8 +653,27 @@ export class TextureSamplerPrefs {
    */
   shiftFor(kind: TextureKind): number {
     return kind === 'environment'
-      ? environmentDetailShift(this.environmentDetail)
+      ? this.envShifts?.get(this.environmentDetail) ?? environmentDetailShift(this.environmentDetail)
       : retailLandscapeShift(this.landscapeDetail);
+  }
+
+  /** The era's environment shift per detail value, or null for end of retail's (environmentDetailShift). */
+  private envShifts: ReadonlyMap<number, number> | null = null;
+
+  /**
+   * The era's environment-texture shifts (EraWorldRules.textureDetailMenu): `shifts[i]` for
+   * `values[i]`. 1999 shifts every non-landscape texture by .rdata 0x5f75a8 = {0, 1, 2, 4}[item]
+   * (0x0042a732), so its coarsest item ("1/8") is a 4-bit shift where end of retail's Very Low is 3.
+   * Null keeps end of retail's. Set once at boot; re-applies every registered texture on a change.
+   */
+  setEnvironmentShifts(menu: { values: readonly number[]; shifts: readonly number[] } | null): boolean {
+    const next = menu ? new Map(menu.values.map((v, i) => [v, menu.shifts[i]] as const)) : null;
+    const same = next === null ? this.envShifts === null
+      : this.envShifts !== null && next.size === this.envShifts.size && [...next].every(([k, v]) => this.envShifts!.get(k) === v);
+    if (same) return false;
+    this.envShifts = next;
+    for (const tex of this.registry.keys()) this.applyTo(tex);
+    return true;
   }
 
   /** The current merged per-cell landscape texture size for a region's base_tex_size. */

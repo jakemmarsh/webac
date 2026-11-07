@@ -22,7 +22,8 @@
  * Privacy: only codes, counts, durations and fixed identifiers go out. The
  * payload is built from a closed set of fields here and re-validated field
  * by field on the bridge; no account, password, character name or typed text
- * is ever an input to this module. The page's `trace` id is random per page
+ * is ever an input to this module (the login events' `acct` arrives already
+ * hashed, telemetry/LoginTags.ts). The page's `trace` id is random per page
  * load and rides on the WebSocket URL, so the bridge's session_open /
  * session_close carry the same id.
  */
@@ -33,6 +34,8 @@ import type { ChargenResumeToken } from '../session/ChargenResume.js';
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 import type { LoginRetryKind } from '../session/ProvenLoginRetry.js';
 import type { AfterRefusal } from '../session/LoginRefusalMemory.js';
+import type { LoginHolderTelemetry } from '../session/LoginHolder.js';
+import { ACCOUNT_TAG_PATTERN, BROWSER_ID_PATTERN, wireTabId } from './LoginTags.js';
 
 export type PreworldOutcome =
   | 'login_refused' | 'connect_failed' | 'char_list' | 'char_error' | 'chargen_ok' | 'chargen_refused'
@@ -374,6 +377,30 @@ export interface PreworldEvent {
    */
   heldByTab?: true;
   /**
+   * OBS.login-refusal-identity — 'login_refused' / 'login_retry' / 'char_list'
+   * / 'login_held' only (telemetry/LoginTags.ts): `acct` an 8-hex salted
+   * SHA-256 tag of this login's world + case-folded account (never the
+   * account, nothing from the password), `bid` this browser profile's random
+   * id (absent without localStorage), `tab` this page's AccountTabGuard id.
+   * Each absent when unknown.
+   */
+  acct?: string;
+  bid?: string;
+  tab?: string;
+  /**
+   * OBS.login-refusal-identity — 'login_refused' / 'login_retry' of an
+   * account-in-use or "Client logon failed" refusal only
+   * (LoginHolderWait.telemetryFor): whether this connect cycle asked the
+   * browser's other tabs who holds the account, how many did (holders), how
+   * many tabs answered at all (tabs; a lower bound, older builds never ack)
+   * and how many hold it with a closed session (holdersClosed). The counts
+   * only with holderQuery 'ran'.
+   */
+  holderQuery?: 'ran' | 'skipped' | 'no_channel';
+  holders?: number;
+  tabs?: number;
+  holdersClosed?: number;
+  /**
    * BUG.resume-hung-socket — 'connect_failed' only: the network was out
    * ('open_timeout': the socket never answered within WS_OPEN_TIMEOUT_MS;
    * 'offline': navigator.onLine was false). Absent on an ordinary failed open.
@@ -414,6 +441,22 @@ export interface PreworldReporterOptions {
    * the event goes out), and asked on each char_list for its afterRefusal.
    */
   loginRefusals?: LoginRefusalSink;
+  /** OBS.login-refusal-identity — this browser profile's id (LoginTags.browserId), null when storage failed. */
+  browserId?: string | null;
+}
+
+/** The outcomes that carry acct / bid / tab (OBS.login-refusal-identity). */
+const IDENTITY_OUTCOMES: ReadonlySet<PreworldOutcome> = new Set(['login_retry', 'login_refused', 'char_list', 'login_held']);
+/** The bound on holders / tabs counts (BroadcastChannel tabs of one browser). */
+export const MAX_HOLDER_TABS = 64;
+
+/** The holder-query fields a login_refused / login_retry carries, bounded (none without holderQuery). */
+function holderFields(opts: LoginHolderTelemetry): Partial<Pick<PreworldEvent, 'holderQuery' | 'holders' | 'tabs' | 'holdersClosed'>> {
+  const q = opts.holderQuery;
+  if (q !== 'ran' && q !== 'skipped' && q !== 'no_channel') return {};
+  if (q !== 'ran') return { holderQuery: q };
+  const n = (v: unknown): number => boundInt(v, MAX_HOLDER_TABS);
+  return { holderQuery: q, holders: n(opts.holders), tabs: n(opts.tabs), holdersClosed: n(opts.holdersClosed) };
 }
 
 /** What the reporter needs from session/LoginRefusalMemory. */
@@ -566,6 +609,11 @@ export class PreworldReporter {
   private streamReportedOnCharList = false;
   private readonly streams = new Map<string, BootStreamReport>();
   private handoversSent = 0;
+  /** OBS.login-refusal-identity — this connect attempt's account tag, the attempt it belongs to, and this page's tab id. */
+  private acct: string | null = null;
+  private attemptSerial = 0;
+  private tabId: string | null = null;
+  private readonly bid: string | null;
 
   constructor(private readonly opts: PreworldReporterOptions) {
     this.now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
@@ -574,6 +622,12 @@ export class PreworldReporter {
     this.startedAt = this.now();
     this.screenSince = this.startedAt;
     this.bootClockFrom = this.startedAt;
+    this.bid = typeof opts.browserId === 'string' && BROWSER_ID_PATTERN.test(opts.browserId) ? opts.browserId : null;
+  }
+
+  /** OBS.login-refusal-identity — this page's AccountTabGuard id (the guard is made after the reporter). */
+  setTabId(id: string | null): void {
+    this.tabId = wireTabId(id);
   }
 
   /** The bridge's event URL for a ws(s):// bridge URL (null when it isn't one). */
@@ -604,10 +658,18 @@ export class PreworldReporter {
    * longer time this attempt. loginStarted alone cannot do this, because a
    * socket that never opens never fires 'connected'.
    */
-  connectAttempt(): void {
+  connectAttempt(acct: Promise<string | null> | string | null = null): void {
     this.loginAt = null;
     this.charListSeen = false;
     this.enterAt = null;
+    // OBS.login-refusal-identity — the attempt's account tag (LoginTags.accountTag), once its digest is in.
+    const serial = ++this.attemptSerial;
+    this.acct = null;
+    const take = (t: string | null): void => {
+      if (serial === this.attemptSerial) this.acct = typeof t === 'string' && ACCOUNT_TAG_PATTERN.test(t) ? t : null;
+    };
+    if (acct === null || typeof acct === 'string') take(acct);
+    else acct.then(take, () => take(null));
   }
 
   /** The bridge socket opened and the login request is going out (both eras' 'connected'). */
@@ -723,11 +785,11 @@ export class PreworldReporter {
    */
   loginRetry(
     event: Pick<ConnectionEvent, 'characterError' | 'serverNetError' | 'netErrorId'>, token: string | null, attempt: number,
-    kind: LoginRetryKind = 'proven', opts: { heldByTab?: boolean } = {},
+    kind: LoginRetryKind = 'proven', opts: LoginHolderTelemetry = {},
   ): void {
     const count = Math.max(0, Math.min(1000, Math.trunc(attempt)));
     const retry: LoginRetryKind = kind === 'first_time' || kind === 'case_verbatim' || kind === 'case_lower' ? kind : 'proven';
-    const held = opts.heldByTab === true ? { heldByTab: true as const } : {};
+    const held = { ...(opts.heldByTab === true ? { heldByTab: true as const } : {}), ...holderFields(opts) };
     if (event.serverNetError) {
       this.report('login_retry', {
         code: event.serverNetError.stringId >>> 0, table: event.serverNetError.tableId >>> 0, token: safeToken(token), count, retry, ...held,
@@ -799,9 +861,9 @@ export class PreworldReporter {
    */
   connectionError(
     event: Pick<ConnectionEvent, 'characterError' | 'serverNetError' | 'netErrorId' | 'openTimedOut'>, token: string | null = null,
-    opts: { heldByTab?: boolean } = {},
+    opts: LoginHolderTelemetry = {},
   ): void {
-    const held = opts.heldByTab === true ? { heldByTab: true as const } : {};
+    const held = { ...(opts.heldByTab === true ? { heldByTab: true as const } : {}), ...holderFields(opts) };
     if (event.characterError !== undefined) {
       const code = event.characterError >>> 0;
       const name = safeToken(token) ?? safeToken(CharacterError[code]);
@@ -1043,7 +1105,7 @@ export class PreworldReporter {
 
   // ── Transport ────────────────────────────────────────────────────────
 
-  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'heritage' | 'handoverMs' | 'reason' | 'path' | 'retry' | 'why' | 'afterRefusal' | 'heldByTab'>>, withStream = false): void {
+  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'heritage' | 'handoverMs' | 'reason' | 'path' | 'retry' | 'why' | 'afterRefusal' | 'heldByTab' | 'holderQuery' | 'holders' | 'tabs' | 'holdersClosed'>>, withStream = false): void {
     // OBS.login-after-refusal — every refused attempt, sent or not. A case retry's refusal
     // (case_verbatim / case_lower, LoginCaseFallback) is the page trying the password's other
     // case, not the server refusing what the player typed, so it is not counted.
@@ -1082,6 +1144,15 @@ export class PreworldReporter {
       ...(outcome === 'handover' ? { handoverMs: f.handoverMs, reason: f.reason, path: f.path } : {}),
       ...(outcome === 'login_retry' && f.retry ? { retry: f.retry } : {}),
       ...((outcome === 'login_refused' || outcome === 'login_retry') && f.heldByTab === true ? { heldByTab: true as const } : {}),
+      ...((outcome === 'login_refused' || outcome === 'login_retry') && f.holderQuery ? {
+        holderQuery: f.holderQuery,
+        ...(f.holderQuery === 'ran' ? { holders: f.holders ?? 0, tabs: f.tabs ?? 0, holdersClosed: f.holdersClosed ?? 0 } : {}),
+      } : {}),
+      ...(IDENTITY_OUTCOMES.has(outcome) ? {
+        ...(this.acct ? { acct: this.acct } : {}),
+        ...(this.bid ? { bid: this.bid } : {}),
+        ...(this.tabId ? { tab: this.tabId } : {}),
+      } : {}),
       ...(outcome === 'connect_failed' && f.why ? { why: f.why } : {}),
       ...(outcome === 'char_list' && f.afterRefusal ? { afterRefusal: {
         sameAccount: f.afterRefusal.sameAccount === true,

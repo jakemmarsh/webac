@@ -30,7 +30,7 @@ import { DatReader } from '@ac/dat-parser/DatReader.js';
 import { parseMasterProperty, setMasterPropertyTypes, parseStringTable, registerStringTable, acStringHash, getStringFromTable, getString } from '@ac/dat-parser/file-types/LayoutDesc.js';
 import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, jumpSkillWithStamina, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyString, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken, characterCreateErrorFallbackText, playerText, PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatWeenieErrorWithString, weenieErrorWithStringText, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, POSTYPE_LAST_OUTSIDE_DEATH, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
 import type { PendingTieBind } from '@ac/shared';
-import { APPRAISAL_1999_STRING, inqSpellTargetType } from '@ac/shared';
+import { APPRAISAL_1999_STRING, inqSpellTargetType, appraisedMissileVelocity } from '@ac/shared';
 import { OpenContainerTracker } from './world/OpenContainerTracker.js';
 import { routeViewContents } from './world/ViewContentsRouter.js';
 import { closeCurrentContainer, releaseGroundObject as releaseGroundObjectState } from './world/CloseCurrentContainer.js';
@@ -191,7 +191,7 @@ import { urlOverridesEnabled } from './config/urlOverrides.js';
 import { accountBootLoginText, bridgeHttpOrigin, bridgeUrlWithServer, loadWorldDirectory, loginFailureText, type World } from './launcher/worldDirectory.js';
 import { charselWorldName, eraSwitchFor, eraSwitchLogin, launcherEraTarget, launcherLogin, resumableEraSwitch, type LauncherEnter, type LauncherLogin } from './launcher/launcherLogin.js';
 import { EOR_ERA_ID, eraProfile, type DatRole, type EraProfile } from './era/EraProfiles.js';
-import { eraClientRules, unsupportedFeatures, correctedOptionsWord, type EraFeature } from './era/EraFeatures.js';
+import { eraClientRules, unsupportedFeatures, correctedOptionsWord, type EraFeature, type EraClientRules } from './era/EraFeatures.js';
 import { setAgentTownsEra } from './agent/towns.js';
 import { Ac1999World, ac1999SeedSource, ac1999ServerKey, type Ac1999PatchEvent, type Ac1999SeedSource } from './era/Ac1999World.js';
 import { Ac1999PatchProgress } from './era/Ac1999PatchProgress.js';
@@ -358,11 +358,11 @@ import { sweepHeightfield, nearestContact } from './world/MissilePhysics.js';
 import { applyPublicPropertyDataIdUpdate } from './network/applyPublicPropertyDataId.js';
 import { ServerObjectManager, isSequenceNewer, isServerActionNewer1999, applyPublicUpdatePropertyInt, applyPublicUpdatePropertyIntToHudTarget, TRANSLUCENCY_ORIGINAL_KEY } from './world/ServerObjectManager.js';
 import { type AppearanceData, buildAppearanceOverrides, transplantPartChildren } from './models/AppearanceOverrides.js';
-import { attachHeldChild, buildWieldedItemMesh, heldCopiesUnder, heldCopyGuidAt, stripHeldCopies, itemVisualDescOf, wieldedMeshesBuiltWithMiss, WIELDED_PLACEMENT_KEY } from './models/WieldedItemVisual.js';
+import { attachHeldChild, buildWieldedItemMesh, heldCopiesUnder, heldCopyGuidAt, stripHeldCopies, itemVisualDescOf, serverObjectPlacement, wieldedMeshesBuiltWithMiss, WIELDED_PLACEMENT_KEY } from './models/WieldedItemVisual.js';
 import { SelectionLighting, SearchReason, lightingLevelsForMode, applyPlayerModelLighting, type LightingCopies } from './world/SelectionLighting.js';
 import { worldHoverTooltipText } from './ui/WorldHoverTooltip.js';
 import { worldHoverHint1999 } from './ui/HudTooltips.js';
-import { eraLandscapeRadius } from './era/EraWorldRules.js';
+import { eraLandscapeRadius, eraTextureDetail, eraTexturePrefs } from './era/EraWorldRules.js';
 import { selfHitUnderRay } from './world/PickOcclusion.js';
 import { WorldHoverFind } from './controllers/WorldHoverFind.js';
 import { PendingCombatMode, playerInReadyPosition, getAttackTarget, incompatibleCombatModeRefusal, combatModeRefusalReason, READY_WEAPON_SLOTS, UnconfirmedCombatMode, combatModeOfStance, followModeRefusal, castOnceMagicTaken } from './controllers/CombatModeChange.js';
@@ -453,6 +453,7 @@ import { RefusalReporter, scrubNames } from './telemetry/RefusalReporter.js';
 import { knownObjectNames, pendingRequestDetail, castRefusalDetail, selectionRefusalDetail, CastPressTracker, type RefusalDetail, type PlacedObject } from './telemetry/RefusalTemplates.js';
 import { ObjsendReporter, countReleasedInView, summarizeObjects, type ObjsendSnapshot } from './telemetry/ObjsendReporter.js';
 import { PortalUseReporter, bodyTouchesPortal, isPortalObject, overlapsPortal, ownMovementTouch, type PortalSnapshot, type PortalUseHeld } from './telemetry/PortalUseReporter.js';
+import { accountTag, browserId, realLocalStorage } from './telemetry/LoginTags.js';
 import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, serverIdFromUrl, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
 import { setRenderAdaptConfig, contextAntialias } from './scene/RenderScale.js';
@@ -910,6 +911,10 @@ function refusalWithDetail<T>(detail: () => RefusalDetail | null, f: () => T): T
 let activeEra: EraProfile = eraProfile(EOR_ERA_ID)!;
 // BUG.chat-nonascii-question-mark — the strings we send in the form this era's server reads them.
 setString16Wire(activeEra.stringWire ?? 'windows-1252');
+/** The page's era for a read of the options (its era-defaulted keys: EraClientRules.optionDefaults). */
+function pageOptionsEra(): { id: string; optionDefaults: EraClientRules['optionDefaults'] } {
+  return { id: activeEra.id, optionDefaults: eraClientRules(activeEra).optionDefaults };
+}
 /** The streamed sets of a non-end-of-retail era (eraStreamPlan); null = end of retail (its one `datSet`). */
 let eraWorldStream: EraStreamPlan | null = null;
 let eraDatPlan: EraDatPlan = {
@@ -1362,6 +1367,8 @@ async function main() {
     screen: () => preworldScreen(),
     chargenStep: () => preworldChargenStep(),
     loginRefusals: loginRefusalMemory,
+    // OBS.login-refusal-identity — this browser profile's random id (telemetry/LoginTags.ts).
+    browserId: browserId(realLocalStorage()),
   });
   preworldReporter.install(window, document);
   worldReporter = new WorldReporter({
@@ -1553,7 +1560,9 @@ async function main() {
   const separateWorld = !!eraDatPlan.sources.worldPortal;
   // Its own world set (published for the era: eraDatSets), else its whole world portal + cell.
   const worldSet = separateWorld ? eraWorldStream?.world ?? null : null;
-  const wantsHighRes = GameUI.readPersistedOptionsSettings().environmentTextureDetail === 0;
+  // Very High, and only where the era's client had the HiFi DAT (not 1999: EraWorldRules.textureDetailMenu).
+  const wantsHighRes = eraTextureDetail(eraClientRules(activeEra).world,
+    GameUI.readPersistedOptionsSettings(pageOptionsEra()).environmentTextureDetail) === 0;
   // The whole DATs this boot downloads: the interface's without an interface
   // set; the world's without a set serving it.
   const worldWhole = separateWorld ? !worldSet : !runtimeConfig.datSet;
@@ -1629,17 +1638,20 @@ async function main() {
     // Fixed for the page load (an era switch reloads), and set before the first texture or light.
     const eraWorld = eraClientRules(activeEra).world;
     textureSamplerPrefs.setSamplingRule(eraWorld.textureSampling);
+    // 1999's texture-resolution shifts {0, 1, 2, 4} (EraWorldRules.textureDetailMenu); null elsewhere.
+    textureSamplerPrefs.setEnvironmentShifts(eraWorld.textureDetailMenu);
     lightColourRule.value = eraWorld.lightColour;
-    const persisted = GameUI.readPersistedOptionsSettings();
+    const persisted = GameUI.readPersistedOptionsSettings(pageOptionsEra());
     // webac#23 — the landscape detail texture pass, only in an era whose client had it (1999's
     // Performance panel "Detail Texture: Landscape", default off); set before any terrain material.
     detailTexturing.setLandscapeRule(eraWorld.landscapeDetailTextures);
     detailTexturing.setLandscapeEnabled(persisted.landscapeDetailTextures === true);
-    textureSamplerPrefs.set({
+    // The era's own defaults (1999: Full, EraClientRules.optionDefaults) and menu (no Very High on 1999).
+    textureSamplerPrefs.set(eraTexturePrefs(eraWorld, {
       textureFiltering: persisted.textureFiltering,
       landscapeTextureDetail: persisted.landscapeTextureDetail,
       environmentTextureDetail: persisted.environmentTextureDetail,
-    });
+    }));
   }
 
   // Replace black screen with real DAT-driven PatchField layout
@@ -2193,11 +2205,12 @@ async function main() {
   const textureManager = new TextureManager(worldPortalDb, 2048, 4096, sharedPortal ? highResDb : null);
   const uiTextureManager = sharedPortal ? textureManager : new TextureManager(uiPortalDb, 2048, 4096, highResDb);
   highResMounters.push((db) => uiTextureManager.setHighResDb(db));
-  // CORE.17.h.g.c.b — Render.BuildingDetailTextures (default ON) is applied
-  // before the first detail material compiles; GameUI's toggle arrives
-  // through setDetailTexturing below, the region's surfaces through
-  // loadSurfaces once the RegionDesc TexMerge is parsed.
-  detailTexturing.setEnabled(GameUI.readPersistedOptionsSettings().buildingDetailTextures !== false);
+  // CORE.17.h.g.c.b — Render.BuildingDetailTextures is applied before the
+  // first detail material compiles; GameUI's toggle arrives through
+  // setDetailTexturing below, the region's surfaces through loadSurfaces
+  // once the RegionDesc TexMerge is parsed. Its default is the era's (on in
+  // end of retail, off in 1999: EraClientRules.optionDefaults).
+  detailTexturing.setEnabled(GameUI.readPersistedOptionsSettings(pageOptionsEra()).buildingDetailTextures !== false);
   // GAP.84 — DAT-sourced world cursor (Default/Combat/Spellcast bitmaps,
   // see CursorManager.ts for the retail UICURSOR DidMapper citation).
   // The world portal's textures too: the 1999 Break cursor 0x0600144f is there, not in the interface portal.
@@ -2965,7 +2978,8 @@ async function main() {
    * BeginScene on every draw). Returns whether anything changed.
    */
   function setTexturePrefs(prefs: Partial<Record<keyof TexturePrefValues, unknown>>): boolean {
-    const changed = textureSamplerPrefs.set(prefs);
+    // As the era draws them: a 1999 world never asks for Very High (EraWorldRules.textureDetailMenu).
+    const changed = textureSamplerPrefs.set(eraTexturePrefs(eraRules.world, prefs));
     if (changed) {
       const v = textureSamplerPrefs.values;
       console.log(`[AC] Texture prefs → filtering ${v.textureFiltering}, landscape detail ${v.landscapeTextureDetail}`
@@ -3101,6 +3115,8 @@ async function main() {
   /** The player's resolved motion table (the examine figure's pose source). */
   let playerMotionTableId = 0;
   let playerSetupId: number = 0; // server-reported setup model id, set when player model is built
+  /** The own CreateObject's placement frame (serverObjectPlacement): its parts keep it across ObjDesc / streamed rebuilds. */
+  let playerPlacement: number = PLACEMENT_RESTING;
   // BUG.fall-detection-step-down-height-hardcoded-human — per-character
   // ground-contact threshold (Setup.StepDownHeight * Scale.Z, ACE
   // PartArray.cs:240), set alongside playerSetupId. Falls back to the
@@ -3272,7 +3288,7 @@ async function main() {
     playerAppearanceHold.request(
       () => {
         const ov = buildAppearanceOverrides(data, (id) => appearanceManager.loadPaletteColors(id));
-        const rebuilt = setupModelRenderer.createSetupMeshWithOverrides(setupId, 0, ov.partChanges, ov.perPartTextureOverrides, ov.paletteColors);
+        const rebuilt = setupModelRenderer.createSetupMeshWithOverrides(setupId, playerPlacement, ov.partChanges, ov.perPartTextureOverrides, ov.paletteColors);
         if (!rebuilt) console.warn(`[AC] Own ObjDescEvent: rebuild of setup 0x${setupId.toString(16)} failed — appearance unchanged`);
         return rebuilt;
       },
@@ -3318,7 +3334,7 @@ async function main() {
     // a miss here schedules the next attempt there, bounded.
     const rebuilt = ((): THREE.Group | null => {
       const ov = buildAppearanceOverrides(app, (id) => appearanceManager.loadPaletteColors(id));
-      return setupModelRenderer.createSetupMeshWithOverrides(setupId, PLACEMENT_RESTING, ov.partChanges, ov.perPartTextureOverrides, ov.paletteColors);
+      return setupModelRenderer.createSetupMeshWithOverrides(setupId, playerPlacement, ov.partChanges, ov.perPartTextureOverrides, ov.paletteColors);
     })();
     if (!rebuilt || !playerModel) return;
     physicsScriptPlayer.transferParts(playerModel, transplantPartChildren(playerModel, rebuilt));
@@ -3462,6 +3478,9 @@ async function main() {
     // RECON.wielded-item-objdesc — the item's own setup, scale and ObjDesc.
     const visual = item && itemVisualDescOf({
       ...item, objScale: item.physics?.scale,
+      // webac#26: whether its CreateObject carried Movement decides its placement fallback
+      initialMotion: item.createData?.initialMotion,
+      hasMovement: item.createData?.hasMovement,
       // the item's own server translucency, kept on its (hidden) world mesh
       translucency: (item.mesh?.userData[TRANSLUCENCY_ORIGINAL_KEY] as number | undefined) ?? 0,
     });
@@ -6850,6 +6869,9 @@ async function main() {
   gameUI.setClientRules(eraRules);
   // webac#18 — Enable Decal Plugins: this era's kept choice, else its default (off in AC1999).
   gameUI.setDecalPluginsEra(activeEra.id);
+  // BUG.ac1999-environment-detail-default — the era-defaulted preferences (Environment Detail
+  // Textures: off in 1999) from this era's own entry, else its client's default.
+  gameUI.setOptionsEra(activeEra.id);
 
   // FAITHFUL.270 — restore the persisted logging-on state's HUD indicator.
   // (gameUI exists now; setIndicatorActive is a no-op until indicators are
@@ -8581,7 +8603,8 @@ async function main() {
   const sessionLiveness = new SessionLiveness();
   reportConnectAttempts(aceConnection, (account, password) => {
     sessionLiveness.noteConnectAttempt();
-    preworldReporter?.connectAttempt();
+    // OBS.login-refusal-identity — the attempt's salted world + account tag (never the account itself).
+    preworldReporter?.connectAttempt(accountTag(connectUrl, account));
     // OBS.login-after-refusal — the credentials as typed (connect()'s arguments; the connection applies the
     // password's wire case itself), so a case retry (LoginCaseFallback) is not a changed password.
     void loginRefusalMemory.attempt(connectUrl, account, password);
@@ -8605,6 +8628,7 @@ async function main() {
     sessionLive: () => aceConnection.isConnected,
   });
   accountTabGuard.watch(aceConnection, () => (aceAccount ? accountSessionKey(connectUrl, aceAccount) : null));
+  preworldReporter?.setTabId(accountTabGuard.tabId);
   // Disable auto-reconnect — prevents cascading duplicate sessions
   aceConnection.autoReconnect = false;
   // Clean up on page unload to prevent zombie WebSocket connections
@@ -8757,7 +8781,7 @@ async function main() {
   let loginHolderRefusal: { event: ConnectionEvent; notice: ConnectionNotice; passOn?: () => void } | null = null;
   const loginHolderWait = new LoginHolderWait({
     resuming: () => sessionLifecycle.resumingAfterDrop,
-    queryHolders: () => (aceAccount ? accountTabGuard.queryAccountHolders(accountSessionKey(connectUrl, aceAccount)) : Promise.resolve([])),
+    queryHolders: () => (aceAccount ? accountTabGuard.queryAccountHoldersDetailed(accountSessionKey(connectUrl, aceAccount)) : Promise.resolve([])),
     requestLogout: (holder) => !!aceAccount && accountTabGuard.requestLogoutForLogin(holder, accountSessionKey(connectUrl, aceAccount)),
     confirm: (text, onAnswer) => { gameUI.showConfirmationDialog(text, onAnswer); return () => gameUI.hideConfirmationDialog(); },
     login: () => {
@@ -8771,7 +8795,7 @@ async function main() {
       const r = loginHolderRefusal;
       loginHolderRefusal = null;
       if (!r || gameStarted) return;
-      preworldReporter?.connectionError(r.event, r.notice.token || null, { heldByTab: loginHolderWait.heldByTab });
+      preworldReporter?.connectionError(r.event, r.notice.token || null, loginHolderWait.telemetryFor(r.notice.token));
       raiseNetError(r.notice, text ?? undefined);
     },
     passOn: () => {
@@ -8779,7 +8803,7 @@ async function main() {
       loginHolderRefusal = null;
       if (!r || gameStarted) return;
       if (r.passOn) r.passOn();
-      else { preworldReporter?.connectionError(r.event, r.notice.token || null); raiseNetError(r.notice); }
+      else { preworldReporter?.connectionError(r.event, r.notice.token || null, loginHolderWait.telemetryFor(r.notice.token)); raiseNetError(r.notice); }
     },
     stillWaiting: () => !launcherActive && !gameStarted,
     report: (kind) => preworldReporter?.loginHeld(kind),
@@ -12421,8 +12445,9 @@ async function main() {
             : (data.propertiesString?.get(APPRAISAL_1999_STRING.spellNames) ?? '').split(', ').filter((n) => n && n !== 'Unknown'),
           spellIds: [...(data.spellBook ?? [])], activeSpellIds: [...(data.activeEnchantments ?? [])], at: performance.now(),
           // A launcher's range (WeaponProfile MaxVelocity; the agent's ranged attack reads it). A failed appraisal's
-          // profile says Unknown (WeaponTime < 0), and its velocity is no stat.
-          ...(data.weaponProfile && data.weaponProfile.weaponTime >= 0 && data.weaponProfile.maxVelocity > 0 ? { maxVelocity: data.weaponProfile.maxVelocity } : {}),
+          // profile says Unknown (WeaponTime < 0), and its velocity is no stat. ACE's 1.0 / GDLE's 0 "no velocity
+          // stored" placeholder is the 20 m/s those servers throw with (appraisedMissileVelocity), not a 0.1 m reach.
+          ...(data.weaponProfile && data.weaponProfile.weaponTime >= 0 ? { maxVelocity: appraisedMissileVelocity(data.weaponProfile.maxVelocity, data.weaponProfile.maxVelocityEstimated ?? 0) } : {}),
         });
         // Opportunistically cache the item's setupId — gives future
         // equipped-item viz (UI.56 placeholder → real mesh) a path to
@@ -19282,9 +19307,12 @@ async function main() {
                 playerAppearance = obj;
                 playerSetupId = obj.setupId;
                 const priorModel = playerModel;
+                // BUG.server-object-placement-default-vs-set-description — the
+                // placement set_description leaves (Resting: the player's desc carries Movement).
+                playerPlacement = serverObjectPlacement(obj);
                 playerModel = streamedPlayerBuild(() => setupModelRenderer.createSetupMeshWithOverrides(
                   obj.setupId,
-                  0,  // default placement
+                  playerPlacement,
                   ov.partChanges,
                   ov.perPartTextureOverrides,
                   ov.paletteColors,
@@ -19704,7 +19732,7 @@ async function main() {
               if (!gameStarted && event.serverNetError && loginCase.onRefused(netNotice.token, acePassword)) {
                 syncLoginProfile();
                 // UX.login-case-remember — or the remembered as-typed form refused: once lowercased.
-                preworldReporter?.loginRetry(event, netNotice.token || null, 1, loginCase.retryKind, { heldByTab: loginHolderWait.heldByTab });
+                preworldReporter?.loginRetry(event, netNotice.token || null, 1, loginCase.retryKind, loginHolderWait.telemetryFor(netNotice.token));
                 console.log(loginCase.current === 'verbatim'
                   ? `[AC] ACE: "${netNotice.text}" with the password lowercased as retail sends it — trying it as typed`
                   : `[AC] ACE: "${netNotice.text}" with the password as typed (remembered from an earlier login) — trying it lowercased`);
@@ -19726,7 +19754,7 @@ async function main() {
                 void provenLoginRetry.onRefused(creds, netNotice.token, { firstTime }).then((verdict) => {
                   if (gameStarted) return;
                   if (verdict.retry) {
-                    preworldReporter?.loginRetry(event, netNotice.token || null, verdict.attempt, verdict.kind, { heldByTab: loginHolderWait.heldByTab });
+                    preworldReporter?.loginRetry(event, netNotice.token || null, verdict.attempt, verdict.kind, loginHolderWait.telemetryFor(netNotice.token));
                     const why = verdict.kind === 'proven' ? 'a login this page already got in with' : `a first-time login on ${launcherWorld?.emu ?? 'GDLE'}`;
                     console.log(`[AC] ACE: "${netNotice.text}" for ${why} — retrying in ${verdict.delayMs} ms (attempt ${verdict.attempt})`);
                     if (provenLoginRetryTimer !== null) clearTimeout(provenLoginRetryTimer);
@@ -19739,7 +19767,7 @@ async function main() {
                     }, verdict.delayMs);
                     return;
                   }
-                  preworldReporter?.connectionError(event, netNotice.token || null, { heldByTab: loginHolderWait.heldByTab });
+                  preworldReporter?.connectionError(event, netNotice.token || null, loginHolderWait.telemetryFor(netNotice.token));
                   raiseNetError(netNotice);
                 });
                 return true;
@@ -19752,7 +19780,7 @@ async function main() {
               loginHolderRefusal = null;
             }
             if (goOnRefused()) break;
-            if (!gameStarted) preworldReporter?.connectionError(event, netNotice.token || null);
+            if (!gameStarted) preworldReporter?.connectionError(event, netNotice.token || null, loginHolderWait.telemetryFor(netNotice.token));
             // BUG.world-list-unreachable — a launcher login whose socket to our bridge never opened:
             // the bridge has no trace of it, so report it through the web origin (once per login).
             if (!gameStarted && launcherLoginAt !== null) {

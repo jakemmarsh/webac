@@ -60,6 +60,12 @@ export const LOGIN_RETRY_KINDS = ['proven', 'first_time', 'case_verbatim', 'case
  * (navigator.onLine was false). Absent on an ordinary failed open.
  */
 export const CONNECT_FAILED_CAUSES = ['open_timeout', 'offline'] as const;
+/** OBS.login-refusal-identity — whether the page asked its other tabs who holds the refused account. */
+export const HOLDER_QUERY_STATES = ['ran', 'skipped', 'no_channel'] as const;
+/** The outcomes that carry acct / bid / tab. */
+const IDENTITY_OUTCOMES: ReadonlySet<string> = new Set(['login_retry', 'login_refused', 'char_list', 'login_held']);
+/** The bound on the holder-query counts (tabs of one browser). */
+const MAX_HOLDER_TABS = 64;
 
 export const CHARGEN_STEPS = ['heritage', 'profession', 'skills', 'appearance', 'town', 'summary'] as const;
 
@@ -167,6 +173,27 @@ export interface ClientPreworldEvent {
    * refused. Absent otherwise.
    */
   heldByTab?: true;
+  /**
+   * OBS.login-refusal-identity — 'login_refused' / 'login_retry' / 'char_list'
+   * / 'login_held' only (renderer telemetry/LoginTags.ts): `acct` 8 hex of a
+   * salted SHA-256 of world + case-folded account (matches events of one
+   * account on one world; never the account), `bid` a random id per browser
+   * profile (8 hex), `tab` the page's AccountTabGuard id (≤ 40 chars).
+   */
+  acct?: string;
+  bid?: string;
+  tab?: string;
+  /**
+   * OBS.login-refusal-identity — 'login_refused' / 'login_retry' only, on an
+   * account-in-use or "Client logon failed" refusal: whether the page asked
+   * its other tabs who holds the account (HOLDER_QUERY_STATES), and with
+   * 'ran' how many held it, how many tabs answered at all (older builds never
+   * answer: a lower bound) and how many hold it with a closed session.
+   */
+  holderQuery?: typeof HOLDER_QUERY_STATES[number];
+  holders?: number;
+  tabs?: number;
+  holdersClosed?: number;
   /** 'connect_failed' only: the network was out (CONNECT_FAILED_CAUSES). */
   why?: typeof CONNECT_FAILED_CAUSES[number];
   /**
@@ -269,6 +296,8 @@ export function sanitizeClientPreworld(body: unknown): ClientPreworldEvent | nul
     ...(outcome === 'handover' ? handoverFields(b) : {}),
     ...(outcome === 'login_retry' ? loginRetryField(b.retry) : {}),
     ...(outcome === 'login_refused' || outcome === 'login_retry' ? heldByTabField(b.heldByTab) : {}),
+    ...(outcome === 'login_refused' || outcome === 'login_retry' ? holderQueryFields(b) : {}),
+    ...(IDENTITY_OUTCOMES.has(outcome) ? identityFields(b) : {}),
     ...(outcome === 'char_list' ? afterRefusalField(b.afterRefusal) : {}),
     ...(outcome === 'connect_failed' ? connectFailedWhyField(b.why) : {}),
     ...(outcome === 'chargen_ok' || outcome === 'chargen_refused' ? heritageField(b.heritage) : {}),
@@ -318,6 +347,25 @@ export function connectFailedWhyField(v: unknown): Pick<ClientPreworldEvent, 'wh
 /** `{ heldByTab: true }` when it is exactly true, else nothing. */
 export function heldByTabField(v: unknown): Pick<ClientPreworldEvent, 'heldByTab'> {
   return v === true ? { heldByTab: true } : {};
+}
+
+/** `{ acct, bid, tab }`, each only when well formed (8 hex / 8 hex / ≤ 40 of [A-Za-z0-9-]). */
+export function identityFields(b: Record<string, unknown>): Pick<ClientPreworldEvent, 'acct' | 'bid' | 'tab'> {
+  const acct = match(b.acct, /^[0-9a-f]{8}$/);
+  const bid = match(b.bid, /^[0-9a-f]{8}$/);
+  const tab = match(b.tab, /^[A-Za-z0-9-]{1,40}$/);
+  return { ...(acct ? { acct } : {}), ...(bid ? { bid } : {}), ...(tab ? { tab } : {}) };
+}
+
+/** `{ holderQuery }` (a known state), with its three counts when 'ran' and all in bounds; else nothing. */
+export function holderQueryFields(b: Record<string, unknown>): Pick<ClientPreworldEvent, 'holderQuery' | 'holders' | 'tabs' | 'holdersClosed'> {
+  const holderQuery = pick(b.holderQuery, HOLDER_QUERY_STATES);
+  if (!holderQuery) return {};
+  if (holderQuery !== 'ran') return { holderQuery };
+  const holders = uint(b.holders, MAX_HOLDER_TABS);
+  const tabs = uint(b.tabs, MAX_HOLDER_TABS);
+  const holdersClosed = uint(b.holdersClosed, MAX_HOLDER_TABS);
+  return holders === null || tabs === null || holdersClosed === null ? { holderQuery } : { holderQuery, holders, tabs, holdersClosed };
 }
 
 /** `{ retry }` when it is a known LOGIN_RETRY_KINDS value, else nothing. */

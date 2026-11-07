@@ -80,7 +80,7 @@
  * and heldByTab on the login_refused / login_retry that follow.
  */
 
-import type { WorldHolder } from './AccountTabGuard.js';
+import type { AccountHolderQuery, WorldHolder } from './AccountTabGuard.js';
 
 /** The login refusals that mean "this account is logged in already" (NetError tokens). */
 export const ACCOUNT_IN_USE_LOGIN_TOKENS: ReadonlySet<string> = new Set([
@@ -133,14 +133,34 @@ export function stoodDownForOtherTabText(retailText: string): string {
   return `${retailText}\n\nThis account logged in in another tab of this browser.`;
 }
 
+/**
+ * OBS.login-refusal-identity — what the login_refused / login_retry of an
+ * account-in-use or "Client logon failed" refusal carry about the tabs:
+ * whether this connect cycle asked them ('ran'), did not ('skipped': a
+ * resume of our own session, no account), or could not ('no_channel': no
+ * BroadcastChannel), how many held the account (holders), how many answered
+ * at all (tabs, a lower bound: older builds never ack) and how many hold it
+ * with a closed session (holdersClosed).
+ */
+export interface LoginHolderTelemetry {
+  heldByTab?: boolean;
+  holderQuery?: 'ran' | 'skipped' | 'no_channel';
+  holders?: number;
+  tabs?: number;
+  holdersClosed?: number;
+}
+
 /** What LoginHolderWait reports (telemetry): what the tabs answered, and how it ended. */
 export type LoginHolderReport = 'none' | 'offer-logout' | 'kept' | 'logged-out' | 'spent' | 'silent-none' | 'silent-offer' | 'offer-logon-failed';
 
 export interface LoginHolderWaitDeps {
   /** SessionLifecycle.resumingAfterDrop (or a chargen resume): the refusal is our own session. */
   resuming(): boolean;
-  /** AccountTabGuard.queryAccountHolders for the refused login's key. */
-  queryHolders(): Promise<WorldHolder[]>;
+  /**
+   * AccountTabGuard.queryAccountHoldersDetailed (or queryAccountHolders) for
+   * the refused login's key. A bare list counts as a query that ran.
+   */
+  queryHolders(): Promise<WorldHolder[] | AccountHolderQuery>;
   /** AccountTabGuard.requestLogoutForLogin under the refused login's key. */
   requestLogout(holder: WorldHolder): boolean;
   /** Yes / No over the connecting screen; returns a close for the dialog. */
@@ -181,6 +201,8 @@ export class LoginHolderWait {
   /** The tabs were asked about a "Client logon failed" this connect cycle (once a cycle). */
   private logonFailedAsked = false;
   private held = false;
+  /** What this connect cycle's holder query heard (telemetry), null when none ran. */
+  private lastQuery: Omit<AccountHolderQuery, 'holders'> & { holders: number } | null = null;
 
   constructor(private readonly deps: LoginHolderWaitDeps) {}
 
@@ -195,6 +217,20 @@ export class LoginHolderWait {
    * connect cycle (telemetry: heldByTab on login_refused / login_retry).
    */
   get heldByTab(): boolean { return this.held; }
+
+  /**
+   * OBS.login-refusal-identity — the tab fields for a login_refused /
+   * login_retry refused with `token`: heldByTab always; for an account-in-use
+   * or "Client logon failed" token, also what this cycle's holder query heard.
+   */
+  telemetryFor(token: string | null | undefined): LoginHolderTelemetry {
+    const out: LoginHolderTelemetry = { heldByTab: this.held };
+    if (token !== LOGON_FAILED_LOGIN_TOKEN && !(token && ACCOUNT_IN_USE_LOGIN_TOKENS.has(token))) return out;
+    const q = this.lastQuery;
+    if (!q) return { ...out, holderQuery: 'skipped' };
+    if (!q.channel) return { ...out, holderQuery: 'no_channel' };
+    return { ...out, holderQuery: 'ran', holders: q.holders, tabs: q.tabs, holdersClosed: q.holdersClosed };
+  }
 
   /**
    * A login refused with `token` (a NetError token) whose retail text is
@@ -265,6 +301,7 @@ export class LoginHolderWait {
     this.kind = 'in-use';
     this.logonFailedAsked = false;
     this.held = false;
+    this.lastQuery = null;
     this.closeOffer?.();
     this.closeOffer = null;
   }
@@ -279,9 +316,13 @@ export class LoginHolderWait {
   private ask(retailText: string, silent = false): void {
     const serial = this.serial;
     this.asking = true;
-    void this.deps.queryHolders().then((holders) => {
+    void this.deps.queryHolders().then((answer) => {
       if (serial !== this.serial) return;
       this.asking = false;
+      const holders = Array.isArray(answer) ? answer : answer.holders;
+      this.lastQuery = Array.isArray(answer)
+        ? { holders: answer.filter((h) => h.sameAccount).length, tabs: answer.length, holdersClosed: 0, channel: true }
+        : { holders: answer.holders.length, tabs: answer.tabs, holdersClosed: answer.holdersClosed, channel: answer.channel };
       if (!this.deps.stillWaiting()) return;
       const holder = holders.find((h) => h.sameAccount);
       const logonFailed = this.kind === 'logon-failed';

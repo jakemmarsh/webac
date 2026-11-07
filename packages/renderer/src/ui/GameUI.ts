@@ -65,6 +65,7 @@ import { renderVvsText, vvsFieldStyle, VVS_COLORS, VVS_TAB_PX } from './automati
 import { renderUbMainWindow, UB_MAIN_SIZE, type UbMainSource } from './automation/UbMainWindow.js';
 import { renderVvsBar, VVS_BAR, type VvsBarEntry } from './automation/VvsBar.js';
 import { DECAL_PLUGINS_LABEL, DECAL_PLUGINS_OPTION_KEY, readDecalPlugins, writeDecalPlugins } from './automation/DecalPlugins.js';
+import { eraCharacterPageDefaults, readEraOptionValues, writeEraOptionValues, type OptionsEra } from './EraOptionPrefs.js';
 import { UB_ICON_PNG } from './automation/ubIcon.js';
 import { redrawKeepingFocus } from './automation/keepFocus.js';
 import { VTANK_ICON_PNG, VHS_ICON_PNG, VIRINDI_UIS_ICON_PNG, VCS_ICON_PNG, SPLITPEA_ICON_PNG } from './automation/virindiIcons.js';
@@ -264,10 +265,10 @@ import {
   hiddenBy, FEATURE_PANELS, FEATURE_TOOLBAR_BUTTONS, FEATURE_CHARACTER_OPTIONS, FEATURE_CHAT_FILTERS,
   FEATURE_TALK_FOCUSES, FEATURE_KEYBIND_ACTIONS, FEATURE_SOCIAL_TABS, clientRuleHiddenActions, type EraFeature,
   FEATURE_WORLD_TABS, FEATURE_INDICATORS, FEATURE_COMPONENT_CONTROLS, FEATURE_FELLOWSHIP_CONTROLS, FELLOWSHIP_PANE_OPTIONS,
-  eraClientRules, resolveClientText, EOR_TRAIN_SKILL_CONFIRM, type EraClientRules, type ClientText,
+  eraClientRules, resolveClientText, EOR_TRAIN_SKILL_CONFIRM, ERA_DEFAULTED_OPTION_KEYS, type EraClientRules, type ClientText,
 } from '../era/EraFeatures.js';
 import { EncumbranceNotice, type EncumbranceNoticeRules } from './EncumbranceNotice.js';
-import { ERA_OPTIONAL_UI_SOUNDS, landscapeDetailTexturesOption, landscapeDrawDistanceOption, landscapeMinAmbient, textureFilteringOption, trimChatLog } from '../era/EraWorldRules.js';
+import { ERA_OPTIONAL_UI_SOUNDS, eraTextureDetail, eraTexturePrefs, landscapeDetailTexturesOption, landscapeDrawDistanceOption, landscapeMinAmbient, textureFilteringOption, trimChatLog } from '../era/EraWorldRules.js';
 import { ACFontRenderer, OUTLINE_NEIGHBOUR_OFFSETS } from './ACFontRenderer.js';
 import { placeScrollbarButtons, bindHotClick, hotClickTiming, buttonVisualState } from './ScrollbarButtons.js';
 import { outlineCssFromArgb, DEFAULT_TEXT_OUTLINE_ARGB } from './TextOutline.js';
@@ -1825,6 +1826,13 @@ export class GameUI {
   private chargenArtDeferred: ((texId: number) => boolean) | null = null;
   private onChargenArtWanted: (() => void) | null = null;
   private chargenAwaitingWorldArt = false;
+  /**
+   * UX.chargen-click-during-texture-load — bumped by each queued chargen open
+   * and by everything that ends character select's claim on it (an enter, a
+   * new connect, the launcher, the world, the Disconnected screen, a
+   * CharacterError's new mode): a stale queued open does nothing.
+   */
+  private chargenOpenGen = 0;
 
   // BUG.shortcut-bar-restore-dropped / CORE.5.b.d — the 18 item-shortcut
   // toolbar slot DOM elements (index-aligned; two rows of 9 per the classic
@@ -3180,7 +3188,7 @@ export class GameUI {
       environmentTextureDetail: 1,      // Render.EnvironmentTextureDetail values [4,3,2,1,0] → 1 = High
       textureFiltering: 1,              // Render.TextureFiltering (index values) → 1 = Trilinear
       landscapeDrawDistance: 8,         // Render.LandscapeDrawDistance values [3,5,8,11,15,25] landblocks → 8 = Medium
-      buildingDetailTextures: true,     // AddToggleOption(Render_BuildingDetailTextures) → SetDefaultValue(1)
+      buildingDetailTextures: true,     // AddToggleOption(Render_BuildingDetailTextures) → SetDefaultValue(1); 1999: off (EraClientRules.optionDefaults), kept per era
       // webac#23 — 1999 only (EraWorldRules.landscapeDetailTextures): the Performance panel's
       // "Detail Texture: Landscape" checkbox, off by default (the render-options defaults @ 0x42c236).
       landscapeDetailTextures: false,
@@ -3346,28 +3354,51 @@ export class GameUI {
    * m_RenderPrefs.LandscapeDrawDistance before the first frame. Always a
    * fresh copy merged over the defaults; unknown / mistyped keys are dropped.
    */
-  static readPersistedOptionsSettings(): Record<string, boolean | number | string> {
+  static readPersistedOptionsSettings(era?: OptionsEra): Record<string, boolean | number | string> {
     const DEFAULTS = GameUI.OPTIONS_DEFAULTS;
+    // CORE.17.h.a — a COPY: returning the static dict itself aliased it as
+    // the live settings on a first session (no cache yet), so every slider
+    // drag rewrote OPTIONS_DEFAULTS and the footer "Defaults" button then
+    // restored the mutated values instead of the DAT/retail ones.
+    const merged: Record<string, boolean | number | string> = { ...DEFAULTS, ...GameUI.FRESH_PROFILE_OVERRIDES };
+    let legacy: Record<string, unknown> | null = null;
     try {
       const raw = localStorage.getItem('ac_options_settings_v1');
       if (raw) {
         // CORE.17.h.f — re-express a pre-retail-units blob before merging.
         const stored = GameUI.migrateLegacyConfigUnits(JSON.parse(raw) as Record<string, unknown>);
-        const merged: Record<string, boolean | number | string> = { ...DEFAULTS, ...GameUI.FRESH_PROFILE_OVERRIDES };
+        legacy = stored;
         for (const [k, v] of Object.entries(stored)) {
           // Only accept primitive types that match the default value type.
           const def = DEFAULTS[k];
           if (def === undefined) continue;
           if (typeof v === typeof def) merged[k] = v as boolean | number | string;
         }
-        return merged;
       }
     } catch { /* corrupted JSON — fall through to defaults */ }
-    // CORE.17.h.a — a COPY: returning the static dict itself aliased it as
-    // the live settings on a first session (no cache yet), so every slider
-    // drag rewrote OPTIONS_DEFAULTS and the footer "Defaults" button then
-    // restored the mutated values instead of the DAT/retail ones.
-    return { ...DEFAULTS, ...GameUI.FRESH_PROFILE_OVERRIDES };
+    // BUG.ac1999-environment-detail-default — the era-defaulted keys come from the era's own entry
+    // (ui/EraOptionPrefs.ts): its stored value, a definite choice left in the shared blob, else the
+    // era client's default. Without an era (before it is known) they read as above.
+    if (era) Object.assign(merged, GameUI.readEraOptions(era, legacy));
+    return merged;
+  }
+
+  /** The era-defaulted keys' values for `era` (EraClientRules.optionDefaults; ui/EraOptionPrefs.ts). */
+  private static readEraOptions(era: OptionsEra, legacy: Readonly<Record<string, unknown>> | null): Record<string, boolean | number | string> {
+    return readEraOptionValues(GameUI.browserStorage, era.id, ERA_DEFAULTED_OPTION_KEYS, era.optionDefaults, GameUI.OPTIONS_DEFAULTS, legacy);
+  }
+
+  /** The shared blob's own values of the era-defaulted keys (written by earlier builds), carried untouched on every save. */
+  private static readLegacyEraOptions(): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    try {
+      const raw = localStorage.getItem('ac_options_settings_v1');
+      const stored = raw ? JSON.parse(raw) as Record<string, unknown> : null;
+      if (stored && typeof stored === 'object') {
+        for (const k of ERA_DEFAULTED_OPTION_KEYS) if (Object.prototype.hasOwnProperty.call(stored, k)) out[k] = stored[k];
+      }
+    } catch { /* corrupted JSON — nothing to carry */ }
+    return out;
   }
 
   /**
@@ -3747,6 +3778,7 @@ export class GameUI {
       position: 'fixed', top: '0', left: '0', width: '100%', height: '100%',
       zIndex: zLayer(ZLayer.PANEL_BASE), pointerEvents: 'auto',
     });
+    this.keepCharSelectPressAcrossRedraw();
 
     this.hudContainer = document.createElement('div');
     this.hudContainer.id = 'game-hud';
@@ -4939,11 +4971,11 @@ export class GameUI {
    * clipped bottom-up (meter direction 4) to
    * Clamp(structure/maxStructure, 0, 1); hidden when maxStructure is 0 or
    * the ratio is exactly 1.0. Full mechanism + citations in
-   * ui/structureBar.ts.
+   * ui/structureBar.ts. Every era (webac#25): the 1999 UI_Item update
+   * @ 0x004e6ed0 builds the same 5x30 meter child at (0x1a,1) from the
+   * weenie's _structure / _maxStructure, hidden at exactly 1.0.
    */
   buildStructureBarEl(structure: number | undefined, maxStructure: number | undefined, size: number): HTMLElement | null {
-    // webac#25 — a 1999 world's icons have no meters (EraClientRules.itemIconMeters).
-    if (!this.clientRules.itemIconMeters) return null;
     const bar = this.buildIconMeterEl(structureBarFraction(structure, maxStructure),
       STRUCTURE_BAR_BG_TEXTURE, STRUCTURE_BAR_FILL_TEXTURE, size);
     if (bar) bar.dataset.structureBar = '1';
@@ -4978,7 +5010,6 @@ export class GameUI {
    * capacityBarFraction in ui/structureBar.ts.
    */
   buildCapacityBarEl(itemsCapacity: number | undefined, containedItems: number, size: number): HTMLElement | null {
-    if (!this.clientRules.itemIconMeters) return null;
     const bar = this.buildIconMeterEl(capacityBarFraction(itemsCapacity, containedItems),
       CAPACITY_BAR_BG_TEXTURE, CAPACITY_BAR_FILL_TEXTURE, size);
     if (bar) bar.dataset.capacityBar = '1';
@@ -6012,6 +6043,7 @@ export class GameUI {
     // launcher, a dialog left over a dropped world) and its status line go.
     this.hideConfirmationDialog();
     this.hideMessageDialog();
+    this.cancelQueuedChargenOpen();
     this.connectingStatus = null;
     this.connectingMode = true;
     this.selectedAvatarId = undefined;
@@ -6047,6 +6079,7 @@ export class GameUI {
         return () => { this.filesArrivedListeners.delete(cb); };
       },
       prepareScreen: () => {
+        this.cancelQueuedChargenOpen();
         this.connectingMode = false;
         this.uiManager.setScreen('character-select');
         this.charselHandle?.destroy();
@@ -6129,12 +6162,21 @@ export class GameUI {
     // (playwebac.com, 2026-10-08). STREAM.login-pack-split: with a split world
     // pack it waits for character creation's own pack (asked for first now),
     // not the landscape's.
+    // UX.chargen-click-during-texture-load: retail opened chargen on the click
+    // itself (0x100003a0 → QueueUIMode(0x1000000b) @ 0x004ed721; 1999's
+    // IntroUI_EnterChargen @ 0x00504da0 → Game_SetUIMode(4)), with no load to
+    // wait for. Ours keeps the click: one queued open, behind the Please Wait,
+    // kept across char-select redraws (renderCharacterSelect re-adds it) and
+    // dropped when the player moves on (cancelQueuedChargenOpen).
     if (this.chargenArtPending) {
       this.onChargenArtWanted?.();
       if (!this.chargenAwaitingWorldArt) {
         this.chargenAwaitingWorldArt = true;
-        this.screenContainer.appendChild(this.buildWaitDialog(CHARGEN_WORLD_ART_WAIT_ID, getString(7426468) ?? 'Please Wait'));
+        const gen = ++this.chargenOpenGen;
+        this.screenContainer.appendChild(this.buildChargenArtWaitDialog());
         const open = () => {
+          // Cancelled (or superseded) meanwhile: the player moved on.
+          if (gen !== this.chargenOpenGen || !this.chargenAwaitingWorldArt) return;
           this.chargenAwaitingWorldArt = false;
           document.getElementById(CHARGEN_WORLD_ART_WAIT_ID)?.remove();
           // BUG.chargen-double-create sweep — the wait belongs to character
@@ -6143,7 +6185,8 @@ export class GameUI {
           const screen = this.uiManager.currentScreen;
           const pending = this.chargenPendingRestore;
           this.chargenPendingRestore = null;
-          if (screen !== 'game' && screen !== 'disconnected' && !this.connectingMode) this.showCharacterCreate(pending);
+          if (screen !== 'game' && screen !== 'disconnected' && !this.connectingMode
+            && !this.screenContainer.querySelector('#charsel-enteringworld')) this.showCharacterCreate(pending);
         };
         this.chargenArtPending.then(open, open);
       }
@@ -6187,6 +6230,88 @@ export class GameUI {
     // applied, so 0 attribute credits) and start area — never Custom/all 10s.
     this.wizard.randomizeCharacter(this.chargenRollDeps(), this.chargenRandomSource);
     this.renderCharacterCreate();
+  }
+
+  /**
+   * UX.chargen-click-during-texture-load sweep — a press on a character-select
+   * button survives a redraw that lands between its pointerdown and pointerup.
+   * renderCharacterSelect rebuilds every button (a ServerName, the 1999
+   * server's news, a CharacterList, a pending-delete countdown, all async),
+   * and a press that went down on the old button and came up on the new one
+   * is no click to the browser: Create / ENTER / DELETE / CREDITS / EXIT did
+   * nothing. Retail's buttons are one UIElement for the screen's life, so the
+   * press always counts (UIElement::MouseUp @ 00463940). When the release
+   * lands on the rebuilt button of the same DAT element (data-ac-press), still
+   * enabled, and no click reached it, it is clicked once, after the
+   * browser's own click would have run (never twice).
+   */
+  private keepCharSelectPressAcrossRedraw(): void {
+    // A button keyed by its DAT element, or a character row keyed by the character (its
+    // double-click enters: EnterGame on message 0x1a, @ 004ed5a0).
+    const pressable = (t: EventTarget | null): { el: HTMLElement; key: string; inert: boolean } | null => {
+      const el = (t as Element | null)?.closest?.('button[data-ac-press], .char-slot[data-char-id]') as HTMLElement | null;
+      if (!el) return null;
+      if (el.tagName === 'BUTTON') return { el, key: `press:${el.dataset.acPress ?? ''}`, inert: (el as HTMLButtonElement).disabled };
+      return { el, key: `char:${el.dataset.charId ?? ''}`, inert: el.dataset.inert === '1' };
+    };
+    let pressed: { el: HTMLElement; key: string } | null = null;
+    // The rescue armed by the last pointerup; its mouseup (same input task) gives the click count.
+    let armed: { detail: number } | null = null;
+    this.screenContainer.addEventListener('pointerdown', (e) => {
+      const p = pressable(e.target);
+      pressed = p && this.uiManager.currentScreen === 'character-select' ? { el: p.el, key: p.key } : null;
+    }, true);
+    this.screenContainer.addEventListener('mouseup', (e) => {
+      if (armed) armed.detail = e.detail;
+    }, true);
+    this.screenContainer.addEventListener('pointerup', (e) => {
+      const p = pressed;
+      pressed = null;
+      armed = null;
+      if (!p || p.el.isConnected) return;
+      const now = pressable(e.target);
+      if (!now || now.el === p.el || now.key !== p.key || now.inert) return;
+      const target = now.el;
+      const rescue = { detail: 1 };
+      armed = rescue;
+      let clicked = false;
+      const seen = (): void => { clicked = true; };
+      target.addEventListener('click', seen, { capture: true, once: true });
+      setTimeout(() => {
+        target.removeEventListener('click', seen, true);
+        if (armed === rescue) armed = null;
+        if (clicked || !target.isConnected || this.uiManager.currentScreen !== 'character-select') return;
+        const again = pressable(target);
+        if (!again || again.inert) return;
+        // The release's own click count: the second click of a double-click on a row still enters.
+        target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: Math.max(1, rescue.detail) }));
+      }, 0);
+    }, true);
+  }
+
+  /** The Please Wait a queued chargen open shows (MakePleaseWaitDialog @ 004eced0, string 7426468). */
+  private buildChargenArtWaitDialog(): HTMLDivElement {
+    return this.buildWaitDialog(CHARGEN_WORLD_ART_WAIT_ID, getString(7426468) ?? 'Please Wait');
+  }
+
+  /** A Create Character click is waiting for chargen's art (tests / probes). */
+  get chargenOpenQueued(): boolean {
+    return this.chargenAwaitingWorldArt;
+  }
+
+  /**
+   * UX.chargen-click-during-texture-load — the player moved on from character
+   * select (entered the world, a new connect, the launcher, the Disconnected
+   * screen, a CharacterError's new mode): the queued chargen open and its
+   * Please Wait go, so the art landing later opens nothing. A later Create
+   * Character click queues afresh.
+   */
+  private cancelQueuedChargenOpen(): void {
+    if (!this.chargenAwaitingWorldArt) return;
+    this.chargenAwaitingWorldArt = false;
+    this.chargenOpenGen++;
+    this.chargenPendingRestore = null;
+    document.getElementById(CHARGEN_WORLD_ART_WAIT_ID)?.remove();
   }
 
   /** UX.chargen-resume — what a draft asked showCharacterCreate for, while it waits on the world art. */
@@ -6273,6 +6398,7 @@ export class GameUI {
   private runtimeDDD: { done: number; total: number } | null = null;
 
   showGame(): void {
+    this.cancelQueuedChargenOpen();
     this.uiManager.setScreen('game');
     this.screenContainer.style.display = 'none';
     // BUG.stale-wait-plate-modal (2026-10-14) — char select's wait dialogs
@@ -6982,6 +7108,8 @@ export class GameUI {
         const slotEl = document.createElement('div');
         slotEl.className = 'char-slot';
         slotEl.dataset.index = i.toString();
+        // keepCharSelectPressAcrossRedraw: the rebuilt row of the same character is the same target.
+        slotEl.dataset.charId = s.id;
         Object.assign(slotEl.style, {
           position: 'relative', width: `${scrollW}px`, height: `${rowH}px`,
           boxSizing: 'border-box', overflow: 'hidden', cursor: 'pointer',
@@ -7008,6 +7136,7 @@ export class GameUI {
         paintRow(false);
         // A 1999 "Temporarily Unavailable" row takes no rollover (it cannot be selected).
         const rowInert = (s.deleteTime ?? 0) > 0 && this.clientRules.world.pendingDeleteRowText !== null;
+        if (rowInert) slotEl.dataset.inert = '1';
         if (!rowInert) {
           slotEl.addEventListener('mouseenter', () => paintRow(true));
           slotEl.addEventListener('mouseleave', () => paintRow(false));
@@ -7312,6 +7441,14 @@ export class GameUI {
     if (this.connectingMode) {
       this.screenContainer.appendChild(this.buildWaitDialog('charsel-pleasewait', this.connectingWaitText()));
     }
+    // UX.chargen-click-during-texture-load — a Create Character click waiting
+    // for chargen's art keeps its Please Wait through a redraw (a ServerName,
+    // the 1999 server's news, a re-sent CharacterList, a pending-delete
+    // countdown). The innerHTML reset above took it away, so the click read
+    // as dropped and the buttons under it took clicks again.
+    if (this.chargenAwaitingWorldArt && !this.connectingMode) {
+      this.screenContainer.appendChild(this.buildChargenArtWaitDialog());
+    }
 
     this.replaceACTextElements(this.screenContainer);
     for (const btn of [createBtn, enterBtn, deleteBtn, creditsBtn, exitBtn]) this.justifyDatButtonLabel(btn);
@@ -7432,6 +7569,8 @@ export class GameUI {
   }
 
   showEnteringWorldDialog(): void {
+    // An enter (ENTER, a double-click, the auto-resume, the agent tools) ends a queued chargen open.
+    this.cancelQueuedChargenOpen();
     if (this.screenContainer.querySelector('#charsel-enteringworld')) return;
     const dlg = this.buildWaitDialog('charsel-enteringworld', getString(50695556) ?? 'Entering World');
     this.screenContainer.appendChild(dlg);
@@ -25043,6 +25182,23 @@ export class GameUI {
     this.applyDecalPlugins(false);
   }
 
+  /** The era whose per-era preferences (ui/EraOptionPrefs.ts) this page reads and keeps (main.ts: the page's EraProfile id). */
+  private optionsEra: string | null = null;
+
+  /**
+   * Set once per page load after setClientRules (BUG.ac1999-environment-detail-default): read this
+   * era's era-defaulted preferences (its entry, a definite choice from the shared blob, else the era
+   * client's default, EraClientRules.optionDefaults) onto the settings and apply them.
+   */
+  setOptionsEra(eraId: string): void {
+    this.optionsEra = eraId;
+    const era: OptionsEra = { id: eraId, optionDefaults: this.clientRules.optionDefaults };
+    Object.assign(this.optionsSettings, GameUI.readEraOptions(era, GameUI.readLegacyEraOptions()));
+    this.applyDetailTexturing();
+    this.applyTexturePrefs();
+    if (this.optionsPanelVisible) this.renderOptionsPanel();
+  }
+
   /** Turn the plugins on or off (the Config row, and tests). */
   setDecalPlugins(on: boolean): void {
     this.optionsSettings[DECAL_PLUGINS_OPTION_KEY] = on;
@@ -29724,10 +29880,7 @@ export class GameUI {
         // GetDefaultOptionValue @ 005d2a30, which is NOT the constructor word
         // for three rows (Show Helm / Show Cloak / Confirm Use of Rare Gems
         // come back OFF) — GameUI.CHARACTER_PAGE_DEFAULTS.
-        const defaults = this.optionsTab === 'character'
-          ? { ...GameUI.OPTIONS_DEFAULTS, ...GameUI.CHARACTER_PAGE_DEFAULTS }
-          : { ...GameUI.OPTIONS_DEFAULTS, [DECAL_PLUGINS_OPTION_KEY]: this.clientRules.decalPlugins };
-        this.applyOptionsBulk(this.pickVisiblePageOptions(defaults));
+        this.applyOptionsBulk(this.pickVisiblePageOptions(this.optionsPageDefaults()));
         // Retail restores only the visible page's options; the Chat page
         // owns the two sliders.
         if (this.optionsTab === 'chat') this.markChatOpacityOptionsPresent(['chatInactiveOpacity', 'chatActiveOpacity']);
@@ -29793,6 +29946,32 @@ export class GameUI {
    * SetSingleCharacterOption for every server-mapped option that changed (so
    * ACE stays in sync, same path as a single toggle), then persists + re-renders.
    */
+  /**
+   * What the visible page's Defaults button restores, in this era. Character page: end of retail's
+   * PlayerModule::GetDefaultOptionValue per row (CHARACTER_PAGE_DEFAULTS), or the options_ word the
+   * era client's Defaults writes (EraClientRules.characterDefaultsWord: 1999's 0xE56A). Other pages:
+   * OPTIONS_DEFAULTS with the era client's own defaults over it (EraClientRules.optionDefaults), and
+   * the rows the era's Defaults leaves alone (configDefaultsKeep) at their current values.
+   */
+  optionsPageDefaults(): Record<string, boolean | number | string> {
+    const rules = this.clientRules;
+    if (this.optionsTab === 'character') {
+      const word = rules.characterDefaultsWord;
+      return {
+        ...GameUI.OPTIONS_DEFAULTS, ...GameUI.CHARACTER_PAGE_DEFAULTS,
+        ...(word !== null && rules.characterOptionsPage ? eraCharacterPageDefaults(rules.characterOptionsPage, word) : {}),
+      };
+    }
+    const defaults: Record<string, boolean | number | string> = {
+      ...GameUI.OPTIONS_DEFAULTS, ...rules.optionDefaults, ...rules.configDefaultsValues,
+      [DECAL_PLUGINS_OPTION_KEY]: rules.decalPlugins,
+    };
+    for (const k of rules.configDefaultsKeep) {
+      if (this.optionsSettings[k] !== undefined) defaults[k] = this.optionsSettings[k];
+    }
+    return defaults;
+  }
+
   private applyOptionsBulk(target: Record<string, boolean | number | string>): void {
     const prev = { ...this.optionsSettings };
     this.optionsSettings = { ...this.optionsSettings, ...target };
@@ -29801,6 +29980,11 @@ export class GameUI {
       const optionCode = GameUI.OPTIONS_TO_CHARACTER_OPTION[key];
       if (optionCode !== undefined && this.callbacks.onCharacterOptionToggle) {
         this.callbacks.onCharacterOptionToggle(optionCode, !!this.optionsSettings[key]);
+      } else {
+        // An era page's own options_ bit (no CharacterOption code: 1999's Automatically Create
+        // Shortcuts / Invert Mouse Look / Right-click mouselook) goes whole, as the row's click does.
+        const eraRow = this.clientRules.characterOptionsPage?.find((o) => o.ourKey === key && o.options1Mask !== undefined);
+        if (eraRow?.options1Mask !== undefined) this.callbacks.onCharacterOptionBits?.(eraRow.options1Mask, !!this.optionsSettings[key]);
       }
     }
     // Re-apply live audio levels in case volumes changed. VISUAL3.68 — the
@@ -29938,9 +30122,16 @@ export class GameUI {
   private addConfigMenuRow(
     container: HTMLElement, label: string, key: keyof typeof GameUI.CONFIG_MENU_CHOICES, onApply?: () => void,
   ): void {
-    const { values, labels } = GameUI.CONFIG_MENU_CHOICES[key];
-    const choices = labels.map((k) => configString(k));
-    const idx = GameUI.configMenuIndex(key, this.optionsSettings[key]);
+    // BUG.ac1999-texture-resolution-defaults — the era client's own texture-detail menu
+    // (EraWorldRules.textureDetailMenu: 1999's Full / 1/2 / 1/4 / 1/8), showing the stored value as
+    // the era draws it (a Very High from end of retail reads Full).
+    const eraMenu = key === 'landscapeTextureDetail' || key === 'environmentTextureDetail'
+      ? this.clientRules.world.textureDetailMenu : null;
+    const values = eraMenu?.values ?? GameUI.CONFIG_MENU_CHOICES[key].values;
+    const choices = eraMenu ? [...eraMenu.labels] : GameUI.CONFIG_MENU_CHOICES[key].labels.map((k) => configString(k));
+    const idx = eraMenu
+      ? Math.max(0, values.indexOf(eraTextureDetail(this.clientRules.world, this.optionsSettings[key]) as number))
+      : GameUI.configMenuIndex(key, this.optionsSettings[key]);
     this.addDropdownRow(container, label, choices[idx], choices, (choice) => {
       const i = choices.indexOf(choice);
       this.optionsSettings[key] = values[i < 0 ? 0 : i];
@@ -30139,11 +30330,12 @@ export class GameUI {
   private applyTexturePrefs(): void {
     const host = this.uiHost;
     if (typeof host?.setTexturePrefs !== 'function') return;
-    host.setTexturePrefs({
+    // The detail values as the era draws them (EraWorldRules.textureDetailMenu: no Very High on 1999).
+    host.setTexturePrefs(eraTexturePrefs(this.clientRules.world, {
       textureFiltering: this.optionsSettings.textureFiltering,
       landscapeTextureDetail: this.optionsSettings.landscapeTextureDetail,
       environmentTextureDetail: this.optionsSettings.environmentTextureDetail,
-    });
+    }));
   }
 
   /**
@@ -30371,8 +30563,19 @@ export class GameUI {
     try {
       // Enable Decal Plugins is kept per era (automation/DecalPlugins.ts), not in this every-era blob.
       const { [DECAL_PLUGINS_OPTION_KEY]: _perEra, ...shared } = this.optionsSettings;
+      // BUG.ac1999-environment-detail-default — so are the era-defaulted keys (ui/EraOptionPrefs.ts):
+      // the blob keeps only what an earlier build wrote for them, for an era not yet visited. A page
+      // that never learned its era (tools, a GameUI before setOptionsEra) keeps them here as before.
+      if (this.optionsEra !== null) {
+        for (const k of ERA_DEFAULTED_OPTION_KEYS) delete shared[k];
+        Object.assign(shared, GameUI.readLegacyEraOptions());
+      }
       localStorage.setItem('ac_options_settings_v1', JSON.stringify(shared));
     } catch { /* quota / disabled — drop silently */ }
+    if (this.optionsEra !== null) {
+      writeEraOptionValues(GameUI.browserStorage, this.optionsEra, ERA_DEFAULTED_OPTION_KEYS,
+        this.clientRules.optionDefaults, GameUI.OPTIONS_DEFAULTS, this.optionsSettings);
+    }
     this.updateOptionsFooterButtons();
   }
 
@@ -37705,6 +37908,8 @@ export class GameUI {
   showCharacterErrorDialog(text: string, characters?: CharacterSlot[], slotCount?: number): void {
     const screen = this.uiManager.currentScreen;
     if (!this.connectingMode && (screen === 'character-select' || screen === 'character-create')) {
+      // UIFlow::UseNewMode: the new character-management UI has no queued chargen open.
+      this.cancelQueuedChargenOpen();
       this.hideConfirmationDialog();
       this.hideMessageDialog();
       if (characters) this.showCharacterSelect(characters, slotCount);
@@ -37999,6 +38204,7 @@ export class GameUI {
     this.hideMessageDialog();
     // MakeDialogInCurrentUI dialogs belong to the UI they were made in.
     this.closePopupStringDialogs();
+    this.cancelQueuedChargenOpen();
     this.connectingMode = false;
     this.uiManager.setScreen('disconnected');
     if (this.charselHandle) {

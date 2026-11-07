@@ -23,7 +23,7 @@ import {
 import { identityFrame, type SeqV3 } from '../animation/SequenceFrame.js';
 import { DegradeLod } from '../models/DegradeLod.js';
 import { subPaletteScale } from '../models/AppearanceOverrides.js';
-import { heldCopiesUnder, heldCopyGuidAt, rescaleHeldCopiesForHolder } from '../models/WieldedItemVisual.js';
+import { createObjectAnimFrame, heldCopiesUnder, heldCopyGuidAt, rescaleHeldCopiesForHolder, serverObjectPlacement } from '../models/WieldedItemVisual.js';
 import {
   createMissileBody, advanceMissile, acQuatToThree, sweepCylinders, sweepSpheres, nearestContact,
   classifyMissileObstacle, applyObstacleKind,
@@ -265,10 +265,12 @@ export interface ServerObject {
   /** WeenieHeaderFlag.AmmoType (the appraisal's ammunition line). */
   ammoType?: number;
   /**
-   * STREAM.rebuild-resets-placement — the PhysicsDesc AnimationFrame
-   * Placement (CPartArray::SetPlacementFrame; ACE gives a motion-table-less
-   * object Resting 101). The parts keep it across an ObjDesc / streamed
-   * rebuild; undefined = not sent (Default).
+   * STREAM.rebuild-resets-placement — the placement frame the parts stand at
+   * (CPartArray::SetPlacementFrame). Set at create by serverObjectPlacement
+   * (BUG.server-object-placement-default-vs-set-description: the AnimationFrame,
+   * Default 0 when the desc had neither it nor Movement, Resting with Movement),
+   * then by a position's / ParentEvent's placement. The parts keep it across
+   * an ObjDesc / streamed rebuild.
    */
   placement?: number;
   /**
@@ -1282,7 +1284,7 @@ export class ServerObjectManager {
       // field docblock); undefined when WeenieHeaderFlag.Priority absent.
       clothingPriority: data.clothingPriority,
       ammoType: data.ammoType,
-      placement: data.placement,
+      placement: serverObjectPlacement(data),
       translucency: data.translucency ?? 0,
       parentLocation: data.parentLocation || 0,
       collisionRadius: 0,
@@ -1556,16 +1558,24 @@ export class ServerObjectManager {
     const positionTs = ts[PhysicsTimestamp.Position] ?? 0;
     // The PhysicsDesc parent decides, as in the new-object branch (the
     // weenie Wielder can be set with no Parent block — worn armour).
+    // Both take the desc's animframe_id raw (createObjectAnimFrame: 0 when
+    // the desc carried no AnimationFrame).
+    const animFrame = createObjectAnimFrame(data);
     if (data.physicsParentId) {
-      this.parentEvent(obj.guid, data.physicsParentId, data.parentLocation || 0, positionTs);
+      // DoParentEvent @ 0x00452290: set_parent, then SetPlacementFrame.
+      if (this.parentEvent(obj.guid, data.physicsParentId, data.parentLocation || 0, positionTs)) {
+        this.setPlacementFrame(obj, animFrame);
+      }
     } else if (data.position && data.position.landblock !== 0) {
       const p = data.position;
       // HandleReceivedPosition: a CreateObject's position is grounded
-      // unless it moves (has_contact from the desc is not on the wire).
+      // unless it moves (has_contact from the desc is not on the wire);
+      // an object without animations takes the placement.
       this.applyPositionUpdate(obj.guid, p.landblock >>> 0, p.x, p.y, p.z, p.rw, p.rx, p.ry, p.rz, {
         contact: true,
         positionTs: ts[PhysicsTimestamp.Position],
         teleportTs: ts[PhysicsTimestamp.Teleport],
+        placement: animFrame,
       });
       obj.position = p;
     } else {
@@ -4016,15 +4026,15 @@ export class ServerObjectManager {
       }
     }
 
-    // BUG.createobject-movement-placement-skipped — pass the PhysicsDesc
-    // AnimationFrame Placement uint (sent when the object has no
-    // CurrentMotionState) as the placement-frame key; getPartPlacements
-    // falls back to key 0 (Default) on a miss, matching ACE
-    // PartArray.SetPlacementFrame. Without one the object keeps the Resting
-    // frame InitObjectEnd set (PLACEMENT_RESTING).
+    // BUG.server-object-placement-default-vs-set-description — the placement
+    // CPhysicsObj::set_description @ 0x00514f40 leaves (serverObjectPlacement):
+    // the AnimationFrame; Default (0) when the desc carried neither it nor
+    // Movement; Resting (InitObjectEnd) with Movement. Rebuilds pass the
+    // object's held placement as data.placement. getPartPlacements falls back
+    // to key 0 on a miss (CPartArray::SetPlacementFrame @ 0x005193d0).
     return this.setupModelRenderer.createSetupMeshWithOverrides(
       data.setupId,
-      data.placement ?? PLACEMENT_RESTING,
+      serverObjectPlacement(data),
       partChanges.size > 0 ? partChanges : undefined,
       perPartTextureOverrides.size > 0 ? perPartTextureOverrides : undefined,
       paletteColors,

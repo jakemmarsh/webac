@@ -19,6 +19,17 @@
  *   only the BOTTOM fraction of the fill texture is drawn — the bar drains
  *   downward from the top as uses are consumed.
  *
+ * The 1999 client draws the same two meters (webac#25): its UI_Item update
+ * @ 0x004e6ed0 creates one 5x30 meter child (ctor @ 0x005cef90, draw
+ * @ 0x005cee00) at (0x1a,1) — (0x1c,3) in a 36px cell — for a container with
+ * capacity (contained / capacity, art 0x06001216 / 0x06001217) or else an item
+ * with _maxStructure != 0 (weenie+0x8c PublicWeenieDesc +0x60 / +0x64, art
+ * 0x0600135e / 0x0600135f), hidden at a structure ratio of exactly 1.0 or at
+ * 0 contained. The UI_Item draw @ 0x004e7d20 paints only the cell's own art;
+ * the meter is a child, drawn by its trailing vtable +0x54 (children) call.
+ * Shortcut slots hold a UI_Item too (ShortcutSlot_AdoptItemByID @ 0x005008a0
+ * → Create_UI_Item @ 0x004e6bf0), so the bar shows on the toolbar as well.
+ *
  * The values are kept live by GameMessagePublicUpdatePropertyInt
  * broadcasts of PropertyInt.Structure = 92 (ACE Healer.cs:191, Lock.cs:94,
  * PetDevice.cs:94/576).

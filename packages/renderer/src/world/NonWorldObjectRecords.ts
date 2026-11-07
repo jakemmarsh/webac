@@ -99,8 +99,10 @@ export class NonWorldObjectRecords {
       physicsParentId: 0,
       parentLocation: 0,
       position: { landblock: p.landblock >>> 0, x: p.x, y: p.y, z: p.z, rw: p.rw, rx: p.rx, ry: p.ry, rz: p.rz },
-      // HandleReceivedPosition: SetPlacementFrame(placement_id) when the object has no animations.
-      placement: p.placementId || rec.placement,
+      // HandleReceivedPosition: SetPlacementFrame(placement_id) when the object has no animations,
+      // 0 when the PositionPack had none (BUG.server-object-placement-default-vs-set-description:
+      // the record's own placement, e.g. a held item's equip frame, does not survive the drop).
+      placement: p.placementId ?? 0,
       velocityX: 0, velocityY: 0, velocityZ: 0,
       timestamps: ts,
     };

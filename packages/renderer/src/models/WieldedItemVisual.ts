@@ -36,11 +36,12 @@ export interface ItemVisualDesc extends AppearanceData {
    *  own held item (a buff on the sword in hand) plays through it. */
   peTableId?: number;
   /**
-   * PhysicsDesc AnimationFrame Placement (undefined when not sent): the
-   * frame HandleCreateObject sets on the item's own CPhysicsObj before any
-   * ParentEvent. ACE writes it for wielded items (Creature_Equipment.cs
-   * GetPlacementLocation), so an item attached from its CreateObject alone
-   * (login, a wielder streaming in) takes it, else Resting.
+   * The placement the item's CreateObject left on its own CPhysicsObj before
+   * any ParentEvent (createObjectPlacement): the PhysicsDesc AnimationFrame,
+   * 0 when the desc carried neither it nor a Movement blob, undefined when it
+   * carried Movement (the Resting frame stays). ACE writes AnimationFrame for
+   * wielded items (Creature_Equipment.cs GetPlacementLocation); the AC1999
+   * server omits it when the item's setup lacks the equip frame (every shield).
    */
   placement?: number;
 }
@@ -53,6 +54,55 @@ export interface ItemVisualSource extends Partial<AppearanceData> {
   physicsState?: number;
   peTableId?: number;
   placement?: number;
+  /** The CreateObject's Movement blob (set: the object poses from its motion, not a placement). */
+  initialMotion?: unknown;
+  /** The CreateObject carried a non-empty Movement buffer, parsed or not (CreateObjectData.hasMovement). */
+  hasMovement?: boolean;
+}
+
+/** The CreateObject slice a placement is decided from. */
+export interface PlacementSource { placement?: number; initialMotion?: unknown; hasMovement?: boolean }
+
+/** set_description's branch: a Movement buffer of non-zero length (parsed or not). */
+function movementPresent(data: PlacementSource): boolean {
+  return !!data.hasMovement || !!data.initialMotion;
+}
+
+/**
+ * The placement frame a CreateObject sets (webac#26). CPhysicsObj::set_description
+ * (1999 @ 0x0043b510, EoL @ 0x00514f40) runs after makeObject's InitObjectEnd
+ * (Resting, 0x65): with no Movement blob it calls SetPlacementFrame(animframe_id),
+ * and PhysicsDesc's constructor zeroes animframe_id (1999 PhysicsDesc ctor), so a
+ * desc without AnimationFrame poses at Default (0), not Resting. Only a desc with
+ * Movement keeps Resting (undefined here).
+ */
+export function createObjectPlacement(data: PlacementSource): number | undefined {
+  if (data.placement !== undefined) return data.placement;
+  return movementPresent(data) ? undefined : 0;
+}
+
+/**
+ * BUG.server-object-placement-default-vs-set-description — the placement frame
+ * a new object's parts are built at from its CreateObject, for every object
+ * (world objects, corpses, doors, portals, missiles, NPCs, the player, held
+ * items): createObjectPlacement, else Resting (a desc with Movement keeps the
+ * frame InitObjectEnd @ 0x0050ffe0 set). CPartArray::SetPlacementFrame
+ * @ 0x005193d0 falls back to frame 0 when the Setup lacks the key, as
+ * placementFrameOf does.
+ */
+export function serverObjectPlacement(data: PlacementSource): number {
+  return createObjectPlacement(data) ?? PLACEMENT_RESTING;
+}
+
+/**
+ * The placement a CreateObject for an object already held at the same
+ * instance hands DoParentEvent / HandleReceivedPosition (SmartBox::
+ * HandleCreateObject @ 0x00454c80 passes the PhysicsDesc animframe_id raw):
+ * the AnimationFrame, else 0. PhysicsDesc::UnPack @ 0x0051ddd0 starts with
+ * Destroy @ 0x0051d5d0 (animframe_id = 0) and reads it only without Movement.
+ */
+export function createObjectAnimFrame(data: PlacementSource): number {
+  return movementPresent(data) ? 0 : (data.placement ?? 0);
 }
 
 /** The item's visual desc from its CreateObject, or undefined when it carried no setup. */
@@ -64,7 +114,7 @@ export function itemVisualDescOf(data: ItemVisualSource): ItemVisualDesc | undef
     translucency: data.translucency || 0,
     physicsState: data.physicsState ?? 0,
     peTableId: data.peTableId ?? 0,
-    placement: data.placement,
+    placement: createObjectPlacement(data),
     basePalette: data.basePalette ?? 0,
     subPalettes: data.subPalettes ?? [],
     textureChanges: data.textureChanges ?? [],
@@ -72,7 +122,7 @@ export function itemVisualDescOf(data: ItemVisualSource): ItemVisualDesc | undef
   };
 }
 
-/** A held item's placement: the ParentEvent's, else its CreateObject's, else Resting (InitObjectEnd). */
+/** A held item's placement: the ParentEvent's, else its CreateObject's (createObjectPlacement), else Resting (InitObjectEnd). */
 export function heldItemPlacement(parentEventPlacement: number | undefined, visual: Pick<ItemVisualDesc, 'placement'>): number {
   return parentEventPlacement ?? visual.placement ?? PLACEMENT_RESTING;
 }

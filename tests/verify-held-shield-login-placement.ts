@@ -70,9 +70,17 @@ describe.skipIf(!existsSync(DAT_PATHS.portal))('webac#26 — held round shield: 
     expect(partQuat(reequip).angleTo(new THREE.Quaternion())).toBeLessThan(1e-6);
   });
 
-  it('inverse: a CreateObject with no placement rests at 0x65, a 90° turn about the shield X axis', () => {
+  it('a CreateObject with neither AnimationFrame nor Movement (the AC1999 server at login) builds Default, as re-equip does', () => {
+    // CPhysicsObj::set_description (1999 @ 0x0043b510, EoL @ 0x00514f40): SetPlacementFrame(animframe_id = 0).
     const none = buildInventoryEntry(shieldCreateObject(undefined)).visualDesc!;
-    const resting = buildWieldedItemMesh(builder, none, undefined, () => null);
+    const login = buildWieldedItemMesh(builder, none, undefined, () => null);
+    expect(login!.userData[WIELDED_PLACEMENT_KEY]).toBe(0);
+    expect(partQuat(login).angleTo(new THREE.Quaternion())).toBeLessThan(1e-6);
+  });
+
+  it('inverse: with Movement and no placement it keeps Resting (0x65), a 90° turn about the shield X axis (the reported pose)', () => {
+    const moving = buildInventoryEntry({ ...shieldCreateObject(undefined), initialMotion: {} }).visualDesc!;
+    const resting = buildWieldedItemMesh(builder, moving, undefined, () => null);
     expect(resting!.userData[WIELDED_PLACEMENT_KEY]).toBe(PLACEMENT_RESTING);
     expect(THREE.MathUtils.radToDeg(partQuat(resting).angleTo(new THREE.Quaternion()))).toBeCloseTo(90, 1);
   });

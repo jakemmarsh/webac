@@ -42,6 +42,7 @@
 
 import type { IdentifyResponseData } from '../../network/ServerMessageHandler.js';
 import { getStringParts } from '@ac/dat-parser/file-types/LayoutDesc.js';
+import { appraisedMissileVelocity } from '@ac/shared';
 import {
   APPRAISAL_SKILL_NAMES, ATTRIBUTE_NAMES, DAMAGE_TYPE, VITAL_NAMES,
   attunedStatusToString, bondedStatusToString, cFixed, cG, clothingPriorityToString,
@@ -685,7 +686,10 @@ export function buildItemAppraisalText(data: IdentifyResponseData, ctx: ItemAppr
           add(S, `Speed: ${weaponTimeToString(w.weaponTime)} (${w.weaponTime})`, enchColor(weaponEnch, 0x4));
           if (missile) {
             // pow(maxVelocity, 2) × 0.10204… × 1.094, capped at MISSILE_RANGE_CAP 85.
-            let range = Math.pow(w.maxVelocity, 2) * 0.1020408163265306 * 1.094;
+            // ACE / GDLE compatibility (BUG.ace-thrown-weapon-range-1yd): a thrown weapon's velocity is no stored
+            // stat; retail's server sent a Strength estimate, ACE sends a 1.0 placeholder ("Range: 1 yds.") and GDLE 0,
+            // and both throw it at 20 m/s. The placeholder reads as the reach those servers give (appraisedMissileVelocity).
+            let range = Math.pow(appraisedMissileVelocity(w.maxVelocity, w.maxVelocityEstimated), 2) * 0.1020408163265306 * 1.094;
             if (85.0 < range) range = 85.0;
             const yds = range >= 10.0 ? ftol(range) - (ftol(range) % 5) : ftol(Math.ceil(range));
             add(S, `Range: ${yds} yds.${w.maxVelocityEstimated ? ' (based on STRENGTH 100)' : ''}`);

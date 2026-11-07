@@ -147,6 +147,35 @@ export interface LogoutRequest {
   reason?: LogoutReason;
 }
 
+/**
+ * OBS.login-refusal-identity — every tab that hears an account query (a
+ * WorldPresenceQuery with `key`) and does not answer it with a presence
+ * reply acks it, so the asking tab can say how many tabs were listening and
+ * why none held the account: 'none' (it holds no key), 'other_key' (another
+ * world or account), 'same_key_closed' (this key, but its session with the
+ * server is closed). Older builds send no ack: the count is a lower bound.
+ */
+export interface QueryAck {
+  kind: 'webac-query-ack';
+  id: string;
+  to: string;
+  tab: string;
+  state: QueryAckState;
+}
+export type QueryAckState = 'none' | 'other_key' | 'same_key_closed';
+
+/** What an account query heard (queryAccountHoldersDetailed). */
+export interface AccountHolderQuery {
+  /** The tabs holding exactly the key with an open session. */
+  holders: WorldHolder[];
+  /** Every tab that answered: holders + acks (older builds never ack). */
+  tabs: number;
+  /** Tabs that hold the key but whose session is closed. */
+  holdersClosed: number;
+  /** False: the page has no BroadcastChannel (nothing was asked). */
+  channel: boolean;
+}
+
 /** Why another tab asked this one to log out. */
 export type LogoutReason = 'enter' | 'login';
 
@@ -220,7 +249,7 @@ export class AccountTabGuard {
   readonly tabId: string;
   private held: { key: string; at: number } | null = null;
   private readonly now: () => number;
-  private readonly pending = new Map<string, { server: string; key: string; holders: WorldHolder[] }>();
+  private readonly pending = new Map<string, { server: string; key: string; holders: WorldHolder[]; acks: Map<string, QueryAckState> }>();
   private querySeq = 0;
 
   constructor(private readonly opts: AccountTabGuardOptions) {
@@ -264,7 +293,7 @@ export class AccountTabGuard {
    * channel (an old browser): none.
    */
   queryWorldHolders(key: string, waitMs: number = WORLD_QUERY_WAIT_MS): Promise<WorldHolder[]> {
-    return this.query(key, false, waitMs);
+    return this.query(key, false, waitMs).then((r) => r.holders);
   }
 
   /**
@@ -273,23 +302,35 @@ export class AccountTabGuard {
    * not, answered within `waitMs`. No channel (an old browser): none.
    */
   async queryAccountHolders(key: string, waitMs: number = WORLD_QUERY_WAIT_MS): Promise<WorldHolder[]> {
-    return (await this.query(key, true, waitMs)).filter((h) => h.sameAccount);
+    return (await this.queryAccountHoldersDetailed(key, waitMs)).holders;
   }
 
-  private query(key: string, anyStage: boolean, waitMs: number): Promise<WorldHolder[]> {
+  /**
+   * OBS.login-refusal-identity — queryAccountHolders, with how many tabs
+   * answered at all and how many hold the key with a closed session (telemetry).
+   */
+  async queryAccountHoldersDetailed(key: string, waitMs: number = WORLD_QUERY_WAIT_MS): Promise<AccountHolderQuery> {
+    const r = await this.query(key, true, waitMs);
+    const holders = r.holders.filter((h) => h.sameAccount);
+    let holdersClosed = 0;
+    for (const state of r.acks.values()) if (state === 'same_key_closed') holdersClosed++;
+    return { holders, tabs: r.holders.length + r.acks.size, holdersClosed, channel: r.channel };
+  }
+
+  private query(key: string, anyStage: boolean, waitMs: number): Promise<{ holders: WorldHolder[]; acks: Map<string, QueryAckState>; channel: boolean }> {
     const channel = this.opts.channel;
-    if (!channel) return Promise.resolve([]);
+    if (!channel) return Promise.resolve({ holders: [], acks: new Map(), channel: false });
     const id = `${this.tabId}:${++this.querySeq}`;
     const server = serverOfSessionKey(key);
-    const entry = { server, key, holders: [] as WorldHolder[] };
+    const entry = { server, key, holders: [] as WorldHolder[], acks: new Map<string, QueryAckState>() };
     this.pending.set(id, entry);
     const query: WorldPresenceQuery = { kind: 'webac-world-query', server, tab: this.tabId, id, ...(anyStage ? { key } : {}) };
-    try { channel.postMessage(query); } catch { this.pending.delete(id); return Promise.resolve([]); }
+    try { channel.postMessage(query); } catch { this.pending.delete(id); return Promise.resolve({ holders: [], acks: new Map(), channel: false }); }
     const later = this.opts.setTimeout ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
     return new Promise((resolve) => {
       later(() => {
         this.pending.delete(id);
-        resolve(entry.holders);
+        resolve({ holders: entry.holders, acks: entry.acks, channel: true });
       }, waitMs);
     });
   }
@@ -353,6 +394,7 @@ export class AccountTabGuard {
     if (kind === 'webac-world-query') { this.answerWorldQuery(data as WorldPresenceQuery); return; }
     if (kind === 'webac-world-presence') { this.collectWorldPresence(data as WorldPresenceReply); return; }
     if (kind === 'webac-logout-request') { this.receiveLogoutRequest(data as LogoutRequest); return; }
+    if (kind === 'webac-query-ack') { this.collectAck(data as QueryAck); return; }
     if (!isClaim(data) || !this.held) return;
     if (data.tab === this.tabId || data.key !== this.held.key) return;
     // Two claims crossed: the later one wins (the tab id breaks a tie), and
@@ -367,14 +409,21 @@ export class AccountTabGuard {
 
   private answerWorldQuery(q: WorldPresenceQuery): void {
     if (typeof q.server !== 'string' || typeof q.tab !== 'string' || typeof q.id !== 'string') return;
-    if (q.tab === this.tabId || !this.held) return;
-    const world = this.opts.worldCharacter?.() ?? null;
+    if (q.tab === this.tabId) return;
     if (typeof q.key === 'string') {
-      // An account query (a refused login): only the exact key, with the session still open.
-      if (q.key !== this.held.key || !this.sessionLive) return;
-    } else if (!world || serverOfSessionKey(this.held.key) !== q.server) {
-      return;
+      // An account query: a tab that will not answer it with a presence says why (OBS.login-refusal-identity).
+      const state: QueryAckState | null = !this.held ? 'none' : q.key !== this.held.key ? 'other_key' : !this.sessionLive ? 'same_key_closed' : null;
+      if (state) {
+        const ack: QueryAck = { kind: 'webac-query-ack', id: q.id, to: q.tab, tab: this.tabId, state };
+        try { this.opts.channel?.postMessage(ack); } catch { /* a closed channel: nothing to answer */ }
+        return;
+      }
     }
+    if (!this.held) return;
+    const world = this.opts.worldCharacter?.() ?? null;
+    // An account query got here only for the exact key with an open session (above); a world query
+    // is answered from the world on the same server.
+    if (typeof q.key !== 'string' && (!world || serverOfSessionKey(this.held.key) !== q.server)) return;
     const reply: WorldPresenceReply = {
       kind: 'webac-world-presence', id: q.id, to: q.tab, tab: this.tabId, key: this.held.key,
       character: world?.name ?? null, inWorld: world !== null,
@@ -391,6 +440,14 @@ export class AccountTabGuard {
       tab: r.tab, character: typeof r.character === 'string' ? r.character : null, sameAccount: r.key === entry.key,
       inWorld: r.inWorld !== false,
     });
+  }
+
+  private collectAck(a: QueryAck): void {
+    if (a.to !== this.tabId || typeof a.tab !== 'string' || a.tab === this.tabId) return;
+    const entry = this.pending.get(a.id);
+    if (!entry || entry.holders.some((h) => h.tab === a.tab)) return;
+    const state: QueryAckState = a.state === 'other_key' || a.state === 'same_key_closed' ? a.state : 'none';
+    entry.acks.set(a.tab, state);
   }
 
   private receiveLogoutRequest(r: LogoutRequest): void {

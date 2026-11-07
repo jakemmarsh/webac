@@ -37,7 +37,7 @@
  */
 
 import type { IdentifyResponseData } from '../../network/ServerMessageHandler.js';
-import { APPRAISAL_1999_FLOAT, APPRAISAL_1999_STRING } from '@ac/shared';
+import { APPRAISAL_1999_FLOAT, APPRAISAL_1999_STRING, appraisedMissileVelocity } from '@ac/shared';
 import { ftol, insertCommas } from './appraisalFormat.js';
 import {
   finishAppraisalText, type AppraisalFontColor, type AppraisalRun, type ItemAppraisalContext, type ItemAppraisalText,
@@ -393,7 +393,9 @@ export function buildItemAppraisalText1999(data: IdentifyResponseData, ctx: Item
         if (w.weaponTime > -1) {
           add(S, `Speed: ${weaponTimeToString1999(w.weaponTime)} (${w.weaponTime})`, ench(weaponEnch, 0x4));
           if (valid & LOC.Missile) {
-            add(S, `Range: ${rangeYards1999((Math.pow(w.maxVelocity, 2) / 9.8) * 1.094)} yds.`);
+            // The AC1999 server (GDLE-based) sends 0 for a missile weapon with no stored velocity and throws it at 20 m/s
+            // (MissileAttackEventData.cpp:166); its thrown weapons get the examiner's own velocity and pass unchanged.
+            add(S, `Range: ${rangeYards1999((Math.pow(appraisedMissileVelocity(w.maxVelocity), 2) / 9.8) * 1.094)} yds.`);
             rangeShown = true;
           }
         } else {

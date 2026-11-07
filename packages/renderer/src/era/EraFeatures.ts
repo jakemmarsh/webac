@@ -501,6 +501,36 @@ export interface EraClientRules {
    * listed. End of retail pins only the three 1999 options its client dropped.
    */
   optionPins: Readonly<Record<string, boolean>>;
+  /**
+   * Client-preference defaults where the era's client differs from end of retail's (GameUI.
+   * OPTIONS_DEFAULTS: gmConfigUI::InitOptions' SetDefaultValue, Render::m_RenderPrefs' static
+   * initialiser), by optionsSettings key. A fresh profile starts at them and the Config page's
+   * Defaults restores them. Every key any era lists is kept per era in this browser
+   * (ERA_DEFAULTED_OPTION_KEYS, ui/EraOptionPrefs.ts), so one era's value never stands in for
+   * another era's default. End of retail and the classic eras (its exe): none.
+   */
+  optionDefaults: Readonly<Record<string, boolean | number | string>>;
+  /**
+   * Config-page keys the era client's Defaults button leaves as they are. End of retail: none
+   * (OptionPage::RestoreDefaultValues @ 004f2cb0 restores every row). 1999: the Performance panel's
+   * Defaults (PerformancePanel_Reset(1) @ 0x00598a70) re-reads both Detail Texture checkboxes from
+   * the live render flags (0x0040f530 / 0x0040f513) and the texture-resolution menus from their
+   * globals (0x004a7f00 / 0x005987b0 / 0x005987c0 / 0x004fabc0), changing neither.
+   */
+  configDefaultsKeep: readonly string[];
+  /**
+   * Config-page values the era client's Defaults button sets that differ from its fresh-profile
+   * default (optionDefaults / OPTIONS_DEFAULTS). End of retail: none. 1999: the two volume sliders.
+   */
+  configDefaultsValues: Readonly<Record<string, boolean | number | string>>;
+  /**
+   * The options_ word the era client's Character-page Defaults writes, or null for end of retail's
+   * per-row PlayerModule::GetDefaultOptionValue @ 005d2a30 (CharacterSettingsModel). 1999:
+   * CharOptionsPanel_Reset(1) @ 0x005948a0 stores 0xE56A into PlayerModule options_ (+0x18, the
+   * setter 0x00528c80 beside the getter 0x0052fa20), and the Defaults button is ghosted while
+   * options_ already equals it (0x00594580).
+   */
+  characterDefaultsWord: number | null;
   /** Server options-word bits held at the era client's value (OptionsWordFix), or null for none (end of retail). */
   optionsWordFix: OptionsWordFix | null;
   /**
@@ -611,15 +641,6 @@ export interface EraClientRules {
    * text, on a selection and from Global_Loop's 5 s tick. End of retail has no charge and no meter.
    */
   spellBarChargeMeter: boolean;
-  /**
-   * webac#25 — the item icon's meters: the uses-remaining StructureBar (0x10000348) and the
-   * container CapacityBar (0x10000347) of the EoL UIItem overlay group 0x21000037:0x10000346
-   * (UIElement_UIItem::UpdateStructureDisplay @ 004e17a0 / UpdateCapacityDisplay @ 004e16e0, on
-   * every item list and the toolbar shortcuts). The 1999 UI_Item draw @ 0x004e7d20 paints the icon,
-   * the selection / drag-accept art, the shortcut digit, the waiting overlay and a stack count, and
-   * no meter; no 1999 code past PublicWeenieDesc::UnPack reads _structure / _maxStructure.
-   */
-  itemIconMeters: boolean;
   /**
    * The one combined effects window's title, or null for end of retail's two (MAG-4). The 1999
    * PanelUI has one magic status indicator, lit while any enchantment is in effect (0x4fa740 →
@@ -1158,6 +1179,51 @@ const AC1999_OPTION_PINS: Readonly<Record<string, boolean>> = Object.freeze({
 });
 
 /**
+ * The 1999 client's own preference defaults where they differ from end of retail's
+ * (EraClientRules.optionDefaults; BUG.ac1999-environment-detail-default). Environment Detail
+ * Textures: end of retail starts it on (Render::m_RenderPrefs @ 0x81ef90 EnvironmentDetailTextures
+ * = true; gmConfigUI::InitOptions @ 0049e400 SetDefaultValue(1)). The 1999 client keeps its render
+ * flags in a 0x1c-byte registry blob (0x0042c259, under SOFTWARE\Microsoft\...\Asheron's Call);
+ * with none saved, World_InitWorldEntry @ 0x0040d441 calls 0x0042c236, which zeroes all four detail
+ * flags (landscape, building, environment, object; the order 0x0042c350 stores them in). The
+ * Performance panel's "Detail Texture: Environment" checkbox drives building + environment
+ * (PerformancePanel_ApplySettings @ 0x00598430), so a fresh 1999 client drew no building or cell
+ * detail.
+ *
+ * Texture resolution (BUG.ac1999-texture-resolution-defaults): the four menus' globals 0x630be8 /
+ * 0x630bec / 0x630bf0 / 0x630bf4 are .bss (zero in client.exe; 0x630bf4 becomes 1 only under the
+ * software renderer, 0x0042bcee), and item 0 is "Full", no shift (EraWorldRules.textureDetailMenu).
+ * Ours is value 1 (High) for both menus: end of retail starts Landscape at Medium (2), a half-size
+ * merge, so the landscape default differs; Environment is High in both, listed so the 1999 menus are
+ * kept per era like the landscape one (a Very High chosen in end of retail draws as Full on 1999).
+ */
+const AC1999_OPTION_DEFAULTS: Readonly<Record<string, boolean | number | string>> = Object.freeze({
+  buildingDetailTextures: false,
+  landscapeTextureDetail: 1,
+  environmentTextureDetail: 1,
+});
+
+/**
+ * EraClientRules.configDefaultsValues for 1999: PerformancePanel_Reset(1) @ 0x00598a70 sets the
+ * Sound Effects and Ambient Sounds sliders (+0x124 / +0x128, built after the 0x6117b0 / 0x6117a0
+ * labels in the ctor @ 0x594e00) with Scrollbar_SetPercentage(0.66) (0x598b8f / 0x598ba9: push
+ * 0x3fe51eb8 0x51eb851f, the double 0.66). Apply (PerformancePanel_ListenToMessage @ 0x597fcf /
+ * 0x597fff) stores each as the truncated position x 10.0 (.rdata 0x611200), 6 tenths, and
+ * PerformancePanel_ApplySettings @ 0x00598430 hands SoundManager_SetVolumeLevel / 0x00598850
+ * tenths / 10: 0.6 (PerformancePanel_Reset(0) @ 0x598e4d reads the volumes back the same way). A fresh 1999 client's volumes
+ * are 1.0 (.data 0x61c138 / 0x61c544), as ours (100), so only the Defaults button differs.
+ */
+const AC1999_CONFIG_DEFAULTS_VALUES: Readonly<Record<string, boolean | number | string>> = Object.freeze({
+  effectsVolume: 60,
+  ambientVolume: 60,
+});
+
+/** EraClientRules.configDefaultsKeep for 1999 (PerformancePanel_Reset(1) @ 0x00598a70). */
+const AC1999_CONFIG_DEFAULTS_KEEP: readonly string[] = Object.freeze([
+  'buildingDetailTextures', 'landscapeDetailTextures', 'landscapeTextureDetail', 'environmentTextureDetail',
+]);
+
+/**
  * Bits of the server's options word the era's client had no way to change, held at that client's
  * value (SWEEP1999.character). The 1999 client has no FellowshipShareXP (0x40000) or
  * FellowshipShareLoot (0x100000) bit (its options stop at 0x8000; kb structures/CharacterOption), but
@@ -1202,6 +1268,10 @@ const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
   // The 1999 options_ bits end of retail dropped (ACE CharacterOptions1 NotUsed1 / 2 / 4): no row,
   // no effect, whatever a 1999 session stored.
   optionPins: Object.freeze({ autoCreateShortcuts: false, invertMouseLook: false, rightClickMouselook: false }),
+  optionDefaults: Object.freeze({}),
+  configDefaultsKeep: Object.freeze([]),
+  configDefaultsValues: Object.freeze({}),
+  characterDefaultsWord: null,
   optionsWordFix: null,
   heritageLine: 'eor' as const,
   vitaePanel: 'eor' as const,
@@ -1223,7 +1293,6 @@ const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
   deleteCharacterConfirm: null,
   placementText: EOR_PLACEMENT_TEXT,
   spellBarChargeMeter: false,
-  itemIconMeters: true, // UIElement_UIItem::UIItem_Update @ 004e21d0
   combinedEffectsTitle: null,
   spellDurationText: 'eor' as const,
   castButtonText: null,
@@ -1283,6 +1352,10 @@ const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
   }),
   characterOptionsPage: AC1999_CHARACTER_OPTIONS_PAGE,
   optionPins: AC1999_OPTION_PINS,
+  optionDefaults: AC1999_OPTION_DEFAULTS,
+  configDefaultsKeep: AC1999_CONFIG_DEFAULTS_KEEP,
+  configDefaultsValues: AC1999_CONFIG_DEFAULTS_VALUES,
+  characterDefaultsWord: 0xe56a, // CharOptionsPanel_Reset(1) @ 0x005948a0
   optionsWordFix: AC1999_OPTIONS_WORD_FIX,
   heritageLine: 'ac1999' as const, // StatRegion_UpdateFromPlayerDesc @ 0x00543520
   vitaePanel: 'ac1999' as const, // 0x005f0610, VitaePanel_UpdateFromPlayerDesc @ 0x0054c120
@@ -1324,7 +1397,6 @@ const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
   deleteCharacterConfirm: 'Deleting %s cannot be undone.  Are you sure?', // IntroUI_ListenToMessage
   placementText: AC1999_PLACEMENT_TEXT, // AttemptPlaceInContainerIsLegal / AttemptMergeIsLegal
   spellBarChargeMeter: true, // SpellCastSubPanel ctor @ 0x512390, UpdateChargeMeter @ 0x513390
-  itemIconMeters: false, // the UI_Item draw @ 0x004e7d20 has no meter
   combinedEffectsTitle: 'Spells in Effect', // SpellsInEffectPanel ctor @ 0x59ac70
   spellDurationText: 'ac1999' as const, // SpellExaminePanel_ExamineSpell @ 0x511110
   castButtonText: AC1999_CAST_BUTTON_TEXT, // UpdateCastButton @ 0x513e00
@@ -1366,6 +1438,14 @@ const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
  * Landscape Detail Textures, the pre-ToD option Jake asked for (webac#23, EraWorldRules.CLASSIC_WORLD_RULES).
  */
 const CLASSIC_CLIENT_RULES: EraClientRules = Object.freeze({ ...EOR_CLIENT_RULES, world: CLASSIC_WORLD_RULES });
+
+/**
+ * Every optionsSettings key some era defaults differently (EraClientRules.optionDefaults): these
+ * are kept per era (ui/EraOptionPrefs.ts), never in the every-era options blob.
+ */
+export const ERA_DEFAULTED_OPTION_KEYS: readonly string[] = Object.freeze([...new Set(
+  [EOR_CLIENT_RULES, CLASSIC_CLIENT_RULES, AC1999_CLIENT_RULES].flatMap((r) => Object.keys(r.optionDefaults)),
+)]);
 
 /** The client-code rules of era `p` (end of retail's for every era that runs its exe). */
 export function eraClientRules(p: EraProfile | null | undefined): EraClientRules {

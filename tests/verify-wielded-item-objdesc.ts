@@ -76,6 +76,8 @@ describe('the item\'s CreateObject visual desc reaches its inventory entry', () 
       setupId: SWORD_SETUP,
       objScale: 1.25,
       translucency: 0, physicsState: 0, peTableId: 0,
+      // webac#26: no AnimationFrame and no Movement → set_description's Default (0)
+      placement: 0,
       basePalette: 0x0400007e,
       subPalettes: [{ paletteId: 0x04001000, offset: 8, length: 8 }],
       textureChanges: [{ partIndex: 0, oldTexture: 0x05000100, newTexture: 0x05000200 }],
@@ -86,7 +88,7 @@ describe('the item\'s CreateObject visual desc reaches its inventory entry', () 
   it('no setup on the wire → no visual desc; no ObjScale → scale 1', () => {
     expect(buildInventoryEntry(swordCreateObject({ setupId: 0 })).visualDesc).toBeUndefined();
     expect(itemVisualDescOf({ setupId: SWORD_SETUP })).toEqual({
-      setupId: SWORD_SETUP, objScale: 1, translucency: 0, physicsState: 0, peTableId: 0, basePalette: 0, subPalettes: [], textureChanges: [], animPartChanges: [],
+      setupId: SWORD_SETUP, objScale: 1, translucency: 0, physicsState: 0, peTableId: 0, placement: 0, basePalette: 0, subPalettes: [], textureChanges: [], animPartChanges: [],
     });
   });
 
@@ -106,15 +108,17 @@ describe('the item\'s CreateObject visual desc reaches its inventory entry', () 
 });
 
 describe('buildWieldedItemMesh applies the item\'s own desc', () => {
-  it('without a ParentEvent placement: the CreateObject\'s Placement, else Resting (0x65) — never Default', () => {
+  it('without a ParentEvent placement: the CreateObject\'s Placement, else Default (no Movement) or Resting (Movement)', () => {
     const { builder, calls } = recordingBuilder();
     // ACE writes the wielded item's Placement in its PhysicsDesc (RightHandCombat = 1 here).
     buildWieldedItemMesh(builder, itemVisualDescOf({ setupId: SWORD_SETUP, placement: 1 })!, undefined, loadPalette);
-    // No Placement on the wire: the item keeps the Resting frame InitObjectEnd set.
+    // No Placement and no Movement: set_description's SetPlacementFrame(animframe_id = 0) (webac#26).
     buildWieldedItemMesh(builder, itemVisualDescOf({ setupId: SWORD_SETUP })!, undefined, loadPalette);
-    // A ParentEvent placement still wins over both.
+    // Movement and no Placement: the Resting frame InitObjectEnd set stays.
+    buildWieldedItemMesh(builder, itemVisualDescOf({ setupId: SWORD_SETUP, initialMotion: {} })!, undefined, loadPalette);
+    // A ParentEvent placement still wins over all.
     buildWieldedItemMesh(builder, itemVisualDescOf({ setupId: SWORD_SETUP, placement: 1 })!, 4, loadPalette);
-    expect(calls.map(c => c[1])).toEqual([1, 0x65, 4]);
+    expect(calls.map(c => c[1])).toEqual([1, 0, 0x65, 4]);
     expect(heldItemPlacement(undefined, {})).toBe(0x65);
   });
 

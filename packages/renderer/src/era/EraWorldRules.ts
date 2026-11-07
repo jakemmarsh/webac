@@ -148,7 +148,39 @@ export interface EraWorldRules {
    * (DetailTexturing.landscapeUsable: Classic Dereth's opaque 0x5001786 would cover the ground).
    */
   landscapeDetailTextures: LandscapeDetailRule | null;
+  /**
+   * The Config page's two texture-detail menus (Landscape / Environment Texture Detail), or null
+   * for end of retail's five choices (Very Low … Very High, preference values 4 … 0; Very High
+   * keeps client_highres.dat's level). The values are ours (TextureSamplerPrefs: value v is
+   * texture scale max(v − 1, 0), the shift ImageShift[scale]); the labels are the era client's.
+   * 1999: the Performance panel's texture-resolution menus (PerformancePanel @ 0x594e00: Landscape,
+   * ClipMap, 0x6116e0, Indexed) each offer "Full", "1/2", "1/4", "1/8" (0x6116fc / f8 / f4 / f0)
+   * as items 0..3, and the item is the shift index: 0x0042a732 / 0x004a7ee0 shift a texture's size
+   * by .rdata 0x5f75a8 / 0x5fe0d8 = {0, 1, 2, 4}[item], which is end of retail's ImageShift for
+   * scale = item. So item L is our value L + 1 (Full = High: the portal's own largest image, no
+   * shift; 1999 SurfaceTextures are one image, Textures1999.ts). There is no Very High: the 1999
+   * client has no HiFi DAT, so a 1999 world never mounts client_highres.dat
+   * (`eraOffersHighResTextures`), and a stored Very High reads as Full (`eraTextureDetail`).
+   * Landscape -> Landscape Texture Detail; ClipMap / 0x6116e0 / Indexed (every other texture
+   * type, 0x0042a732) -> Environment Texture Detail.
+   */
+  textureDetailMenu: TextureDetailMenu | null;
 }
+
+/** An era's texture-detail menu: our preference values, in its order, with its own labels. */
+export interface TextureDetailMenu {
+  values: readonly number[];
+  labels: readonly string[];
+  /** The era client's texture shift for each value (TextureSamplerPrefs.setEnvironmentShifts). */
+  shifts: readonly number[];
+}
+
+/** 1999's texture-resolution menus (EraWorldRules.textureDetailMenu). */
+export const AC1999_TEXTURE_DETAIL_MENU: TextureDetailMenu = Object.freeze({
+  values: Object.freeze([1, 2, 3, 4]),
+  labels: Object.freeze(['Full', '1/2', '1/4', '1/8']),
+  shifts: Object.freeze([0, 1, 2, 4]), // .rdata 0x5f75a8 / 0x5fe0d8
+});
 
 /** The landscape detail pass's view-depth fade (metres): full below `fadeMinZ`, none beyond `fadeMaxZ`. */
 export interface LandscapeDetailRule {
@@ -185,6 +217,7 @@ export const EOR_WORLD_RULES: EraWorldRules = Object.freeze({
   examineReappraise: true,
   appraisalTurnsAppraiser: false,
   landscapeDetailTextures: null,
+  textureDetailMenu: null,
 });
 
 /** The classic (Dark Majesty) eras: end of retail's world plus the pre-ToD landscape detail option (webac#23). */
@@ -220,6 +253,7 @@ export const AC1999_WORLD_RULES: EraWorldRules = Object.freeze({
   examineReappraise: false,
   appraisalTurnsAppraiser: true,
   landscapeDetailTextures: AC1999_LANDSCAPE_DETAIL,
+  textureDetailMenu: AC1999_TEXTURE_DETAIL_MENU,
 });
 
 /** LScape min_ambient for the brightness slider's value `pref` (Render.ScreenBrightness, -1..1). */
@@ -234,6 +268,31 @@ export function landscapeDrawDistanceOption(rules: EraWorldRules): boolean {
 }
 
 /** Whether the Config page lists Texture Filtering (not where the era fixes the samplers: 1999 had no such option). */
+/** Whether the era's client had a HiFi DAT for Very High (end of retail and the classic eras; not 1999). */
+export function eraOffersHighResTextures(rules: EraWorldRules): boolean {
+  return rules.textureDetailMenu === null || rules.textureDetailMenu.values.includes(0);
+}
+
+/**
+ * A stored texture-detail value as the era draws it: a value its menu offers stays; one finer than
+ * its finest (Very High on 1999) is its finest (Full). Anything else is left to the samplers'
+ * own validation (TextureSamplerPrefs.normalizeTextureDetail).
+ */
+export function eraTextureDetail(rules: EraWorldRules, value: unknown): unknown {
+  const menu = rules.textureDetailMenu;
+  if (!menu || typeof value !== 'number' || menu.values.includes(value)) return value;
+  const finest = Math.min(...menu.values);
+  return value < finest ? finest : value;
+}
+
+/** The texture prefs with both detail values as the era draws them (eraTextureDetail). */
+export function eraTexturePrefs<T extends { landscapeTextureDetail?: unknown; environmentTextureDetail?: unknown }>(rules: EraWorldRules, prefs: T): T {
+  const out = { ...prefs };
+  if ('landscapeTextureDetail' in prefs) out.landscapeTextureDetail = eraTextureDetail(rules, prefs.landscapeTextureDetail);
+  if ('environmentTextureDetail' in prefs) out.environmentTextureDetail = eraTextureDetail(rules, prefs.environmentTextureDetail);
+  return out;
+}
+
 export function textureFilteringOption(rules: EraWorldRules): boolean {
   return rules.textureSampling === 'prefs';
 }

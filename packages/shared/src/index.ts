@@ -100,7 +100,7 @@ export {
 export type { CombatManeuverRow, SwingAnimationInput } from './combat/SwingAnimation.js';
 export { getAnimSpeed, MIN_ATTACK_SPEED, MAX_ATTACK_SPEED, DEFAULT_WEAPON_SPEED } from './combat/AnimSpeed.js';
 export {
-  getMaxMissileRange, MISSILE_RANGE_CAP, DEFAULT_MAX_VELOCITY, METERS_TO_YARDS,
+  getMaxMissileRange, appraisedMissileVelocity, MISSILE_RANGE_CAP, DEFAULT_MAX_VELOCITY, METERS_TO_YARDS,
   getProjectileSpeed, missileAimDivisor, missileArcGroundReach, missileShot, MISSILE_GRAVITY, PROJ_SPAWN_HEIGHT, FAST_MISSILE_MODIFIER, PHYSICS_MAX_VELOCITY,
   DEFAULT_PROJECTILE_RADIUS, solveBallisticArc, missileAimLevelDeg, missileArc, missileArcPoint,
   SPELL_PROJ_HEIGHT, SPELL_PROJ_CLOSE_CYL_DIST, cylinderDistance, boltLaunch,

@@ -577,7 +577,7 @@ describe('the Config page: a Landscape Detail Textures row on AC1999 and the cla
     }
   });
 
-  it('AC1999: the row follows Environment Detail Textures, ships its state, persists, and Defaults turns it off', () => {
+  it('AC1999: the row follows Environment Detail Textures, ships its state, persists, and Defaults leaves it (PerformancePanel_Reset(1))', () => {
     const calls: boolean[] = [];
     const ui = makeUi(R1999);
     ui.setUIHost({ setLandscapeDetailTexturing: (on: boolean) => { calls.push(on); return true; } });
@@ -595,6 +595,22 @@ describe('the Config page: a Landscape Detail Textures row on AC1999 and the cla
     expect(JSON.parse(domWindow.localStorage.getItem('ac_options_settings_v1')).landscapeDetailTextures).toBe(true);
     expect(GameUIClass.readPersistedOptionsSettings().landscapeDetailTextures).toBe(true);
 
+    // The 1999 Performance panel's Defaults (PerformancePanel_Reset(1) @ 0x00598a70) re-reads the
+    // Detail Texture checkboxes from the live render flags: it never turns them off
+    // (EraClientRules.configDefaultsKeep, BUG.ac1999-environment-detail-default).
+    const btn = ui.optionsPanel.querySelector('[data-element-id="0x100001fe"]') as HTMLElement;
+    btn.dispatchEvent(new domWindow.Event('click', { bubbles: true }));
+    expect(ui.optionsSettings.landscapeDetailTextures).toBe(true);
+    expect(calls.at(-1)).toBe(true);
+    ui.toggleOptionsPanel();
+  });
+
+  it('a classic era\'s Defaults (end of retail\'s OptionPage::RestoreDefaultValues) turns it off', () => {
+    const calls: boolean[] = [];
+    const ui = makeUi(CLASSIC[0][1]);
+    ui.setUIHost({ setLandscapeDetailTexturing: (on: boolean) => { calls.push(on); return true; } });
+    ui.optionsSettings.landscapeDetailTextures = true;
+    openConfig(ui);
     const btn = ui.optionsPanel.querySelector('[data-element-id="0x100001fe"]') as HTMLElement;
     btn.dispatchEvent(new domWindow.Event('click', { bubbles: true }));
     expect(ui.optionsSettings.landscapeDetailTextures).toBe(false);
