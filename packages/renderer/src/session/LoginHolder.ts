@@ -53,6 +53,31 @@
  * Never during a resume of our own dropped session (SessionLifecycle: that
  * refusal is our own session still logging out), and never without the
  * player's Yes.
+ *
+ * BUG.held-account-logon-failed — the "Client logon failed" form. Production
+ * 2026-11-07 (Seedsow, GDL, Dark Majesty, one player, build 663601f47): a tab
+ * in the world from 03:35 to 04:03; from 03:50 the same player's other pages
+ * tried about 7 logins to the same account and every one was refused with
+ * STR_LOGIN_FAILED 0x04DF9C54 (table 8, ID_ConnectionError_ClientLogOnFailed),
+ * so they read the wrong-password text (after our case / first-time quiet
+ * retries, ~9 s each) while their own tab held the account. Live Seedsow
+ * answers a second login for an account in the world that way (the GDL
+ * reference source kicks the old client instead; the live build differs).
+ * ClientLogOnFailed is also a plain wrong password, so the tabs decide: on
+ * that refusal, before the case retry and the quiet retries, the tab asks who
+ * holds exactly this world + account (once a connect cycle, for
+ * WORLD_QUERY_WAIT_MS, 400 ms: a wrong password waits that much longer, and
+ * the retries it skips when a tab answers would only be refused again, ~9 s
+ * of them, before the same wrong-password text);
+ *  - a tab with an open session: the same Yes / No offer. Yes logs that tab
+ *    out and logs in on LOGIN_HOLDER_RETRY_DELAYS_MS; spent, the refusal goes
+ *    the usual way (case retry, quiet retries, retail's text and hint). No:
+ *    retail's text and the line naming that tab (not the wrong-password hint);
+ *  - no tab: unchanged (main.ts goes on with the case retry, the quiet
+ *    retries, retail's text and hint), 400 ms later.
+ * Every emulator that sends it (GDL / GDLE / the AC1999 server; ACE never
+ * does), every era. Telemetry: login_held 'offer_logon_failed' for the offer,
+ * and heldByTab on the login_refused / login_retry that follow.
  */
 
 import type { WorldHolder } from './AccountTabGuard.js';
@@ -61,6 +86,13 @@ import type { WorldHolder } from './AccountTabGuard.js';
 export const ACCOUNT_IN_USE_LOGIN_TOKENS: ReadonlySet<string> = new Set([
   'ID_ConnectionError_PlayerAlreadyLoggedOn',
 ]);
+
+/**
+ * BUG.held-account-logon-failed — the NetError token that is a wrong password,
+ * or (live Seedsow) an account held by another session: asked about only when
+ * a tab of this browser could explain it.
+ */
+export const LOGON_FAILED_LOGIN_TOKEN = 'ID_ConnectionError_ClientLogOnFailed';
 
 /**
  * The fresh logins after the other tab was asked to leave, while the refusal
@@ -102,7 +134,7 @@ export function stoodDownForOtherTabText(retailText: string): string {
 }
 
 /** What LoginHolderWait reports (telemetry): what the tabs answered, and how it ended. */
-export type LoginHolderReport = 'none' | 'offer-logout' | 'kept' | 'logged-out' | 'spent' | 'silent-none' | 'silent-offer';
+export type LoginHolderReport = 'none' | 'offer-logout' | 'kept' | 'logged-out' | 'spent' | 'silent-none' | 'silent-offer' | 'offer-logon-failed';
 
 export interface LoginHolderWaitDeps {
   /** SessionLifecycle.resumingAfterDrop (or a chargen resume): the refusal is our own session. */
@@ -123,6 +155,12 @@ export interface LoginHolderWaitDeps {
   refuse(text: string | null): void;
   /** The page still waits on this login (not gone to the launcher or into the game). */
   stillWaiting(): boolean;
+  /**
+   * BUG.held-account-logon-failed — a "Client logon failed" no tab of this
+   * browser explains: go on with it the usual way (the case retry, the quiet
+   * retries, retail's text and hint). Absent: refuse(null).
+   */
+  passOn?(): void;
   report?(kind: LoginHolderReport): void;
 }
 
@@ -138,6 +176,11 @@ export class LoginHolderWait {
   private closeOffer: (() => void) | null = null;
   private serial = 0;
   private asking = false;
+  /** This wait's refusal: 'in-use' (PlayerAlreadyLoggedOn, the silent form) or 'logon-failed'. */
+  private kind: 'in-use' | 'logon-failed' = 'in-use';
+  /** The tabs were asked about a "Client logon failed" this connect cycle (once a cycle). */
+  private logonFailedAsked = false;
+  private held = false;
 
   constructor(private readonly deps: LoginHolderWaitDeps) {}
 
@@ -148,11 +191,24 @@ export class LoginHolderWait {
   get offerOpen(): boolean { return this.closeOffer !== null; }
 
   /**
+   * A tab of this browser answered that it holds this login's account, this
+   * connect cycle (telemetry: heldByTab on login_refused / login_retry).
+   */
+  get heldByTab(): boolean { return this.held; }
+
+  /**
    * A login refused with `token` (a NetError token) whose retail text is
    * `retailText`: true when this module handles it.
    */
   onRefused(token: string | null | undefined, retailText: string): boolean {
-    if (!token || !ACCOUNT_IN_USE_LOGIN_TOKENS.has(token) || this.deps.resuming()) {
+    const inUse = !!token && ACCOUNT_IN_USE_LOGIN_TOKENS.has(token);
+    const logonFailed = token === LOGON_FAILED_LOGIN_TOKEN;
+    if ((!inUse && !logonFailed) || this.deps.resuming()) {
+      this.cancel();
+      return false;
+    }
+    // A "Client logon failed" while the logins after an in-use Yes run is not that wait's: the usual way.
+    if (this.retrying && this.kind === 'in-use' && logonFailed) {
       this.cancel();
       return false;
     }
@@ -160,16 +216,28 @@ export class LoginHolderWait {
       const delay = LOGIN_HOLDER_RETRY_DELAYS_MS[this.retry];
       if (delay === undefined) {
         // Spent: the server still holds the account (the other tab's logout, or a session elsewhere).
-        this.cancel();
         this.deps.report?.('spent');
+        if (this.kind === 'logon-failed') {
+          // The usual way from here (the case retry, the quiet retries, retail's text): this cycle
+          // stays asked, and heldByTab stays for its telemetry.
+          this.stopRetrying();
+          return false;
+        }
+        // Refused before the cancel, so its telemetry still carries heldByTab.
+        this.stopRetrying();
         this.deps.refuse(null);
+        this.cancel();
         return true;
       }
       this.retry++;
       this.loginIn(delay);
       return true;
     }
+    // Asked already this cycle (the case retry's or a quiet retry's refusal): the usual way.
+    if (logonFailed && this.logonFailedAsked) return false;
     this.cancel();
+    this.kind = inUse ? 'in-use' : 'logon-failed';
+    if (logonFailed) this.logonFailedAsked = true;
     this.ask(retailText);
     return true;
   }
@@ -192,13 +260,20 @@ export class LoginHolderWait {
 
   /** The connect cycle ended another way (the launcher, a relaunch, a stand-down). */
   cancel(): void {
-    this.serial++;
-    this.retry = -1;
+    this.stopRetrying();
     this.asking = false;
-    this.cancelTimer?.();
-    this.cancelTimer = null;
+    this.kind = 'in-use';
+    this.logonFailedAsked = false;
+    this.held = false;
     this.closeOffer?.();
     this.closeOffer = null;
+  }
+
+  private stopRetrying(): void {
+    this.serial++;
+    this.retry = -1;
+    this.cancelTimer?.();
+    this.cancelTimer = null;
   }
 
   private ask(retailText: string, silent = false): void {
@@ -209,14 +284,22 @@ export class LoginHolderWait {
       this.asking = false;
       if (!this.deps.stillWaiting()) return;
       const holder = holders.find((h) => h.sameAccount);
+      const logonFailed = this.kind === 'logon-failed';
+      if (!holder && logonFailed) {
+        // Most often a wrong password: exactly as before (no login_held for it).
+        if (this.deps.passOn) this.deps.passOn();
+        else this.deps.refuse(null);
+        return;
+      }
       if (!holder) {
         this.deps.report?.(silent ? 'silent-none' : 'none');
         // Silent: no tab holds it, so the resends and their timeout go on as before.
         if (!silent) this.deps.refuse(null);
         return;
       }
-      this.deps.report?.(silent ? 'silent-offer' : 'offer-logout');
-      console.warn(`[AC] "Player already logged on" — another tab of this browser holds this account (${holder.inWorld === false ? 'character select' : holder.character ?? 'in the world'})`);
+      this.held = true;
+      this.deps.report?.(silent ? 'silent-offer' : logonFailed ? 'offer-logon-failed' : 'offer-logout');
+      console.warn(`[AC] "${logonFailed ? 'Client logon failed' : 'Player already logged on'}" — another tab of this browser holds this account (${holder.inWorld === false ? 'character select' : holder.character ?? 'in the world'})`);
       this.closeOffer = this.deps.confirm(loginHolderOfferText(holder), (yes) => {
         this.closeOffer = null;
         if (serial !== this.serial || !this.deps.stillWaiting()) return;

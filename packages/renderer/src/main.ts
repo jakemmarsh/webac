@@ -452,7 +452,7 @@ import { AutomationReporter } from './telemetry/AutomationReporter.js';
 import { RefusalReporter, scrubNames } from './telemetry/RefusalReporter.js';
 import { knownObjectNames, pendingRequestDetail, castRefusalDetail, selectionRefusalDetail, CastPressTracker, type RefusalDetail, type PlacedObject } from './telemetry/RefusalTemplates.js';
 import { ObjsendReporter, countReleasedInView, summarizeObjects, type ObjsendSnapshot } from './telemetry/ObjsendReporter.js';
-import { PortalUseReporter, bodyTouchesPortal, isPortalObject, overlapsPortal, type PortalSnapshot, type PortalUseHeld } from './telemetry/PortalUseReporter.js';
+import { PortalUseReporter, bodyTouchesPortal, isPortalObject, overlapsPortal, ownMovementTouch, type PortalSnapshot, type PortalUseHeld } from './telemetry/PortalUseReporter.js';
 import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, serverIdFromUrl, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
 import { setRenderAdaptConfig, contextAntialias } from './scene/RenderScale.js';
@@ -3748,6 +3748,14 @@ async function main() {
   }
   /** The portal telemetry's 100 ms check: its verdict clock, and which portals the body stands in (the walk-in try). */
   let portalCheckAt = 0;
+  /**
+   * BUG.portal-walkin-without-moving — the body at the last portal check (null = none: the next touch
+   * waits a check), whether the server placed the body since (a forced position, a teleport arrival),
+   * and whether a MoveToState went out since: a touch is a walk-in only when the player's own movement made it.
+   */
+  let portalCheckBody: { x: number; y: number; z: number } | null = null;
+  let portalCheckPlaced = false;
+  let portalCheckMoveSent = false;
   function portalUseCheck(now: number): void {
     if (!portalUseReporter || now - portalCheckAt < 100) return;
     portalCheckAt = now;
@@ -3759,7 +3767,23 @@ async function main() {
       playerMoving: cameraController.isMoving,
       dead: playerState.isDead,
     });
-    if (!gameStarted || !serverObjectManager || gameUI.worldHiddenByPortalSpace || teleportBusy.value || playerState.isDead) return;
+    if (!gameStarted || !serverObjectManager || gameUI.worldHiddenByPortalSpace || teleportBusy.value || playerState.isDead) {
+      portalCheckBody = null;
+      return;
+    }
+    const bodyNow = { x: playerWorldX, y: currentFeetY(), z: playerWorldZ };
+    const selfMoved = ownMovementTouch({
+      displacedM: portalCheckBody
+        ? Math.hypot(bodyNow.x - portalCheckBody.x, bodyNow.y - portalCheckBody.y, bodyNow.z - portalCheckBody.z) : 0,
+      placed: portalCheckPlaced || activeCorrection !== null,
+      keys: cameraController.isMoving,
+      serverWalk: (playerMoveTo?.isMovingTo() ?? false) || meleeApproachTarget !== null,
+      airborne: isPlayerAirborne,
+      moveSent: portalCheckMoveSent,
+    });
+    portalCheckBody = bodyNow;
+    portalCheckPlaced = false;
+    portalCheckMoveSent = false;
     const inside: number[] = [];
     const insideAt: number[] = [];
     const body = serverObjectManager.getObject(aceCharGuid ?? myPlayerGuid ?? 0)?.physicsSpheres;
@@ -3778,7 +3802,7 @@ async function main() {
         : overlapsPortal(horizontal, o.worldY - playerFeetY, fixtureReach(o), 0);
       if (touching) { inside.push(o.guid); insideAt.push(horizontal); }
     }
-    portalUseReporter.overlaps(inside);
+    portalUseReporter.overlaps(inside, selfMoved);
     // The touch that starts a walk-in watch is its first (often its closest) approach.
     inside.forEach((g, i) => portalUseReporter!.approach(g, insideAt[i]));
   }
@@ -6046,6 +6070,7 @@ async function main() {
    */
   function handleTeleportToPosition(landblock: number, x: number, y: number, z: number, rw: number, rx: number, ry: number, rz: number): void {
     lastTeleportArrivalAt = performance.now();
+    portalCheckPlaced = true; // BUG.portal-walkin-without-moving — an arrival is no walk-in
     // ASSESS — a teleport supersedes any in-flight smooth correction.
     activeCorrection = null;
     playerStepSmoother.reset();
@@ -6287,6 +6312,8 @@ async function main() {
       { cellId: landblock, x, y, z },
       { moving, forced },
     );
+    // BUG.portal-walkin-without-moving — a server placement is no walk-in.
+    if (decision.action !== 'ignore') portalCheckPlaced = true;
     switch (decision.action) {
       case 'ignore':
         return;
@@ -8726,7 +8753,8 @@ async function main() {
   // browser's other tabs are asked who holds the account; a tab → Yes / No to log it out and log
   // in here (then bounded quiet logins); none → retail's text and hint as before
   // (session/LoginHolder.ts). The refusal being answered, for the dialog it ends in.
-  let loginHolderRefusal: { event: ConnectionEvent; notice: ConnectionNotice } | null = null;
+  // BUG.held-account-logon-failed — passOn: a "Client logon failed" no tab explains goes on the usual way.
+  let loginHolderRefusal: { event: ConnectionEvent; notice: ConnectionNotice; passOn?: () => void } | null = null;
   const loginHolderWait = new LoginHolderWait({
     resuming: () => sessionLifecycle.resumingAfterDrop,
     queryHolders: () => (aceAccount ? accountTabGuard.queryAccountHolders(accountSessionKey(connectUrl, aceAccount)) : Promise.resolve([])),
@@ -8743,8 +8771,15 @@ async function main() {
       const r = loginHolderRefusal;
       loginHolderRefusal = null;
       if (!r || gameStarted) return;
-      preworldReporter?.connectionError(r.event, r.notice.token || null);
+      preworldReporter?.connectionError(r.event, r.notice.token || null, { heldByTab: loginHolderWait.heldByTab });
       raiseNetError(r.notice, text ?? undefined);
+    },
+    passOn: () => {
+      const r = loginHolderRefusal;
+      loginHolderRefusal = null;
+      if (!r || gameStarted) return;
+      if (r.passOn) r.passOn();
+      else { preworldReporter?.connectionError(r.event, r.notice.token || null); raiseNetError(r.notice); }
     },
     stillWaiting: () => !launcherActive && !gameStarted,
     report: (kind) => preworldReporter?.loginHeld(kind),
@@ -9132,7 +9167,7 @@ async function main() {
     // RawMotionState::current_style: the style the player's sequence is in.
     movementSync.stanceProvider = () => playerAnimated?.motionManager.currentStyleId ?? 0;
     // BUG.portal-use-held-keys — a MoveToState while a Use is unanswered cancels ACE's walk (PORTAL_CANCELLED).
-    movementSync.onMoveToStateSent = () => portalUseReporter?.movementSent();
+    movementSync.onMoveToStateSent = () => { portalCheckMoveSent = true; portalUseReporter?.movementSent(); };
     // BUG.stale-surface-cell-sent — a position about to name a building room the body is nowhere near went out
     // with the land cell instead: drop the room (the per-frame scan finds the real one) and report it once per
     // cell (ErrorReporter dedupes repeats into a count and caps the page's reports), so prod shows a recurrence.
@@ -19653,63 +19688,70 @@ async function main() {
             // BUG.second-tab-login-refusal — "Player already logged on": ask this browser's other tabs
             // (LoginHolderWait shows the refusal itself when no tab holds the account, or the player
             // keeps it). Any other refusal ends a wait under way and goes on below.
+            // BUG.held-account-logon-failed — and "Client logon failed" (live Seedsow answers a
+            // second login to an account in the world that way): the tabs are asked first, once a
+            // connect cycle; no tab → passOn goes on below, as before (session/LoginHolder.ts).
+            const goOnRefused = (): boolean => {
+              // BUG.gdle-transient-login-failed — a proven login's "Client logon failed" (GDLE /
+              // AC1999; ACE never sends it) retries on its own behind the connecting screen; the
+              // last refusal, and any other, is shown as before (ProvenLoginRetry decides).
+              // UX.gdle-first-login-retry — on a GDL / GDLE launcher world (not register-first) a
+              // first-time login retries the same way (firstTimeLoginRetryAllowed).
+              // BUG.login-credential-case — a lowercased password (GDL / GDLE, auth-type-1 eras) that
+              // differs from what was typed and is refused as "Client logon failed": log in once more
+              // at once with the password as typed (an account made with capitals), before anything
+              // below. A named browser-UX exception (CLAUDE.md).
+              if (!gameStarted && event.serverNetError && loginCase.onRefused(netNotice.token, acePassword)) {
+                syncLoginProfile();
+                // UX.login-case-remember — or the remembered as-typed form refused: once lowercased.
+                preworldReporter?.loginRetry(event, netNotice.token || null, 1, loginCase.retryKind, { heldByTab: loginHolderWait.heldByTab });
+                console.log(loginCase.current === 'verbatim'
+                  ? `[AC] ACE: "${netNotice.text}" with the password lowercased as retail sends it — trying it as typed`
+                  : `[AC] ACE: "${netNotice.text}" with the password as typed (remembered from an earlier login) — trying it lowercased`);
+                if (provenLoginRetryTimer !== null) clearTimeout(provenLoginRetryTimer);
+                const typed = { account: aceAccount, password: acePassword, url: connectUrl };
+                provenLoginRetryTimer = setTimeout(() => {
+                  provenLoginRetryTimer = null;
+                  if (launcherActive || gameStarted || aceAccount !== typed.account || acePassword !== typed.password || connectUrl !== typed.url) return;
+                  aceConnection.autoReconnect = false;
+                  aceConnection.connect(aceAccount, acePassword);
+                }, CASE_VERBATIM_RETRY_DELAY_MS);
+                return true;
+              }
+              syncLoginProfile();
+              if (!gameStarted && event.serverNetError) {
+                const creds = wireLoginCredentials();
+                const typed = { account: aceAccount, password: acePassword };
+                const firstTime = firstTimeLoginRetryAllowed(launcherWorld, aceAccount);
+                void provenLoginRetry.onRefused(creds, netNotice.token, { firstTime }).then((verdict) => {
+                  if (gameStarted) return;
+                  if (verdict.retry) {
+                    preworldReporter?.loginRetry(event, netNotice.token || null, verdict.attempt, verdict.kind, { heldByTab: loginHolderWait.heldByTab });
+                    const why = verdict.kind === 'proven' ? 'a login this page already got in with' : `a first-time login on ${launcherWorld?.emu ?? 'GDLE'}`;
+                    console.log(`[AC] ACE: "${netNotice.text}" for ${why} — retrying in ${verdict.delayMs} ms (attempt ${verdict.attempt})`);
+                    if (provenLoginRetryTimer !== null) clearTimeout(provenLoginRetryTimer);
+                    provenLoginRetryTimer = setTimeout(() => {
+                      provenLoginRetryTimer = null;
+                      // Gone to the launcher, another tab, or new credentials meanwhile: nothing to retry.
+                      if (launcherActive || gameStarted || aceAccount !== typed.account || acePassword !== typed.password) return;
+                      aceConnection.autoReconnect = false;
+                      aceConnection.connect(typed.account, typed.password);
+                    }, verdict.delayMs);
+                    return;
+                  }
+                  preworldReporter?.connectionError(event, netNotice.token || null, { heldByTab: loginHolderWait.heldByTab });
+                  raiseNetError(netNotice);
+                });
+                return true;
+              }
+              return false;
+            };
             if (!gameStarted && event.serverNetError) {
-              loginHolderRefusal = { event, notice: netNotice };
+              loginHolderRefusal = { event, notice: netNotice, passOn: () => { if (!goOnRefused()) raiseNetError(netNotice); } };
               if (loginHolderWait.onRefused(netNotice.token, netNotice.text)) break;
               loginHolderRefusal = null;
             }
-            // BUG.gdle-transient-login-failed — a proven login's "Client logon failed" (GDLE /
-            // AC1999; ACE never sends it) retries on its own behind the connecting screen; the
-            // last refusal, and any other, is shown as before (ProvenLoginRetry decides).
-            // UX.gdle-first-login-retry — on a GDL / GDLE launcher world (not register-first) a
-            // first-time login retries the same way (firstTimeLoginRetryAllowed).
-            // BUG.login-credential-case — a lowercased password (GDL / GDLE, auth-type-1 eras) that
-            // differs from what was typed and is refused as "Client logon failed": log in once more
-            // at once with the password as typed (an account made with capitals), before anything
-            // below. A named browser-UX exception (CLAUDE.md).
-            if (!gameStarted && event.serverNetError && loginCase.onRefused(netNotice.token, acePassword)) {
-              syncLoginProfile();
-              // UX.login-case-remember — or the remembered as-typed form refused: once lowercased.
-              preworldReporter?.loginRetry(event, netNotice.token || null, 1, loginCase.retryKind);
-              console.log(loginCase.current === 'verbatim'
-                ? `[AC] ACE: "${netNotice.text}" with the password lowercased as retail sends it — trying it as typed`
-                : `[AC] ACE: "${netNotice.text}" with the password as typed (remembered from an earlier login) — trying it lowercased`);
-              if (provenLoginRetryTimer !== null) clearTimeout(provenLoginRetryTimer);
-              const typed = { account: aceAccount, password: acePassword, url: connectUrl };
-              provenLoginRetryTimer = setTimeout(() => {
-                provenLoginRetryTimer = null;
-                if (launcherActive || gameStarted || aceAccount !== typed.account || acePassword !== typed.password || connectUrl !== typed.url) return;
-                aceConnection.autoReconnect = false;
-                aceConnection.connect(aceAccount, acePassword);
-              }, CASE_VERBATIM_RETRY_DELAY_MS);
-              break;
-            }
-            syncLoginProfile();
-            if (!gameStarted && event.serverNetError) {
-              const creds = wireLoginCredentials();
-              const typed = { account: aceAccount, password: acePassword };
-              const firstTime = firstTimeLoginRetryAllowed(launcherWorld, aceAccount);
-              void provenLoginRetry.onRefused(creds, netNotice.token, { firstTime }).then((verdict) => {
-                if (gameStarted) return;
-                if (verdict.retry) {
-                  preworldReporter?.loginRetry(event, netNotice.token || null, verdict.attempt, verdict.kind);
-                  const why = verdict.kind === 'proven' ? 'a login this page already got in with' : `a first-time login on ${launcherWorld?.emu ?? 'GDLE'}`;
-                  console.log(`[AC] ACE: "${netNotice.text}" for ${why} — retrying in ${verdict.delayMs} ms (attempt ${verdict.attempt})`);
-                  if (provenLoginRetryTimer !== null) clearTimeout(provenLoginRetryTimer);
-                  provenLoginRetryTimer = setTimeout(() => {
-                    provenLoginRetryTimer = null;
-                    // Gone to the launcher, another tab, or new credentials meanwhile: nothing to retry.
-                    if (launcherActive || gameStarted || aceAccount !== typed.account || acePassword !== typed.password) return;
-                    aceConnection.autoReconnect = false;
-                    aceConnection.connect(typed.account, typed.password);
-                  }, verdict.delayMs);
-                  return;
-                }
-                preworldReporter?.connectionError(event, netNotice.token || null);
-                raiseNetError(netNotice);
-              });
-              break;
-            }
+            if (goOnRefused()) break;
             if (!gameStarted) preworldReporter?.connectionError(event, netNotice.token || null);
             // BUG.world-list-unreachable — a launcher login whose socket to our bridge never opened:
             // the bridge has no trace of it, so report it through the web origin (once per login).

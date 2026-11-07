@@ -98,6 +98,17 @@
  * proper (PORTAL_REFUSAL_CODES or a portal chat line), never one heard before the overlap baseline
  * (portal space, entry), and a teleport or a world change drops it. ITeleported 0x003C, ACE's notice
  * after every portal teleport (Portal.cs ActOnUse), is no refusal in a watch either.
+ *
+ * BUG.portal-walkin-without-moving (2026-11-06): a touch the player's own movement did not make is no try.
+ * Coldeve (ACE), build 20ff651c6: a walk-in watch on wcid 42155 (PhysicsState 0xC0C, ReportCollisions) in
+ * cell 0x8a020111 reported `portal_use_failed` with playerMoved false, movesSent 0, serverMoves 0, sends 0:
+ * the body never moved; something else closed the distance (the portal arriving into view, a placement).
+ * Retail and ACE collide a mover with a portal only during the mover's own transition (report_object_collision
+ * runs from the mover's transition; progress.md 2026-11-03: "teleloc onto a 1087 → nothing while standing,
+ * teleported on the first step"). main.ts now tells overlaps() whether the player's own movement moved the
+ * body since the last check (ownMovementTouch: the body moved, no server placement, and keys, the server's
+ * walk, a jump / fall or a MoveToState drove it). A touch without it starts no watch and stays a pending
+ * touch: the first own step while still touching starts the watch, as that step is the server's collision.
  */
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 
@@ -182,6 +193,36 @@ export const PORTAL_CANCELLED = 'portal_cancelled' as const;
 export function walkInActs(physicsState: number): boolean {
   const ps = Number.isFinite(physicsState) ? physicsState >>> 0 : 0;
   return (ps & PS_REPORT_COLLISIONS) !== 0 && (ps & (PS_IGNORE_COLLISIONS | PS_REPORT_COLLISIONS_AS_ENVIRONMENT)) === 0;
+}
+
+/** The least body displacement (m) between two portal checks that counts as the body moving (float noise below). */
+export const OWN_MOVE_MIN_M = 0.01;
+
+/** What main.ts knows about the body between two 100 ms portal checks (BUG.portal-walkin-without-moving). */
+export interface OwnMovementSample {
+  /** How far the body moved since the last check (m); 0 when there was no last check. */
+  displacedM: number;
+  /** The server placed the body since the last check (a forced position, a teleport arrival, a correction blend). */
+  placed: boolean;
+  /** The player's movement keys (or autorun) are held. */
+  keys: boolean;
+  /** The server's MoveTo (or the melee approach) is moving the player. */
+  serverWalk: boolean;
+  /** The body is in a jump or a fall. */
+  airborne: boolean;
+  /** A MoveToState went out since the last check. */
+  moveSent: boolean;
+}
+
+/**
+ * The player's own movement moved the body since the last check: the only motion a server transition sweeps
+ * into a portal (CPhysicsObj::report_object_collision @ 0x00513060 runs from the mover's own transition).
+ * A body that moved with no movement of its own (a placement, an unexplained shift) or a body standing still
+ * while something else closed the distance is not.
+ */
+export function ownMovementTouch(m: OwnMovementSample): boolean {
+  if (m.placed || !Number.isFinite(m.displacedM) || m.displacedM < OWN_MOVE_MIN_M) return false;
+  return m.keys || m.serverWalk || m.airborne || m.moveSent;
 }
 
 export const PORTAL_REPLY_MS = 5_000;
@@ -469,14 +510,16 @@ export class PortalUseReporter {
    * The portals the player's body overlaps now (main.ts, every 100 ms in the world). A portal newly
    * overlapped starts a walk-in watch unless one is running for it; the first check after a teleport or
    * a world entry only records where the body stands (arriving on a portal is no try).
+   * `selfMoved` false (BUG.portal-walkin-without-moving): the player's own movement did not move the body
+   * since the last check, so a new touch is no try. It starts no watch and is left out of the overlap
+   * set, so the first check the body does move while still touching starts it.
    */
-  overlaps(guids: Iterable<number>): void {
+  overlaps(guids: Iterable<number>, selfMoved = true): void {
     const now = new Set<number>();
     for (const g of guids) now.add(g >>> 0);
     const before = this.overlapping;
-    this.overlapping = now;
-    if (before === null) return;
-    for (const g of now) {
+    if (before === null) { this.overlapping = now; return; }
+    for (const g of [...now]) {
       if (before.has(g)) continue;
       const w = this.watch;
       if (w && w.guid === g) {
@@ -485,8 +528,10 @@ export class PortalUseReporter {
         w.progressAt = this.now();
         continue;
       }
+      if (!selfMoved) { now.delete(g); continue; }
       this.begin(g, 'walk_in', this.now(), false, null);
     }
+    this.overlapping = now;
   }
 
   /** The body's horizontal distance (m) to the portal under watch now (main.ts, each check); keeps the closest. */

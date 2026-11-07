@@ -161,6 +161,12 @@ export interface ClientPreworldEvent {
   path?: typeof HANDOVER_PATHS[number];
   /** 'login_retry' only: why the page retried (LOGIN_RETRY_KINDS). */
   retry?: typeof LOGIN_RETRY_KINDS[number];
+  /**
+   * BUG.held-account-logon-failed — 'login_refused' / 'login_retry' only: a
+   * tab of the player's browser held this world + account when the login was
+   * refused. Absent otherwise.
+   */
+  heldByTab?: true;
   /** 'connect_failed' only: the network was out (CONNECT_FAILED_CAUSES). */
   why?: typeof CONNECT_FAILED_CAUSES[number];
   /**
@@ -262,6 +268,7 @@ export function sanitizeClientPreworld(body: unknown): ClientPreworldEvent | nul
     ...(outcome === 'dropped' ? netDiagField(b.net) : {}),
     ...(outcome === 'handover' ? handoverFields(b) : {}),
     ...(outcome === 'login_retry' ? loginRetryField(b.retry) : {}),
+    ...(outcome === 'login_refused' || outcome === 'login_retry' ? heldByTabField(b.heldByTab) : {}),
     ...(outcome === 'char_list' ? afterRefusalField(b.afterRefusal) : {}),
     ...(outcome === 'connect_failed' ? connectFailedWhyField(b.why) : {}),
     ...(outcome === 'chargen_ok' || outcome === 'chargen_refused' ? heritageField(b.heritage) : {}),
@@ -306,6 +313,11 @@ export function streamField(v: unknown): { stream?: BootStream[] } {
 export function connectFailedWhyField(v: unknown): Pick<ClientPreworldEvent, 'why'> {
   const why = pick(v, CONNECT_FAILED_CAUSES);
   return why ? { why } : {};
+}
+
+/** `{ heldByTab: true }` when it is exactly true, else nothing. */
+export function heldByTabField(v: unknown): Pick<ClientPreworldEvent, 'heldByTab'> {
+  return v === true ? { heldByTab: true } : {};
 }
 
 /** `{ retry }` when it is a known LOGIN_RETRY_KINDS value, else nothing. */

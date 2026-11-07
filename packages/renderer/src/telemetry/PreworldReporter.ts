@@ -368,6 +368,12 @@ export interface PreworldEvent {
    */
   afterRefusal?: AfterRefusal;
   /**
+   * BUG.held-account-logon-failed — 'login_refused' / 'login_retry' only: a
+   * tab of this browser answered that it holds this login's world + account
+   * (session/LoginHolder.ts). Absent otherwise.
+   */
+  heldByTab?: true;
+  /**
    * BUG.resume-hung-socket — 'connect_failed' only: the network was out
    * ('open_timeout': the socket never answered within WS_OPEN_TIMEOUT_MS;
    * 'offline': navigator.onLine was false). Absent on an ordinary failed open.
@@ -698,10 +704,12 @@ export class PreworldReporter {
    * (Yes: that tab was asked to log out), 'kept' (No) or 'spent' (the logins
    * after Yes were refused to the end); for a login the server never
    * answered (GDLE's silent form), 'silent_none' (no tab: the resends go on)
-   * or 'silent_offer' (a tab holds it: the Yes / No is up).
+   * or 'silent_offer' (a tab holds it: the Yes / No is up); for a "Client
+   * logon failed" a tab explains (BUG.held-account-logon-failed),
+   * 'offer_logon_failed' (no event when no tab does: a wrong password).
    */
-  loginHeld(kind: 'none' | 'offer-logout' | 'kept' | 'logged-out' | 'spent' | 'silent-none' | 'silent-offer'): void {
-    this.report('login_held', { token: kind.replace('-', '_') });
+  loginHeld(kind: 'none' | 'offer-logout' | 'kept' | 'logged-out' | 'spent' | 'silent-none' | 'silent-offer' | 'offer-logon-failed'): void {
+    this.report('login_held', { token: kind.replace(/-/g, '_') });
   }
 
   /**
@@ -715,19 +723,20 @@ export class PreworldReporter {
    */
   loginRetry(
     event: Pick<ConnectionEvent, 'characterError' | 'serverNetError' | 'netErrorId'>, token: string | null, attempt: number,
-    kind: LoginRetryKind = 'proven',
+    kind: LoginRetryKind = 'proven', opts: { heldByTab?: boolean } = {},
   ): void {
     const count = Math.max(0, Math.min(1000, Math.trunc(attempt)));
     const retry: LoginRetryKind = kind === 'first_time' || kind === 'case_verbatim' || kind === 'case_lower' ? kind : 'proven';
+    const held = opts.heldByTab === true ? { heldByTab: true as const } : {};
     if (event.serverNetError) {
       this.report('login_retry', {
-        code: event.serverNetError.stringId >>> 0, table: event.serverNetError.tableId >>> 0, token: safeToken(token), count, retry,
+        code: event.serverNetError.stringId >>> 0, table: event.serverNetError.tableId >>> 0, token: safeToken(token), count, retry, ...held,
       });
       return;
     }
     this.report('login_retry', {
       code: event.characterError !== undefined ? event.characterError >>> 0 : undefined,
-      token: safeToken(token) ?? safeToken(event.netErrorId), count, retry,
+      token: safeToken(token) ?? safeToken(event.netErrorId), count, retry, ...held,
     });
   }
 
@@ -784,9 +793,15 @@ export class PreworldReporter {
    * A connection 'error' the page acts on (after its own retry filters):
    * a CharacterError (both eras), a server NetError (GDLE / AC1999 refusal)
    * or a client-side NetError (socket, login timeout, version). `token` is
-   * the notice token the page shows for it.
+   * the notice token the page shows for it. `opts.heldByTab`
+   * (BUG.held-account-logon-failed): a tab of this browser holds the
+   * account, on the login_refused it makes.
    */
-  connectionError(event: Pick<ConnectionEvent, 'characterError' | 'serverNetError' | 'netErrorId' | 'openTimedOut'>, token: string | null = null): void {
+  connectionError(
+    event: Pick<ConnectionEvent, 'characterError' | 'serverNetError' | 'netErrorId' | 'openTimedOut'>, token: string | null = null,
+    opts: { heldByTab?: boolean } = {},
+  ): void {
+    const held = opts.heldByTab === true ? { heldByTab: true as const } : {};
     if (event.characterError !== undefined) {
       const code = event.characterError >>> 0;
       const name = safeToken(token) ?? safeToken(CharacterError[code]);
@@ -794,7 +809,7 @@ export class PreworldReporter {
         this.enterAt = null;
         this.report('enter_refused', { code, token: name });
       } else if (!this.charListSeen) {
-        this.report('login_refused', { code, token: name });
+        this.report('login_refused', { code, token: name, ...held });
       } else {
         this.report('char_error', { code, token: name });
       }
@@ -802,7 +817,7 @@ export class PreworldReporter {
     }
     if (event.serverNetError) {
       this.report('login_refused', {
-        code: event.serverNetError.stringId >>> 0, table: event.serverNetError.tableId >>> 0, token: safeToken(token),
+        code: event.serverNetError.stringId >>> 0, table: event.serverNetError.tableId >>> 0, token: safeToken(token), ...held,
       });
       return;
     }
@@ -1028,7 +1043,7 @@ export class PreworldReporter {
 
   // ── Transport ────────────────────────────────────────────────────────
 
-  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'heritage' | 'handoverMs' | 'reason' | 'path' | 'retry' | 'why' | 'afterRefusal'>>, withStream = false): void {
+  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'heritage' | 'handoverMs' | 'reason' | 'path' | 'retry' | 'why' | 'afterRefusal' | 'heldByTab'>>, withStream = false): void {
     // OBS.login-after-refusal — every refused attempt, sent or not. A case retry's refusal
     // (case_verbatim / case_lower, LoginCaseFallback) is the page trying the password's other
     // case, not the server refusing what the player typed, so it is not counted.
@@ -1066,6 +1081,7 @@ export class PreworldReporter {
       ...(f.heritage !== undefined ? { heritage: f.heritage } : {}),
       ...(outcome === 'handover' ? { handoverMs: f.handoverMs, reason: f.reason, path: f.path } : {}),
       ...(outcome === 'login_retry' && f.retry ? { retry: f.retry } : {}),
+      ...((outcome === 'login_refused' || outcome === 'login_retry') && f.heldByTab === true ? { heldByTab: true as const } : {}),
       ...(outcome === 'connect_failed' && f.why ? { why: f.why } : {}),
       ...(outcome === 'char_list' && f.afterRefusal ? { afterRefusal: {
         sameAccount: f.afterRefusal.sameAccount === true,

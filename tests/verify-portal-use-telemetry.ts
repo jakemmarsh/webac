@@ -11,7 +11,7 @@ import * as THREE from 'three';
 import { describe, it, expect, beforeAll } from 'vitest';
 import {
   PortalUseReporter, PORTAL_REPLY_MS, PORTAL_MAX_WAIT_MS, PORTAL_RATE_MS, chatTemplate, isPortalObject, overlapsPortal, bodyTouchesPortal,
-  walkInActs, WEENIE_ERROR_ACTION_CANCELLED, WEENIE_ERROR_I_TELEPORTED, PORTAL_EARLY_REFUSAL_MS, PORTAL_REFUSAL_CODES,
+  walkInActs, ownMovementTouch, OWN_MOVE_MIN_M, WEENIE_ERROR_ACTION_CANCELLED, WEENIE_ERROR_I_TELEPORTED, PORTAL_EARLY_REFUSAL_MS, PORTAL_REFUSAL_CODES,
   type PortalEvent, type PortalSnapshot, type PortalUseFailedEvent,
 } from '../packages/renderer/src/telemetry/PortalUseReporter';
 import { sanitizeClientPortal, sanitizeClientWorld } from '../services/ws-tcp-bridge/src/clientWorld';
@@ -594,6 +594,92 @@ describe('BUG.portal-refusal-before-watch: a refusal that beat the watch is its 
     g.r.weenieError(WEENIE_ERROR_I_TELEPORTED);
     g.run(PORTAL_REPLY_MS + 100);
     expect(g.events[0]).toMatchObject({ outcome: 'portal_use_failed', weenieErrors: [0x3c] });
+  });
+});
+
+describe('BUG.portal-walkin-without-moving: a touch the player\'s own movement did not make is no try', () => {
+  /** The Coldeve portal: wcid 42155, PhysicsState 0xC0C (ReportCollisions), in cell 0x8a020111. */
+  const coldeve = () => rig(() => snap({ wcid: 42155, physicsState: 3084, playerCell: 0x8a020111, portalCell: 0x8a020111 }));
+
+  it('a portal that reaches a standing body (the Coldeve event) starts no watch and reports nothing', () => {
+    const g = coldeve();
+    g.r.overlaps([]); // the baseline
+    for (let i = 0; i < 60; i++) { g.r.overlaps([PORTAL_GUID], false); g.run(100); }
+    expect(g.r.watching).toBeNull();
+    expect(g.events).toEqual([]);
+  });
+
+  it('the first own step while still touching is the try (retail: teleported on the first step)', () => {
+    const g = coldeve();
+    g.r.overlaps([]);
+    g.r.overlaps([PORTAL_GUID], false);
+    g.r.overlaps([PORTAL_GUID], false);
+    expect(g.r.watching).toBeNull();
+    g.r.overlaps([PORTAL_GUID], true);
+    expect(g.r.watching).toBe(PORTAL_GUID);
+    g.clock.t += 400;
+    g.r.teleported();
+    expect(g.events).toEqual([expect.objectContaining({ outcome: 'portal_used', trigger: 'walk_in', wcid: 42155 })]);
+  });
+
+  it('a keyboard walk-in into a portal that does nothing still reports portal_use_failed', () => {
+    const g = coldeve();
+    g.r.overlaps([]);
+    g.r.overlaps([PORTAL_GUID], true);
+    expect(g.r.watching).toBe(PORTAL_GUID);
+    for (let i = 0; i < PORTAL_REPLY_MS / 100 + 2; i++) {
+      g.r.overlaps([PORTAL_GUID], true);
+      g.clock.t += 100;
+      g.r.tick({ serverWalking: false, playerMoving: true });
+    }
+    expect(g.events).toHaveLength(1);
+    expect(g.events[0]).toMatchObject({ outcome: 'portal_use_failed', trigger: 'walk_in', wcid: 42155, playerMoved: true });
+  });
+
+  it('a body that stops inside after the walk-in began keeps the one watch, and does not restart it', () => {
+    const g = coldeve();
+    g.r.overlaps([]);
+    g.r.overlaps([PORTAL_GUID], true);
+    g.r.overlaps([PORTAL_GUID], false);
+    g.run(PORTAL_REPLY_MS + 100);
+    expect(g.events).toHaveLength(1);
+    expect(g.r.watching).toBeNull();
+    g.r.overlaps([PORTAL_GUID], true); // still inside: not a new touch
+    expect(g.r.watching).toBeNull();
+  });
+
+  it('a use watch is unchanged: a still body touching the used portal marks it overlapped', () => {
+    const g = coldeve();
+    g.r.overlaps([]);
+    g.r.useAttempt(PORTAL_GUID, portalObj, true);
+    g.r.overlaps([PORTAL_GUID], false);
+    g.run(PORTAL_REPLY_MS + 100);
+    expect(g.events[0]).toMatchObject({ trigger: 'use', overlapped: true, outcome: 'portal_use_failed' });
+  });
+
+  it('a refusal heard before a still touch stays held for the next real walk-in', () => {
+    const g = coldeve();
+    g.r.overlaps([]);
+    g.r.weenieError(0x04a7);
+    g.r.overlaps([PORTAL_GUID], false);
+    expect(g.r.watching).toBeNull();
+    g.clock.t += 100;
+    g.r.overlaps([PORTAL_GUID], true);
+    g.run(PORTAL_REPLY_MS + 100);
+    expect(g.events[0]).toMatchObject({ outcome: 'portal_refused', weenieErrors: [0x04a7], refusalLeadMs: 100 });
+  });
+
+  it('ownMovementTouch: the body moved, no placement, and the player\'s own movement drove it', () => {
+    const base = { displacedM: 0.5, placed: false, keys: false, serverWalk: false, airborne: false, moveSent: false };
+    expect(ownMovementTouch(base)).toBe(false); // moved with nothing of its own driving it
+    expect(ownMovementTouch({ ...base, keys: true })).toBe(true);
+    expect(ownMovementTouch({ ...base, serverWalk: true })).toBe(true);
+    expect(ownMovementTouch({ ...base, airborne: true })).toBe(true);
+    expect(ownMovementTouch({ ...base, moveSent: true })).toBe(true);
+    expect(ownMovementTouch({ ...base, keys: true, placed: true })).toBe(false); // a forced position / an arrival
+    expect(ownMovementTouch({ ...base, keys: true, displacedM: 0 })).toBe(false); // keys against a wall, or only turning
+    expect(ownMovementTouch({ ...base, keys: true, displacedM: OWN_MOVE_MIN_M / 2 })).toBe(false);
+    expect(ownMovementTouch({ ...base, keys: true, displacedM: NaN })).toBe(false);
   });
 });
 

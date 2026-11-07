@@ -29,7 +29,7 @@ import {
   AccountTabGuard, accountSessionKey, type SessionChannelLike, type WorldHolder, type LogoutReason,
 } from '../packages/renderer/src/session/AccountTabGuard';
 import {
-  LoginHolderWait, LOGIN_HOLDER_RETRY_DELAYS_MS, LOGIN_HOLDER_LEAVING_STATUS, LOGGED_OUT_FOR_LOGIN_TEXT,
+  LoginHolderWait, LOGIN_HOLDER_RETRY_DELAYS_MS, LOGON_FAILED_LOGIN_TOKEN, LOGIN_HOLDER_LEAVING_STATUS, LOGGED_OUT_FOR_LOGIN_TEXT,
   ACCOUNT_IN_USE_LOGIN_TOKENS, loginHolderOfferText, loginHolderKeptText, stoodDownForOtherTabText, type LoginHolderReport,
 } from '../packages/renderer/src/session/LoginHolder';
 import { serverNetErrorNotice, characterErrorNotice, ACCOUNT_IN_USE_HINT } from '../packages/renderer/src/ui/ConnectionNotices';
@@ -344,7 +344,7 @@ function makeLoginPage(hub: FakeChannelHub, account = 'jake', world = REEF) {
   const key = accountSessionKey(world, account);
   const timers: { fn: () => void; ms: number; live: boolean }[] = [];
   const page = {
-    tab, logins: 0, resuming: false, waiting: true,
+    tab, logins: 0, passed: 0, resuming: false, waiting: true,
     status: [] as (string | null)[],
     refused: [] as (string | null)[],
     reports: [] as LoginHolderReport[],
@@ -369,6 +369,7 @@ function makeLoginPage(hub: FakeChannelHub, account = 'jake', world = REEF) {
     setStatus: (text) => { page.status.push(text); },
     refuse: (text) => { page.refused.push(text); },
     stillWaiting: () => page.waiting,
+    passOn: () => { page.passed++; },
     report: (kind) => { page.reports.push(kind); },
   });
   return page;
@@ -504,7 +505,7 @@ describe('BUG.second-tab-login-refusal — the refused login\'s wait', () => {
     a.guard.claim(accountSessionKey(REEF, 'jake'));
     const b = makeLoginPage(hub);
     expect(ACCOUNT_IN_USE_LOGIN_TOKENS.has('ID_ConnectionError_ClientLogOnFailed')).toBe(false);
-    expect(b.wait.onRefused('ID_ConnectionError_ClientLogOnFailed', 'Client logon failed')).toBe(false);
+    expect(b.wait.onRefused('ID_ConnectionError_BadCryptoKey', 'Bad crypto key')).toBe(false);
     expect(b.wait.onRefused(null, '')).toBe(false);
     b.wait.onRefused(TOKEN, RETAIL);
     await flush();
@@ -683,6 +684,188 @@ describe('BUG.second-tab-login-refusal — the silent form (a login the server n
     expect(a.stoodDown).toBe(0); // the unanswered login claimed nothing
     expect(b.tab.guard.heldKey).toBeNull();
     conn.disconnect();
+  });
+});
+
+const LOGON_FAILED = 'ID_ConnectionError_ClientLogOnFailed';
+const LOGON_FAILED_TEXT = 'Client logon failed';
+const SEEDSOW = 'wss://bridge.example/connect?server=5eed5ow0-0000-4000-8000-000000000001';
+
+/**
+ * BUG.held-account-logon-failed — production 2026-11-07 (Seedsow, GDL, Dark
+ * Majesty, one player): a tab in the world on an account; that player's other
+ * pages tried ~7 logins to it and each was refused with STR_LOGIN_FAILED
+ * ("Client logon failed", table 8), read as a wrong password, while their own
+ * tab held the account. The same wait now asks the tabs about that refusal.
+ */
+describe('BUG.held-account-logon-failed — "Client logon failed" while a tab of this browser holds the account', () => {
+  /** A tab in the world on Seedsow as jake (the holder), and the login page refused on the same key. */
+  function seedsow(account = 'jake', world = SEEDSOW) {
+    const hub = new FakeChannelHub();
+    const a = makeTab(hub, 'tab-a');
+    a.guard.claim(accountSessionKey(SEEDSOW, 'jake'));
+    a.world = { name: 'Brakken' };
+    const b = makeLoginPage(hub, account, world);
+    return { hub, a, b };
+  }
+
+  it('the token is GDL / GDLE / the AC1999 server\'s STR_LOGIN_FAILED, apart from the in-use tokens', () => {
+    expect(LOGON_FAILED_LOGIN_TOKEN).toBe(LOGON_FAILED);
+    expect(serverNetErrorNotice(STR_LOGIN_FAILED, ST_SERVER_ERRORS).token).toBe(LOGON_FAILED);
+    expect(ACCOUNT_IN_USE_LOGIN_TOKENS.has(LOGON_FAILED)).toBe(false);
+  });
+
+  it('a tab holds it: the Yes / No offer, before any case or quiet retry; nothing logs out unasked', async () => {
+    const { a, b } = seedsow('Jake');
+    expect(b.wait.onRefused(LOGON_FAILED, LOGON_FAILED_TEXT)).toBe(true);
+    await flush();
+    expect(b.offers).toHaveLength(1);
+    expect(b.offers[0].text).toBe('This account is already logged in in another tab of this browser, in the world as Brakken.\n\nLog out that tab and log in here?');
+    expect(b.wait.heldByTab).toBe(true);
+    expect(b.reports).toEqual(['offer-logon-failed']);
+    expect([b.passed, b.refused, b.logins, b.pending, a.loggedOut]).toEqual([0, [], 0, 0, []]);
+  });
+
+  it('no tab holds it: passed on once (the case retry, the quiet retries, retail\'s text, as before); the cycle\'s later refusals are not asked about', async () => {
+    const hub = new FakeChannelHub();
+    const b = makeLoginPage(hub);
+    expect(b.wait.onRefused(LOGON_FAILED, LOGON_FAILED_TEXT)).toBe(true);
+    await flush();
+    expect([b.passed, b.offers, b.refused, b.reports, b.wait.heldByTab]).toEqual([1, [], [], [], false]);
+    // The case retry's refusal and the first-time retries' refusals: the usual way at once.
+    expect(b.wait.onRefused(LOGON_FAILED, LOGON_FAILED_TEXT)).toBe(false);
+    expect(b.wait.onRefused(LOGON_FAILED, LOGON_FAILED_TEXT)).toBe(false);
+    expect(b.passed).toBe(1);
+    // The cycle ended (the launcher, the OK's relaunch): the next login asks again.
+    b.wait.cancel();
+    expect(b.wait.onRefused(LOGON_FAILED, LOGON_FAILED_TEXT)).toBe(true);
+    await flush();
+    expect(b.passed).toBe(2);
+  });
+
+  it('another account, or this account on another world: unchanged (passed on, nothing offered or logged out)', async () => {
+    for (const [account, world] of [['someone', SEEDSOW], ['jake', REEF]] as const) {
+      const { a, b } = seedsow(account, world);
+      expect(b.wait.onRefused(LOGON_FAILED, LOGON_FAILED_TEXT)).toBe(true);
+      await flush();
+      expect([b.passed, b.offers, b.refused, b.reports, a.loggedOut, b.wait.heldByTab]).toEqual([1, [], [], [], [], false]);
+    }
+  });
+
+  it('a holder whose session is closed (a Disconnected screen) does not answer: unchanged', async () => {
+    const { a, b } = seedsow();
+    a.live = false;
+    b.wait.onRefused(LOGON_FAILED, LOGON_FAILED_TEXT);
+    await flush();
+    expect([b.passed, b.offers, a.loggedOut]).toEqual([1, [], []]);
+  });
+
+  it('No: retail\'s text and the line naming that tab (not the wrong-password hint); the tab stays', async () => {
+    const { a, b } = seedsow();
+    b.wait.onRefused(LOGON_FAILED, LOGON_FAILED_TEXT);
+    await flush();
+    b.offers[0].answer(false);
+    expect(b.refused).toEqual([`${LOGON_FAILED_TEXT}\n\nThis account is logged in in another tab of this browser, in the world as Brakken: log out there, then log in again.`]);
+    expect([a.loggedOut, b.logins, b.pending, b.passed]).toEqual([[], 0, 0, 0]);
+    expect(b.reports).toEqual(['offer-logon-failed', 'kept']);
+  });
+
+  it('Yes: only that tab logs out, and the login retries until the server lets it in', async () => {
+    const { hub, a, b } = seedsow();
+    const other = makeTab(hub, 'tab-other');
+    other.guard.claim(accountSessionKey(SEEDSOW, 'someone'));
+    other.world = { name: 'Cobalt' };
+    b.wait.onRefused(LOGON_FAILED, LOGON_FAILED_TEXT);
+    await flush();
+    b.offers[0].answer(true);
+    expect(a.loggedOut).toEqual(['login']);
+    expect(other.loggedOut).toEqual([]);
+    expect(b.status.at(-1)).toBe(LOGIN_HOLDER_LEAVING_STATUS);
+    expect(b.fire()).toBe(LOGIN_HOLDER_RETRY_DELAYS_MS[0]);
+    expect(b.logins).toBe(1);
+    // Seedsow still holds the account a moment: refused the same way, quietly.
+    expect(b.wait.onRefused(LOGON_FAILED, LOGON_FAILED_TEXT)).toBe(true);
+    expect(b.fire()).toBe(LOGIN_HOLDER_RETRY_DELAYS_MS[1]);
+    expect(b.logins).toBe(2);
+    b.wait.end();
+    expect([b.pending, b.refused, b.passed]).toEqual([0, [], 0]);
+    expect(b.reports).toEqual(['offer-logon-failed', 'logged-out']);
+  });
+
+  it('Yes, and the refusals go on (a wrong password after all): bounded, then the usual way (no loop, never asked again)', async () => {
+    const { b } = seedsow();
+    b.wait.onRefused(LOGON_FAILED, LOGON_FAILED_TEXT);
+    await flush();
+    b.offers[0].answer(true);
+    let handled = true;
+    while (b.fire() >= 0) handled = b.wait.onRefused(LOGON_FAILED, LOGON_FAILED_TEXT);
+    expect(handled).toBe(false); // the last refusal: main.ts goes on with the case retry, quiet retries, retail's text
+    expect(b.logins).toBe(LOGIN_HOLDER_RETRY_DELAYS_MS.length);
+    expect(b.reports.at(-1)).toBe('spent');
+    expect(b.wait.retrying).toBe(false);
+    expect(b.wait.heldByTab).toBe(true); // for those refusals' telemetry
+    expect(b.wait.onRefused(LOGON_FAILED, LOGON_FAILED_TEXT)).toBe(false);
+    expect([b.offers.length, b.refused, b.pending]).toEqual([1, [], 0]);
+  });
+
+  it('a resume of our own dropped session never asks', async () => {
+    const { a, b } = seedsow();
+    b.resuming = true;
+    expect(b.wait.onRefused(LOGON_FAILED, LOGON_FAILED_TEXT)).toBe(false);
+    await flush();
+    expect([b.offers, b.passed, b.reports, a.loggedOut]).toEqual([[], 0, [], []]);
+  });
+
+  it('end to end: GDL\'s STR_LOGIN_FAILED (real ClientConnection) and the AC1999 server\'s (Connection1999) bring the offer up; neither claims', async () => {
+    quiet();
+    for (const era of ['gdl', 'ac1999'] as const) {
+      const { a, b } = seedsow();
+      const conn = era === 'gdl' ? new ClientConnection(SEEDSOW) : new Connection1999(SEEDSOW);
+      if (conn instanceof ClientConnection) conn.autoReconnect = false;
+      b.tab.guard.watch(conn, () => accountSessionKey(SEEDSOW, 'jake'));
+      const events: ConnectionEvent[] = [];
+      conn.on((e) => events.push(e));
+      conn.connect('jake', 'pw');
+      const sock = FakeSocket.sockets[FakeSocket.sockets.length - 1];
+      sock.open();
+      sock.deliver(era === 'gdl' ? gdleRefusal(STR_LOGIN_FAILED) : refusal1999(STR_LOGIN_FAILED));
+      const err = events.find((e) => e.type === 'error');
+      const notice = serverNetErrorNotice(err!.serverNetError!.stringId, err!.serverNetError!.tableId);
+      expect(b.wait.onRefused(notice.token, notice.text)).toBe(true);
+      await flush();
+      expect(b.offers).toHaveLength(1);
+      expect([a.stoodDown, b.tab.guard.heldKey]).toEqual([0, null]);
+      conn.disconnect();
+    }
+  });
+
+  it('telemetry: heldByTab on login_refused / login_retry when a tab held it, kept by the bridge; absent otherwise', () => {
+    const sent: unknown[] = [];
+    const r = new PreworldReporter({
+      endpoint: 'https://bridge.example/client-preworld', build: 'abc1234', era: () => 'classic-dereth-1-0', server: () => 'seedsow',
+      screen: () => 'connecting', now: () => 1000, trace: 'feedc0de12345678', send: (_u, raw) => sent.push(JSON.parse(raw)),
+    });
+    const ev = { serverNetError: { stringId: STR_LOGIN_FAILED, tableId: ST_SERVER_ERRORS } };
+    r.loginHeld('offer-logon-failed');
+    r.loginRetry(ev, LOGON_FAILED, 1, 'case_verbatim', { heldByTab: true });
+    r.connectionError(ev, LOGON_FAILED, { heldByTab: true });
+    r.loginRetry(ev, LOGON_FAILED, 1, 'first_time');
+    r.connectionError(ev, LOGON_FAILED);
+    const kept = sent.map((x) => sanitizeClientPreworld(x));
+    expect(kept.map((e) => [e?.outcome, e?.token, e?.heldByTab])).toEqual([
+      ['login_held', 'offer_logon_failed', undefined],
+      ['login_retry', LOGON_FAILED, true],
+      ['login_refused', LOGON_FAILED, true],
+      ['login_retry', LOGON_FAILED, undefined],
+      ['login_refused', LOGON_FAILED, undefined],
+    ]);
+    expect(kept[2]).toMatchObject({ code: STR_LOGIN_FAILED, table: ST_SERVER_ERRORS });
+    expect('heldByTab' in (sent[4] as object)).toBe(false);
+    // The bridge keeps only exactly true, and only on those two outcomes.
+    expect(sanitizeClientPreworld({ outcome: 'login_refused', heldByTab: 'yes' })?.heldByTab).toBeUndefined();
+    expect(sanitizeClientPreworld({ outcome: 'login_refused', heldByTab: 1 })?.heldByTab).toBeUndefined();
+    expect(sanitizeClientPreworld({ outcome: 'char_list', heldByTab: true })?.heldByTab).toBeUndefined();
+    expect(sanitizeClientPreworld({ outcome: 'login_retry', heldByTab: true })?.heldByTab).toBe(true);
   });
 });
 
