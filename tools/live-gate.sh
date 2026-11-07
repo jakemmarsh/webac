@@ -41,7 +41,7 @@
 #   screen-ac1999-retail           … (ERAS=ac1999-retail; AC1999 lane added 2026-11-07)  AC1999 server bridge :9312
 # The play-throughs run on a Vite this script starts from this checkout (HEAD); the screen regression
 # starts its own two (the base build and HEAD). Accounts: the play-through's per-era defaults
-# (ptrun99 / testacjs3 / agentapp99dm; LIVE_GATE_ACCOUNT_<AC1999|EOR|DM> override) and the screen
+# (the gate's own lgate99 / lgateeor / lgatedm, created on first use; LIVE_GATE_ACCOUNT_<AC1999|EOR|DM> override) and the screen
 # regression's acjsregress (ACJS_ACCOUNT), each needing a character on its server.
 #
 # Servers and bridges: what is already up is used (a bridge on the port must be pinned to the era's
@@ -122,8 +122,37 @@ era_bridge() { case "$1" in
   classicace-customdm) echo "${LIVE_GATE_CACE_BRIDGE_PORT:-9098} 9200 9201 classicace-customdm" ;;
   classic-dereth) echo "${LIVE_GATE_GDL_BRIDGE_PORT:-9099} 9210 9211 classic-dereth" ;;
   ac1999-retail) echo "${LIVE_GATE_AC1999_BRIDGE_PORT:-9312} 9310 9311 ac1999-retail" ;; esac; }
+# The gate's own play-through accounts, one per era (fast run 3, 2026-11-07: testacjs3, a shared hand-play
+# account, had its pack 93/102 full of its own things). Created on first use (each local server auto-creates an
+# account at its first login; the play-through makes a fresh character when the account has none), then made an
+# admin. AC1999 account names are 8 characters at most. LIVE_GATE_ACCOUNT_<EOR|DM|AC1999> override.
 era_account() { case "$1" in
-  eor) echo "${LIVE_GATE_ACCOUNT_EOR:-testacjs3}" ;; classicace-customdm) echo "${LIVE_GATE_ACCOUNT_DM:-agentapp99dm}" ;; ac1999-retail) echo "${LIVE_GATE_ACCOUNT_AC1999:-ptrun99}" ;; esac; }
+  eor) echo "${LIVE_GATE_ACCOUNT_EOR:-lgateeor}" ;; classicace-customdm) echo "${LIVE_GATE_ACCOUNT_DM:-lgatedm}" ;; ac1999-retail) echo "${LIVE_GATE_ACCOUNT_AC1999:-lgate99}" ;; esac; }
+# 0 when the era's server has the account (its auth database), 1 when not, 2 when it can't be read.
+account_exists() { # era account
+  local n
+  case "$1" in
+    eor) n="$(docker exec ace-db mysql -uroot -p1999asheron2017 -N -e "select count(*) from ace_auth.account where accountName='$2';" 2>/dev/null)" ;;
+    classicace-customdm) n="$(docker exec classicace-db mysql -uroot -pclassicace -N -e "select count(*) from ace_auth_customdm.account where accountName='$2';" 2>/dev/null)" ;;
+    ac1999-retail) n="$(docker exec acjs-ac1999-db mariadb -uroot -pac1999root ac1999_shard_release -N -e "select count(*) from accounts where username='$2';" 2>/dev/null)" ;;
+    *) return 2 ;;
+  esac
+  n="$(printf '%s' "$n" | tr -dc '0-9')"
+  [ -n "$n" ] || return 2
+  [ "$n" -gt 0 ]
+}
+# First use of the gate's account on this server: one login that creates it (and its character), so the
+# admin flag can be set before the real run (its admin prep needs it from the start).
+ensure_account() { # era account port step
+  local era="$1" acct="$2" port="$3" step="$4" rc
+  [[ "$acct" =~ ^[A-Za-z0-9_]+$ ]] || return 0
+  account_exists "$era" "$acct"; rc=$?
+  [ "$rc" = 1 ] || return 0
+  say "$step: the gate's account $acct is new on the $era server: one login creates it and a character"
+  run_cmd "$step-account" "$RUN/$step-account.log" npx tsx tools/ac1999-playthrough.ts --era "$era" --base "http://localhost:${VITE_PORT:-0}/" \
+    --bridge "ws://localhost:$port" --account "$acct" --only enter-world --out "$RUN/$step-account" $([ -n "$NO_GPU" ] && echo --swiftshader) \
+    || say "$step: the first login as $acct did not pass (see ${RUN#"$ROOT"/}/$step-account/report.md)"
+}
 # The play-throughs run with --admin (the regression steps spawn their items), so the era's local
 # test account must be an admin there. Local test accounts only (standing OK, memory
 # agent-say-skips-chat-commands); the agent tools demote them again when they play.
@@ -157,7 +186,7 @@ ensure_screen_character() { # era port
   out="$RUN/screen-prep-$era"
   rm -rf "$out"
   run_cmd "screen-prep-$era" "$RUN/screen-prep-$era.log" npx tsx tools/ac1999-playthrough.ts --era "$era" --base "http://localhost:${VITE_PORT:-0}/" \
-    --bridge "ws://localhost:$port" --account "$acct" --admin --only pack-bars --out "$out" $([ -n "$NO_GPU" ] && echo --swiftshader) \
+    --bridge "ws://localhost:$port" --account "$acct" --admin --keep-spawned --only pack-bars --out "$out" $([ -n "$NO_GPU" ] && echo --swiftshader) \
     || say "screen-$era: the preparation play-through did not pass (see ${out#"$ROOT"/}/report.md); the screen step runs anyway"
 }
 
@@ -395,6 +424,7 @@ run_step() {
       report="$RUN/playthrough-$era"
       rm -rf "$report"
       acct="$(era_account "$era")"
+      [ -n "${LIVE_GATE_NO_STACK:-}" ] || ensure_account "$era" "$acct" "$port" "$step"
       ensure_admin "$era" "$acct" || say "$step: could not make $acct an admin (the regression steps will skip their spawns)"
       args=(--era "$era" --base "http://localhost:${VITE_PORT:-0}/" --bridge "ws://localhost:$port" --out "$report" --admin)  # the regression steps spawn what they need (local admin test accounts)
       [ -n "$acct" ] && args+=(--account "$acct")

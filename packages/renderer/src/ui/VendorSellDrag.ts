@@ -64,6 +64,12 @@ export interface VendorSellProfile {
   minValue: number;
   /** max_value — MerchandiseMaxValue (-1 / 0xFFFFFFFF = no ceiling). */
   maxValue: number;
+  /**
+   * DealMagicalItems (ApproachVendor's 5th field). The client's InqAcceptability never reads it (retail and 1999 alike);
+   * a GDLE-family server refuses an item with mana from a vendor without it (CVendor::GetFilteredItems: `!profile.magic
+   * && ITEM_MAX_MANA`), ACE never checks it (Player_Commerce). Kept for the agent API's vendor data.
+   */
+  dealsMagic?: boolean;
 }
 
 /** What VendorSellUI asks ACCWeenieObject about a dragged object. */

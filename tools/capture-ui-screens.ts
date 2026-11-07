@@ -58,6 +58,38 @@ async function snapHealthy(p: Page, path: string): Promise<void> {
 }
 
 const VIEW = { width: 1568, height: 775 };
+/**
+ * Before each panel capture: what changes with time rather than with the code, made the same on both sides of a
+ * screen regression (the live gate's fast run 2, 2026-11-07: the base and HEAD captures, taken minutes or hours
+ * apart, differed only in the health number and its bar on all five AC1999 panels, and EoR's map only in a passing
+ * yellow notice). Read through properties every build since 2026-10 has, so the base build masks the same:
+ * - the status-line notices (#hud-spew-box: they expire after 5 s) are cleared;
+ * - the vitals' meters and numbers (the floaty cluster's three bars, 0x100000e6 / ec / ee, and the character
+ *   panel's vital values), which regenerate and take damage, are covered with one flat block each.
+ * Returns how many regions were masked. VOLATILE_MASK_OFF removes the blocks after the snapshot.
+ */
+const VOLATILE_MASK_ON = `(() => {
+  const ui = window.__ac && window.__ac.gameUI;
+  if (!ui) return 0;
+  try { if (ui.spewBox && typeof ui.spewBox.clear === 'function') { ui.spewBox.clear(); if (typeof ui.refreshSpewBox === 'function') ui.refreshSpewBox(); } } catch (e) {}
+  const els = [];
+  const h = ui.vitalsHandle;
+  if (h && h.elements) for (const id of [0x100000e6, 0x100000ec, 0x100000ee]) { const e = h.elements.get(id); if (e) els.push(e); }
+  for (const e of document.querySelectorAll('.attr-vital-value')) els.push(e);
+  let n = 0;
+  for (const e of els) {
+    const r = e.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0) || getComputedStyle(e).visibility === 'hidden') continue;
+    const m = document.createElement('div');
+    m.className = '__capture-volatile-mask';
+    Object.assign(m.style, { position: 'fixed', left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px', background: '#202020', zIndex: '2147483647', pointerEvents: 'none' });
+    document.body.appendChild(m);
+    n++;
+  }
+  return n;
+})()`;
+const VOLATILE_MASK_OFF = `(() => { for (const m of document.querySelectorAll('.__capture-volatile-mask')) m.remove(); return 0; })()`;
+
 /** The game-clock seconds every panel capture's map Date/Time lines are drawn at (see the pin before the panels). */
 const CAPTURE_CALENDAR_TICKS = 1_000_000;
 
@@ -747,8 +779,10 @@ async function run(): Promise<void> {
       await setWorldCanvasHidden(page, true);
     }
     const file = `${cap.name}.png`;
+    const masked = await page.evaluate(VOLATILE_MASK_ON);
     await snapHealthy(page, join(OUT, file));
-    console.log(`[capture] ${file}`);
+    await page.evaluate(VOLATILE_MASK_OFF);
+    console.log(`[capture] ${file}${masked ? ` (${masked} volatile region(s) masked)` : ''}`);
     manifest.push({ ...cap, file });
     if (cap.cleanupJs) {
       await page.evaluate((js) => { try { (0, eval)(js); } catch (e) { console.error('[capture] cleanupJs failed', e); } }, cap.cleanupJs);

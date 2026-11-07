@@ -23,11 +23,18 @@ export const PREWORLD_ONLY_FILTER = '__preworld-only__';
 /** Base shas kept in the cache (the newest by use); older ones are pruned. */
 export const CACHE_KEEP_BASES = 4;
 
+/**
+ * How the capture tool draws a capture: bumped whenever tools/capture-ui-screens.ts changes what every capture shows
+ * (2: the game clock pinned, the vitals and notices masked, 2026-11-07), so cached base captures made the old way
+ * are not compared against new ones.
+ */
+export const CAPTURE_REV = 2;
+
 export interface VariantInput { era: string; gpu: boolean; account: string; extraQuery: string; ui: boolean }
 
 /** The variant directory name: readable era + renderer, then a short hash of the rest. */
 export function variantKey(v: VariantInput): string {
-  const h = createHash('sha256').update(JSON.stringify([v.account, v.extraQuery, v.ui])).digest('hex').slice(0, 10);
+  const h = createHash('sha256').update(JSON.stringify([v.account, v.extraQuery, v.ui, CAPTURE_REV])).digest('hex').slice(0, 10);
   return `${v.era || 'eor'}-${v.gpu ? 'gpu' : 'sw'}-${h}`;
 }
 

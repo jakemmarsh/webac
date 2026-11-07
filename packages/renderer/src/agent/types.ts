@@ -360,7 +360,14 @@ export interface AgentVendor {
    * What the vendor buys: its VendorProfile (ApproachVendor's merchandise ItemType mask and unit-value range, -1 =
    * no bound), the fields VendorSellUI::DragItemAcceptable's InqAcceptability reads. Absent before the profile came.
    */
-  buys?: { itemTypes: number; minValue: number; maxValue: number };
+  buys?: {
+    itemTypes: number; minValue: number; maxValue: number;
+    /**
+     * DealMagicalItems: whether it takes items with mana. Only a GDLE-family server (AC1999, GDL classic) refuses them
+     * from a vendor without it ("<vendor> doesn't know what to do with that."); ACE takes them regardless.
+     */
+    magic?: boolean;
+  };
 }
 
 export interface AgentTrade {

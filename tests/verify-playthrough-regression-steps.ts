@@ -1,16 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import type { HeldPose } from '../packages/renderer/src/models/HeldPose.ts';
 import {
-  type ClientProbe, type PlaythroughDriver, type Signals, type StepContext, emptySignals, eraPlan, freshState, playthroughSteps,
+  type ClientProbe, type PlaythroughDriver, type Step, type Signals, type StepContext, emptySignals, eraPlan, freshState, playthroughSteps,
   renderReport, runPlaythrough, selectSteps,
 } from '../tools/lib/playthrough.ts';
 import {
   type ChargenPoll, type GridCell, type GridState, type MoveSample, ADMIN_COMMANDS, REGRESSION_STEP_IDS, RETAIL_COAST_PER_MPS,
   bottomRowAt, capacityBarFraction, coastFromSamples, fillNeeded, freeShortcutSlot, judgeChargenWait, judgeCoast, judgeMeter,
   judgeOptionDefaults, judgeScrollKept, judgeShortcutIcon, lastWield, optionDefaultsFor, optionDefaultsStep, parseWieldLine, pickDragPair,
-  regressionSteps, rowOf, scrollTargetFor, shieldRelogStep, structureBarFraction, usedTool, visibleRowsOf, withRegressionSteps,
-  WALK_SHORT_METRES, WALK_SHORT_MIN_MOVED, judgeWalk, pointAlong, walkShortStep,
+  regressionSteps, rowOf, scrollTargetFor, shieldRelogStep, structureBarFraction, usedTool, sidePackFiller, visibleRowsOf, withRegressionSteps,
+  WALK_SHORT_METRES, WALK_SHORT_MIN_MOVED, WALK_BEARINGS, judgeWalk, pointAlong, walkPlan, walkShortStep, shortcutTrayRefusal,
   type KeysState, judgeKeysState, readyForKeys, runningJumpCoastStep,
+  PACK_SPACE_WANTED, leavesNoTrace, mainPackFree, packSpaceStep, spawnHeld,
 } from '../tools/lib/playthrough-regressions.ts';
 
 // The week's player-reported regressions as play-through steps (2026-11-07): the step order, --only, the report,
@@ -20,12 +21,12 @@ const ERAS = ['ac1999-retail', 'eor', 'classicace-customdm'] as const;
 const plan = (era: string, admin = false) => withRegressionSteps(playthroughSteps(eraPlan(era), { admin }), regressionSteps(eraPlan(era), { admin }));
 
 describe('regression steps: where they run and --only', () => {
-  it('every era runs all eight; option-defaults right after entering the world, the rest before @help; the run still ends with the logout', () => {
+  it('every era runs all nine; option-defaults and pack-space right after entering the world, the rest before @help; the run still ends with the logout', () => {
     for (const e of ERAS) {
       const ids = plan(e).map((s) => s.id);
       for (const id of REGRESSION_STEP_IDS) expect(ids, `${e} ${id}`).toContain(id);
       expect(ids[0]).toBe('enter-world');
-      expect(ids[1]).toBe('option-defaults');
+      expect(ids.slice(1, 3)).toEqual(['option-defaults', 'pack-space']);
       const rest = REGRESSION_STEP_IDS.slice(1).map((id) => ids.indexOf(id));
       expect(rest).toEqual([...rest].sort((a, b) => a - b));
       expect(ids.indexOf('create-character-click') + 1).toBe(ids.indexOf('cmd-help'));
@@ -33,14 +34,17 @@ describe('regression steps: where they run and --only', () => {
       expect(ids.at(-1)).toBe('logout-relogin');
     }
   });
-  it('with --admin the prep comes first and option-defaults right after it', () => {
+  it('with --admin the prep runs right before the magic, after the vendor and loot steps', () => {
     const ids = plan('ac1999-retail', true).map((s) => s.id);
-    expect(ids.slice(0, 3)).toEqual(['enter-world', 'admin-prep', 'option-defaults']);
+    expect(ids.slice(0, 3)).toEqual(['enter-world', 'option-defaults', 'pack-space']);
+    expect(ids.indexOf('admin-prep') + 1).toBe(ids.indexOf('magic-mode'));
+    expect(ids.indexOf('admin-prep')).toBeGreaterThan(ids.indexOf('vendor-sell'));
   });
-  it('--only runs a new step alone (the world entry always, the --admin prep too)', () => {
-    expect(selectSteps(plan('eor'), ['pack-bars']).map((s) => s.id)).toEqual(['enter-world', 'pack-bars']);
-    expect(selectSteps(plan('ac1999-retail', true), ['shield-relog', 'running-jump-coast']).map((s) => s.id)).toEqual(['enter-world', 'admin-prep', 'shield-relog', 'running-jump-coast']);
-    expect(selectSteps(plan('classicace-customdm'), ['option-defaults']).map((s) => s.id)).toEqual(['enter-world', 'option-defaults']);
+  it('--only runs a new step alone (the world entry and the pack-space check always; the --admin prep only for magic)', () => {
+    expect(selectSteps(plan('eor'), ['pack-bars']).map((s) => s.id)).toEqual(['enter-world', 'pack-space', 'pack-bars']);
+    expect(selectSteps(plan('ac1999-retail', true), ['shield-relog', 'running-jump-coast']).map((s) => s.id)).toEqual(['enter-world', 'pack-space', 'shield-relog', 'running-jump-coast']);
+    expect(selectSteps(plan('ac1999-retail', true), ['cast-self']).map((s) => s.id)).toEqual(['enter-world', 'pack-space', 'admin-prep', 'cast-self']);
+    expect(selectSteps(plan('classicace-customdm'), ['option-defaults']).map((s) => s.id)).toEqual(['enter-world', 'option-defaults', 'pack-space']);
     expect(() => selectSteps(plan('eor'), ['pack-bar'])).toThrow(/unknown step id.*pack-bars/);
   });
   it('every era has spawn and set-health commands for --admin', () => {
@@ -176,6 +180,14 @@ describe('pack-bars: the meters as drawn (webac#25)', () => {
     expect(usedTool(it('Crude Lockpick', 3, 20))).toBe(true);
     expect(usedTool(it('Crude Healing Kit', 20, 20))).toBe(false);
     expect(usedTool(it('Sword', 5, 10))).toBe(false);
+  });
+  it('what pack-bars may put in the side pack: never a kit or lockpick (fast run 4 moved the Handy Healing Kit into the Sack), a pack or a wearable', () => {
+    const it = (name: string, o: { maxStructure?: number; itemType?: number; validLocations?: number } = {}) => ({ name, itemType: o.itemType ?? 0x80, validLocations: o.validLocations ?? 0, maxStructure: o.maxStructure });
+    expect(sidePackFiller(it('Handy Healing Kit', { maxStructure: 20 }))).toBe(false);
+    expect(sidePackFiller(it('Crude Lockpick'))).toBe(false);
+    expect(sidePackFiller(it('Sack', { itemType: 0x200 }))).toBe(false);
+    expect(sidePackFiller(it('Leather Cap', { validLocations: 0x1 }))).toBe(false);
+    expect(sidePackFiller(it('Calling Stone'))).toBe(true);
   });
   it('the kit goes on the first empty of slots 2-9 (slot 1 is toolbar-relog\'s), or stays where it already is', () => {
     expect(freeShortcutSlot([5, 6, 0, 0], 9)).toBe(2);
@@ -371,7 +383,7 @@ describe('a regression step inside the run is judged like any other', () => {
       logout: () => { d.screen = 'character-select'; },
       enterWorld: () => { d.screen = 'world'; d.lines.push('[Wield] Attached Metal Round Shield (setup 0x1) to part_14 (location=3, placement=0 from CreateObject, frame=0)'); return { ok: true, message: 'in' }; },
     });
-    const res = await runPlaythrough(selectSteps(plan('ac1999-retail'), ['shield-relog']).slice(1), ctxOf(d));
+    const res = await runPlaythrough(selectSteps(plan('ac1999-retail'), ['shield-relog']).filter((s) => s.id === 'shield-relog'), ctxOf(d));
     expect(res.records.map((r) => [r.id, r.status])).toEqual([['shield-relog', 'ok']]);
   });
 });
@@ -407,15 +419,62 @@ describe('walk-short: the live gate\'s smoke walk', () => {
   it('walks toward a compass point with open ground and passes when the position follows', async () => {
     const { d, asked } = walkDriver({ openBearing: 270, moves: true });
     const res = await runPlaythrough([walkShortStep()], ctxOf(d, 'eor'));
-    expect(asked).toEqual([`${WALK_SHORT_METRES}m W`]);
+    expect(asked).toEqual([`${WALK_SHORT_METRES - 0.5}m W`]);
     expect(res.records.map((r) => [r.id, r.status])).toEqual([['walk-short', 'ok']]);
   });
-  it('no open ground: walks straight ahead; a walk that goes nowhere fails, naming the distance', async () => {
-    const { d, asked } = walkDriver({ openBearing: null, moves: false });
+  it('walkPlan: the most open bearing, half a metre short of what stopped the probe; boxed in (under 2.5 m) gives none', () => {
+    expect(walkPlan([{ bearing: 270, reach: 2 }, { bearing: 180, reach: 3 }, { bearing: 0, reach: 2 }])).toEqual({ bearing: 180, metres: 2.5 });
+    expect(walkPlan([{ bearing: 90, reach: 20 }])).toEqual({ bearing: 90, metres: WALK_SHORT_METRES });
+    expect(walkPlan([{ bearing: 90, reach: 2.4 }, { bearing: 0, reach: 1 }])).toBeNull();
+  });
+  it('fast run 5 (a fresh AC1999 character in a small room: S 3 m, N 2 m, E 2 m, W 2 m): it walks S, the most open way', async () => {
+    let at = { x: 100, y: 100 };
+    const asked: unknown[] = [];
+    const reach: Record<number, number> = { 0: 2, 90: 2, 180: 3, 270: 2, 45: 1, 135: 1, 225: 1, 315: 1 };
+    const d = new FakeDriver({
+      close: () => undefined,
+      where: () => ({ ...at }),
+      probe: (to: { x: number; y: number }) => {
+        const b = WALK_BEARINGS.find((bb) => { const p = pointAlong(at, bb, WALK_SHORT_METRES); return Math.hypot(p.x - to.x, p.y - to.y) < 0.01; })!;
+        return pointAlong(at, b, reach[b]);
+      },
+      walkTo: (target: unknown) => { asked.push(target); at = { ...at, y: at.y - 2.5 }; return { ok: true, message: 'arrived' }; },
+    });
+    const res = await runPlaythrough([walkShortStep()], ctxOf(d, 'ac1999-retail'));
+    expect(asked).toEqual(['2.5m S']);
+    expect(res.records[0].status).toBe('ok');
+  });
+  it('boxed in: out through the nearest door; with no door it fails saying so (never a pass on 0 m)', async () => {
+    let at = { x: 100, y: 100 };
+    const asked: unknown[] = [];
+    const mk = (doors: Array<{ guid: number; name: string; kind: string; dist: number }>) => new FakeDriver({
+      close: () => undefined,
+      where: () => ({ ...at }),
+      probe: () => ({ ...at }),
+      observe: () => ({ nearby: doors }),
+      walkTo: (target: unknown) => { asked.push(target); at = { ...at, x: at.x + 6 }; return { ok: true, message: 'arrived' }; },
+    });
+    const res = await runPlaythrough([walkShortStep()], ctxOf(mk([{ guid: 0x7001, name: 'Door', kind: 'door', dist: 4 }]), 'ac1999-retail'));
+    expect(asked).toEqual([0x7001]);
+    expect(res.records[0].status).toBe('ok');
+    expect(res.records[0].detail).toContain('out through Door 4 m off');
+    const none = await runPlaythrough([walkShortStep()], ctxOf(mk([]), 'ac1999-retail'));
+    expect(none.records[0].status).toBe('fail');
+    expect(none.records[0].detail).toMatch(/^boxed in: no bearing has 2.5 m open/);
+  });
+  it('a walk that goes nowhere fails, naming the distance', async () => {
+    const { d } = walkDriver({ openBearing: 270, moves: false });
     const res = await runPlaythrough([walkShortStep()], ctxOf(d, 'eor'));
-    expect(asked).toEqual(['4m ahead']);
     expect(res.records[0].status).toBe('fail');
     expect(res.records[0].detail).toContain('moved 0.00 m');
+  });
+  it('the 1999 tray refuses an unusable item exactly as ShortcutSlot::AcceptDragObject @ 0x00500240 does (fast run 5\'s Calling Stone, ItemUseable No); other eras take any', () => {
+    const callingStone = { usable: 1, itemType: 0x800, validLocations: 0 };
+    expect(shortcutTrayRefusal('ac1999-retail', callingStone)).toBe('Only usable items can go here');
+    expect(shortcutTrayRefusal('eor', callingStone)).toBeNull();
+    expect(shortcutTrayRefusal('ac1999-retail', { usable: 0x20000000 | 0x8, itemType: 0x80, validLocations: 0 })).toBeNull(); // usable
+    expect(shortcutTrayRefusal('ac1999-retail', { usable: 1, itemType: 0x2, validLocations: 0x1 })).toBeNull(); // wearable
+    expect(shortcutTrayRefusal('ac1999-retail', { usable: 1, itemType: 0x8000, validLocations: 0 })).toBeNull(); // a caster
   });
   it('is part of every era\'s plan, after option-defaults and before the pack steps', () => {
     for (const e of ERAS) {
@@ -462,5 +521,91 @@ describe('keys to the 3D view (the live gate\'s first fast run: ClassicACE\'s we
     expect(res.records[0].status).toBe('fail');
     expect(res.records[0].detail).toBe('the keys would not reach the 3D view: still open after closing every window: Book');
     expect(keys).toBe(0);
+  });
+});
+
+// Fast run 2 (2026-11-07): spawned filler and admin components filled ClassicACE's pack, and the vendor steps failed
+// on "not enough pack space". Every step now leaves the character as it found it.
+describe('a step leaves the character as it found it', () => {
+  type HI = { guid: number; name: string; wcid: number; container: number; itemType: number; validLocations: number };
+  const MAIN = 0x50000001;
+  const hi = (guid: number, wcid: number, container = MAIN): HI => ({ guid, name: wcid === 511 ? 'Crude Lockpick' : wcid === 166 ? 'Sack' : `Item ${guid}`, wcid, container, itemType: 0x80, validLocations: 0 });
+  const heldDriver = (state: { packs: number[]; items: HI[]; equipped: HI[]; mainCapacity: number }, extra: Record<string, (...a: any[]) => unknown> = {}) => {
+    const dropped: number[] = [];
+    const moved: Array<[number, number]> = [];
+    const d = new FakeDriver({
+      evaluate: (js: string) => (js.includes('sidePackGuids') ? { ...state, selectedPack: 0, open: false } : null),
+      drop: (g: number) => { dropped.push(g); state.items = state.items.filter((i) => i.guid !== g && i.container !== g); state.packs = state.packs.filter((p) => p !== g); return { ok: true, message: 'dropped' }; },
+      moveItem: (g: number, slot: number) => { moved.push([g, slot]); state.items = state.items.map((i) => (i.guid === g ? { ...i, container: state.packs[slot] } : i)); return { ok: true, message: 'moved' }; },
+      unequip: (g: number) => { const e = state.equipped.find((x) => x.guid === g); state.equipped = state.equipped.filter((x) => x.guid !== g); if (e) state.items.push({ ...e, container: MAIN }); return { ok: true, message: 'off' }; },
+      ...extra,
+    });
+    (d as unknown as { chat: (t: string) => Promise<void> }).chat = async (t: string) => { extra.onChat?.(t); };
+    return { d, dropped, moved };
+  };
+
+  it('mainPackFree counts only the main pack (side packs and their contents are not in it)', () => {
+    expect(mainPackFree({ packs: [MAIN, 9], mainCapacity: 102, items: [hi(1, 1), hi(2, 1), hi(9, 166), hi(3, 1, 9)] as never })).toBe(100);
+  });
+
+  it('pack-space drops leftover filler until enough main-pack slots are free; the character\'s own things stay', async () => {
+    const own = Array.from({ length: 80 }, (_, i) => hi(100 + i, 999));
+    const filler = Array.from({ length: 20 }, (_, i) => hi(500 + i, 511));
+    const state = { packs: [MAIN], items: [...own, ...filler], equipped: [], mainCapacity: 102 };
+    const { d, dropped } = heldDriver(state);
+    const r = await packSpaceStep().run(ctxOf(d, 'classicace-customdm'));
+    expect(r.status).toBe('ok');
+    expect(dropped).toHaveLength(PACK_SPACE_WANTED - 2);
+    expect(dropped.every((g) => g >= 500)).toBe(true);
+    expect(mainPackFree(state as never)).toBe(PACK_SPACE_WANTED);
+    // Full of its own things: a FAIL that says so (the vendor steps would fail for it anyway).
+    const full = { packs: [MAIN], items: Array.from({ length: 100 }, (_, i) => hi(100 + i, 999)), equipped: [], mainCapacity: 102 };
+    const r2 = await packSpaceStep().run(ctxOf(heldDriver(full).d, 'eor'));
+    expect(r2.status).toBe('fail');
+    expect(r2.detail).toContain('the pack is full of the character\'s own things');
+  });
+
+  it('leavesNoTrace drops what the step spawned (a worn shield taken off first; a spawned sack with its filler, the character\'s own item moved out first)', async () => {
+    const state = { packs: [MAIN], items: [hi(1, 999)], equipped: [] as HI[], mainCapacity: 102 };
+    const { d, dropped, moved } = heldDriver(state, {
+      onChat: (t: string) => {
+        if (t === '@ci 166') { state.packs.push(0x80000010); state.items.push(hi(0x80000010, 166)); }
+        if (t === '@ci 511') state.items.push(hi(0x80000020 + state.items.length, 511, 0x80000010));
+        if (t === '@ci 1313') state.equipped.push({ ...hi(0x80000030, 1313), name: 'Metal Round Shield' });
+      },
+    });
+    const inner: Step = {
+      id: 'x', title: 'x',
+      async run(ctx) {
+        await spawnHeld(ctx, 166, 1);
+        await spawnHeld(ctx, 511, 1);
+        state.items = state.items.map((i) => (i.guid === 1 ? { ...i, container: 0x80000010 } : i)); // the step moved an own item in
+        state.equipped.push({ ...hi(0x80000030, 1313), name: 'Metal Round Shield' });
+        state.items.push(hi(0x80000030, 1313)); // seen held once, then worn
+        await spawnHeld(ctx, 1313, 1);
+        state.items = state.items.filter((i) => i.guid !== 0x80000030);
+        return { status: 'ok', detail: 'did it' };
+      },
+    };
+    const r = await leavesNoTrace(inner).run(ctxOf(d, 'eor'));
+    expect(r.status).toBe('ok');
+    expect(moved).toEqual([[1, 0]]);
+    expect(dropped).toContain(0x80000010);
+    expect(state.items.map((i) => i.guid)).toEqual([1]);
+    expect(r.detail).toMatch(/^did it; dropped the \d+ item\(s\) it spawned$/);
+    // --keep-spawned leaves them.
+    const s2 = { packs: [MAIN], items: [] as HI[], equipped: [] as HI[], mainCapacity: 102 };
+    const k = heldDriver(s2, { onChat: () => { s2.items.push(hi(0x80000040, 511)); } });
+    const spawnOne: Step = { id: 'y', title: 'y', async run(ctx) { await spawnHeld(ctx, 511, 1); return { status: 'ok', detail: 'kept' }; } };
+    expect((await leavesNoTrace(spawnOne, { keepSpawned: true }).run(ctxOf(k.d, 'eor'))).detail).toBe('kept');
+    expect(k.dropped).toEqual([]);
+  });
+
+  it('the spawning regression steps are wrapped; the plan runs them after the vendor and loot steps', () => {
+    const ids = plan('eor', true).map((s) => s.id);
+    for (const id of ['pack-scroll-sort', 'pack-bars', 'shield-relog']) {
+      expect(ids.indexOf(id)).toBeGreaterThan(ids.indexOf('loot-rest'));
+      expect(ids.indexOf(id)).toBeGreaterThan(ids.indexOf('vendor-supplies'));
+    }
   });
 });

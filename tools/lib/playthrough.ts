@@ -167,6 +167,13 @@ export interface EraPlan {
    * with sink none. A sale step there expects exactly that one event; anything shown still fails it.
    */
   saleEchoesInventoryFailed: boolean;
+  /**
+   * The server refuses an item with mana from a vendor that doesn't deal magic items (AgentVendor.buys.magic false): the
+   * GDLE family (the AC1999 server's CVendor::GetFilteredItems, `!profile.magic && ITEM_MAX_MANA_INT`, answering
+   * "<vendor> doesn't know what to do with that."; ClassicDereth's Vendor.cpp the same). ACE and ClassicACE never check
+   * DealMagicalItems (Player_Commerce), so they buy it.
+   */
+  vendorsRefuseMagicUnlessDealer: boolean;
 }
 
 const PANELS: PanelSpec[] = [
@@ -196,6 +203,7 @@ export const ERA_PLANS: Record<string, EraPlan> = {
     worldCore: 'reference/ac1999/Server/Database/AC1999-World/3-Core',
     towns: AC1999_TOWN_ROWS,
     saleEchoesInventoryFailed: true,
+    vendorsRefuseMagicUnlessDealer: true,
   },
   eor: {
     key: 'eor', id: null, label: 'End of retail (local ACE)', defaultAccount: 'testacjs3',
@@ -206,6 +214,7 @@ export const ERA_PLANS: Record<string, EraPlan> = {
     worldCore: 'world-db-raw/ACE-World-16PY/Database/3-Core',
     towns: [],
     saleEchoesInventoryFailed: false,
+    vendorsRefuseMagicUnlessDealer: false,
   },
   'classicace-customdm': {
     key: 'classicace-customdm', id: 'classicace-customdm', label: 'Dark Majesty (ClassicACE CustomDM)', defaultAccount: 'agentapp99dm',
@@ -216,6 +225,7 @@ export const ERA_PLANS: Record<string, EraPlan> = {
     worldCore: null,
     towns: [],
     saleEchoesInventoryFailed: false,
+    vendorsRefuseMagicUnlessDealer: false,
   },
 };
 
@@ -252,6 +262,8 @@ export interface PlaythroughArgs {
    * steps' schools trained with skill credits). Off by default: it needs an admin test account.
    */
   admin: boolean;
+  /** --keep-spawned: the regression steps leave what they spawned (otherwise each drops it before it ends). */
+  keepSpawned: boolean;
   /** --list: print the era's step ids and titles, run nothing. */
   list: boolean;
 }
@@ -283,6 +295,7 @@ export function parsePlaythroughArgs(argv: string[], env: NodeJS.ProcessEnv = pr
     dataRoot: get('data-root') ?? null,
     profile: get('profile') ?? null,
     admin: argv.includes('--admin'),
+    keepSpawned: argv.includes('--keep-spawned'),
     list: argv.includes('--list'),
   };
 }
@@ -411,8 +424,11 @@ export interface Step {
   timeoutMs?: number;
   /** Abort the run when this step doesn't pass (entering the world). */
   required?: boolean;
-  /** Runs with --only too (the --admin prep: the steps picked depend on it). */
-  withOnly?: boolean;
+  /**
+   * Runs with --only too: always (true), or when one of these step ids is picked (the --admin prep, for the magic
+   * steps that need its components and wand).
+   */
+  withOnly?: boolean | readonly string[];
 }
 
 export const ok = (detail: string, extra: Partial<StepOutcome> = {}): StepOutcome => ({ status: 'ok', detail, ...extra });
@@ -957,8 +973,12 @@ export const vendorBuyStep: Step = {
       }
     }
     if (!v) return skip(`no vendor in view or remembered within 400 m${walked}`);
-    const opened = await driver.call<AgentResult>('vendorAt', [v.guid, null], 200_000);
-    if (!opened.ok) return fail(`${v.name} #${v.guid.toString(16)} (${v.dist.toFixed(0)} m): ${msg(opened)}`);
+    let opened = await driver.call<AgentResult>('vendorAt', [v.guid, null], 200_000);
+    if (!opened.ok && VENDOR_BUSY.test(opened.message)) {
+      await driver.sleep(VENDOR_BUSY_WAIT_MS);
+      opened = await driver.call<AgentResult>('vendorAt', [v.guid, null], 200_000);
+    }
+    if (!opened.ok) return fail(`${v.name} #${v.guid.toString(16)} (${v.dist.toFixed(0)} m): ${msg(opened)}`, { allow: [VENDOR_BUSY] });
     ctx.state.vendor = { guid: v.guid, name: v.name };
     const screenshots = await shots(ctx, 'vendor-open');
     const me = await self(ctx);
@@ -977,7 +997,8 @@ export const vendorBuyStep: Step = {
     if (!got) return fail(`the buy of ${pick.name} answered "${msg(bought)}" but nothing new is in the pack and no stack of it grew`, { screenshots });
     ctx.state.bought = { guid: got.guid, name: got.name };
     const merged = before.some((b) => b.guid === got!.guid);
-    return ok(`at ${v.name}${walked}: bought ${got.name} #${got.guid.toString(16)} for ${pick.price}${merged ? ` (onto the stack held, now ${got.stack ?? '?'})` : ''}`, { screenshots });
+    // A busy vendor on the way in (the server's "<vendor> is busy.", the use retried) is expected, as for a player.
+    return ok(`at ${v.name}${walked}: bought ${got.name} #${got.guid.toString(16)} for ${pick.price}${merged ? ` (onto the stack held, now ${got.stack ?? '?'})` : ''}`, { screenshots, allow: [VENDOR_BUSY] });
   },
 };
 
@@ -1003,7 +1024,9 @@ export const refusedSaleEcho = (r: RefusalSeen): boolean => r.source === 'server
 
 /** Refusals a sale may get: a vendor that doesn't buy that kind. */
 /** A use refused because the server had the target (a vendor mid-emote) or the player busy. */
-export const VENDOR_BUSY = /too busy/i;
+// "You're too busy!" (the player) and "<vendor> is busy." (the vendor mid-motion: the AC1999 server, fast run 2 of
+// 2026-11-07, Hudriffa after the sale's "Thank you"): a player waits and uses again.
+export const VENDOR_BUSY = /too busy|\bis busy\b/i;
 export const VENDOR_BUSY_WAIT_MS = 3_000;
 const SALE_REFUSED = /cannot be sold|can't be sold|unsellable|not interested|doesn't (buy|want)|won't buy|no value/i;
 
@@ -1027,6 +1050,11 @@ export function sellableTo<T extends Pick<AgentItem, 'itemType' | 'value' | 'sta
   return items.filter((i) => vendorInqAcceptability({ itemType: i.itemType ?? 0, value: i.value ?? 0, stackSize: i.stack ?? 1 }, buys, rule) === VENDOR_ACCEPTABILITY.ok);
 }
 
+/** The era's server would refuse this item from this vendor for its mana (EraPlan.vendorsRefuseMagicUnlessDealer). */
+export function refusesMagic(era: Pick<EraPlan, 'vendorsRefuseMagicUnlessDealer'>, buys: AgentVendor['buys'] | undefined, item: Pick<AgentItem, 'mana'>): boolean {
+  return era.vendorsRefuseMagicUnlessDealer && buys?.magic === false && (item.mana?.max ?? 0) > 0;
+}
+
 export const vendorSellStep: Step = {
   id: 'vendor-sell', title: 'Sell an item to the vendor', timeoutMs: 180_000,
   async run(ctx) {
@@ -1037,9 +1065,10 @@ export const vendorSellStep: Step = {
     const v = await driver.call<AgentVendor | null>('vendorData').catch(() => null);
     const buys = v && v.guid === state.vendor.guid ? v.buys : undefined;
     const inv = await driver.call<AgentItem[]>('inventory');
+    // What the vendor itself sold (the purchase) last: shop stock is often unsellable (water, the EoR Grocer's).
     const pool = [
-      ...(state.bought ? inv.filter((i) => i.guid === state.bought!.guid) : []),
       ...inv.filter((i) => i.where !== 'equipped' && INVENTORY_KINDS.sell(i) && i.guid !== state.bought?.guid),
+      ...(state.bought ? inv.filter((i) => i.guid === state.bought!.guid) : []),
     ];
     if (!pool.length) return skip('nothing in the pack a vendor pays for');
     const candidates = sellableTo(pool, buys, ctx.era.key === 'ac1999-retail' ? 'ac1999' : 'eor').slice(0, 3);
@@ -1047,21 +1076,31 @@ export const vendorSellStep: Step = {
       await driver.call('close', ['vendor']);
       return skip(`${state.vendor.name} buys none of what the pack holds (its trade: item types 0x${(buys!.itemTypes >>> 0).toString(16)}; held: ${pool.slice(0, 4).map((c) => c.name).join(', ')})`);
     }
-    const tries: string[] = [];
-    for (const it of candidates) {
-      const r = await driver.call<AgentResult>('sell', [it.guid, null, state.vendor.guid], 60_000);
-      if (r.ok) {
-        const screenshots = await shots(ctx, 'vendor-sold');
-        await driver.call('close', ['vendor']);
-        const echo = saleEcho(ctx.era);
-        return ok(`sold ${it.name} #${it.guid.toString(16)} to ${state.vendor.name}: ${msg(r)}${tries.length ? ` (after: ${tries.join('; ')})` : ''}`,
-          { screenshots, allow: [SALE_REFUSED], allowRefusal: (x) => (tries.length > 0 && refusedSaleEcho(x)) || !!echo?.(x) });
-      }
-      if (!SALE_REFUSED.test(r.message)) return fail(`selling ${it.name}: ${msg(r)}`, { allow: [SALE_REFUSED] });
-      tries.push(`${it.name}: ${msg(r)}`);
+    // One item, known sellable, sold and judged (fast run 2, 2026-11-07: the bought Water was tried first and
+    // refused as unsellable, and that refusal failed a step whose next item sold). An appraisal says
+    // IsSellable / Retained (AgentItem.unsellable); the first candidate it doesn't rule out is the one sold.
+    const ruledOut: string[] = [];
+    let it: AgentItem | null = null;
+    for (const c of candidates) {
+      await driver.call<AgentResult>('appraise', [c.guid, { quiet: true }], 20_000).catch(() => null);
+      const now = (await driver.call<AgentItem[]>('inventory')).find((i) => i.guid === c.guid);
+      if (!now) continue;
+      if (now.unsellable) { ruledOut.push(`${c.name} (unsellable)`); continue; }
+      if (refusesMagic(ctx.era, buys, now)) { ruledOut.push(`${c.name} (has mana; ${state.vendor.name} doesn't deal magic items)`); continue; }
+      it = now;
+      break;
     }
+    if (!it) {
+      await driver.call('close', ['vendor']);
+      return skip(`nothing held that ${state.vendor.name} buys is sellable: ${ruledOut.join(', ')}`);
+    }
+    const r = await driver.call<AgentResult>('sell', [it.guid, null, state.vendor.guid], 60_000);
+    const screenshots = await shots(ctx, r.ok ? 'vendor-sold' : 'vendor-not-sold');
     await driver.call('close', ['vendor']);
-    return skip(`${state.vendor.name} buys none of ${candidates.map((c) => c.name).join(', ')}`, { allow: [SALE_REFUSED], allowRefusal: refusedSaleEcho });
+    const passed = ruledOut.length ? ` (passed over: ${ruledOut.join(', ')})` : '';
+    if (!r.ok) return fail(`selling ${it.name} #${it.guid.toString(16)} to ${state.vendor.name} (its trade accepts it, its appraisal allows a sale): ${msg(r)}${passed}`, { screenshots });
+    const echo = saleEcho(ctx.era);
+    return ok(`sold ${it.name} #${it.guid.toString(16)} to ${state.vendor.name}: ${msg(r)}${passed}`, { screenshots, allowRefusal: (x) => !!echo?.(x) });
   },
 };
 
@@ -1140,10 +1179,15 @@ export async function fight(ctx: StepContext, target: AgentObject, timeoutMs = 1
   return { outcome: 'lost', detail: `not dead after ${Math.round(timeoutMs / 1000)} s` };
 }
 
+/** Prey within this many metres is taken before any farther one (a long walk is where a fight goes wrong). */
+export const NEAR_PREY_M = 50;
+
 async function findPrey(ctx: StepContext, exclude: number[] = []): Promise<{ prey: AgentObject | null; note: string }> {
   const o = await observe(ctx, { filter: 'monster', radius: 150, max: 40, levels: true });
   const places = await ctx.driver.placeOf(o.nearby.filter((x) => x.kind === 'monster').map((x) => x.guid));
-  const p = pickPrey(o.nearby, ctx.facts, { exclude, sameFloor: (x) => sameFloorOnly(places.me, places.objects[x.guid] ?? 'unknown') });
+  const sameFloor = (x: AgentObject) => sameFloorOnly(places.me, places.objects[x.guid] ?? 'unknown');
+  const near = pickPrey(o.nearby, ctx.facts, { exclude, sameFloor, maxDist: NEAR_PREY_M });
+  const p = near.prey ? near : pickPrey(o.nearby, ctx.facts, { exclude, sameFloor });
   return { prey: p.prey, note: p.prey ? p.why : `no safe creature within 150 m${p.rejected.length ? ` (passed over: ${p.rejected.slice(0, 8).join('; ')})` : ' (none in view)'}` };
 }
 
@@ -1174,20 +1218,48 @@ export async function armForKill(ctx: StepContext): Promise<{ note: string } | {
   return { note: `took ${caster.name} off (${why}); no melee weapon held, so bare hands` };
 }
 
+/** Creatures the kill step tries before an attack that never swings fails it. */
+export const KILL_TRIES = 3;
+
 export const killStep: Step = {
   id: 'kill', title: 'Kill a weak creature near the start', timeoutMs: 240_000,
   async run(ctx) {
-    const { prey, note: why } = await findPrey(ctx);
-    if (!prey) return skip(why);
-    const armed = await armForKill(ctx);
-    if ('skip' in armed) return skip(armed.skip);
-    const note = armed.note ? `${why}; ${armed.note}` : why;
-    ctx.log(`   prey: ${prey.name} #${prey.guid.toString(16)} ${prey.dist.toFixed(0)} m (${note})`);
-    const f = await fight(ctx, prey);
+    // Up to KILL_TRIES creatures in turn, nearest first: a creature the attack never swings at (fast run 2 of
+    // 2026-11-07: a Black Rabbit 68 m off, past a fence or out of the server's reach) is passed over for the next.
+    // Every creature never swinging is still a FAIL, said plainly; one that did is named in the result.
+    const noSwing: string[] = [];
+    const noSwingGuids: number[] = [];
+    let prey: AgentObject | null = null;
+    let note = '';
+    let f: Awaited<ReturnType<typeof fight>> | null = null;
+    let armed: { note: string } | null = null;
+    for (let attempt = 0; attempt < KILL_TRIES; attempt++) {
+      const found = await findPrey(ctx, noSwingGuids);
+      if (!found.prey) {
+        if (!noSwing.length) return skip(found.note);
+        return fail(`ATTACK NEVER SWUNG at ${noSwing.join('; ')}, and no other creature to try (${found.note})`);
+      }
+      prey = found.prey;
+      if (!armed) {
+        const a = await armForKill(ctx);
+        if ('skip' in a) return skip(a.skip);
+        armed = a;
+      }
+      note = armed.note ? `${found.note}; ${armed.note}` : found.note;
+      ctx.log(`   prey: ${prey.name} #${prey.guid.toString(16)} ${prey.dist.toFixed(0)} m (${note})`);
+      f = await fight(ctx, prey);
+      if (f.outcome === 'lost' && NO_SWINGS.test(f.detail)) {
+        noSwing.push(`${prey.name} (${prey.dist.toFixed(0)} m, ${note}): ${f.detail}`);
+        noSwingGuids.push(prey.guid);
+        continue;
+      }
+      break;
+    }
+    if (!prey || !f) return fail('no creature was fought');
+    if (f.outcome === 'lost' && NO_SWINGS.test(f.detail)) return fail(`ATTACK NEVER SWUNG at ${KILL_TRIES} creatures in turn: ${noSwing.join('; ')}`);
     if (f.outcome === 'dead') return fail(`died fighting ${prey.name}: ${f.detail}`);
     if (f.outcome === 'refused') return fail(`the attack on ${prey.name} was refused: ${f.detail}`);
-    // The attack never swinging at a reachable creature is a client fault until shown otherwise: a FAIL, said plainly.
-    if (f.outcome === 'lost' && NO_SWINGS.test(f.detail)) return fail(`ATTACK NEVER SWUNG at ${prey.name} (${prey.dist.toFixed(0)} m, ${note}): ${f.detail}`);
+    if (noSwing.length) note += ` (after no swings at ${noSwing.map((x) => x.split(' (')[0]).join(', ')})`;
     if (f.outcome !== 'killed') return skip(`${prey.name}: ${f.detail}`);
     await ctx.driver.sleep(2500);
     const c = await observe(ctx, { filter: 'corpse', radius: 40, max: 10 });
@@ -1392,11 +1464,28 @@ async function magicNow(ctx: StepContext): Promise<{ spells: AgentSpell[]; facts
   return { spells, facts, mana: me?.mana?.cur };
 }
 
+/**
+ * A caster with no magic of its own: no workmanship (a loot-made item has one) and no mana, so it has no Arcane Lore
+ * activation requirement (ItemDifficulty) a new character can fall short of. The full run of 2026-11-07 wielded a looted
+ * Wand on ClassicACE (the 2472 class, but loot-mutated: ItemDifficulty 23, spellcraft 21) and the server answered "Your
+ * Arcane Lore is too low to use that item's magic." The admin prep's world-default Wand (ACE-World and ClassicACE's 2472
+ * carry no ItemDifficulty or spells; the AC1999 world's likewise) is the one a new player would hold.
+ */
+export const plainCaster = (i: Pick<AgentItem, 'itemType' | 'workmanship' | 'mana'>): boolean =>
+  ((i.itemType ?? 0) & 0x8000) !== 0 && !(i.workmanship && i.workmanship > 0) && !((i.mana?.max ?? 0) > 0);
+
+/** The caster magic mode wields: a plain one (worn first), else any (the old way, when no plain one is held). */
+export function pickCaster(inv: AgentItem[]): AgentItem | undefined {
+  const casters = inv.filter((i) => ((i.itemType ?? 0) & 0x8000) !== 0);
+  const plain = casters.filter(plainCaster);
+  return plain.find((i) => i.where === 'equipped') ?? plain[0] ?? casters.find((i) => i.where === 'equipped') ?? casters[0];
+}
+
 export const magicModeStep: Step = {
   id: 'magic-mode', title: 'Enter magic mode with a held caster', timeoutMs: 90_000,
   async run(ctx) {
     const { driver } = ctx;
-    const caster = (await driver.call<AgentItem[]>('inventory')).find((i) => ((i.itemType ?? 0) & 0x8000) !== 0);
+    const caster = pickCaster(await driver.call<AgentItem[]>('inventory'));
     if (!caster) return skip(noneHeld(ctx, 'caster', 'no caster (wand, staff, orb) held'));
     let again = '';
     if (caster.where !== 'equipped') {
@@ -1517,6 +1606,14 @@ export interface AdminPrepCommand {
   unknown: 'not-admin' | 'missing';
 }
 
+/** The steps the --admin prep supplies (its components, wand and trained schools): it runs when one of them does. */
+export const ADMIN_PREP_FOR = ['magic-mode', 'cast-creature', 'cast-self', 'panel-effects'] as const;
+
+/** ITEM_TYPE TYPE_SPELL_COMPONENTS (ACE ItemType.SpellComponents). */
+export const TYPE_SPELL_COMPONENTS = 0x1000;
+/** Component stacks held that make the prep's component command unneeded (it is not typed again: no pile-up across runs). */
+export const ENOUGH_COMPONENTS = 10;
+
 export const ADMIN_PREP_COMMANDS: ReadonlyArray<AdminPrepCommand> = [
   { text: '@spellcomps 74 5', done: /^Spawned \d+ spell component types/i, why: 'spell components for the casts', unknown: 'not-admin' },
   { text: '@spawnwcidinv 2472', done: 'new-caster', why: 'a Wand to cast with', unknown: 'not-admin' },
@@ -1557,13 +1654,23 @@ export function schoolsToTrain(spells: AgentSpell[], skills: SkillRow[]): string
 }
 
 export const adminPrepStep: Step = {
-  id: 'admin-prep', title: 'Admin prep: components, a wand, the magic schools trained (--admin)', timeoutMs: 90_000, withOnly: true,
+  id: 'admin-prep', title: 'Admin prep: components, a wand, the magic schools trained (--admin)', timeoutMs: 90_000, withOnly: ADMIN_PREP_FOR,
   async run(ctx) {
     const { driver } = ctx;
     const said: string[] = [];
     const all = async (): Promise<AgentItem[]> => driver.call<AgentItem[]>('inventory');
     const casters = async (): Promise<AgentItem[]> => (await all()).filter((i) => ((i.itemType ?? 0) & 0x8000) !== 0);
     for (const c of adminPrepCommands(ctx.era)) {
+      // Already held from an earlier run: not spawned again (the character carries what it spawned between runs).
+      if (c.why.startsWith('spell components')) {
+        const comps = (await all()).filter((i) => ((i.itemType ?? 0) & TYPE_SPELL_COMPONENTS) !== 0).length;
+        if (comps >= ENOUGH_COMPONENTS) { said.push(`${c.text}: not typed, ${comps} component stacks already held`); continue; }
+      }
+      if (c.done === 'new-caster') {
+        // Only a plain caster counts (a looted one can need more Arcane Lore than the character has).
+        const held = (await casters()).filter(plainCaster);
+        if (held.length) { said.push(`${c.text}: not typed, ${held[0].name} already held`); continue; }
+      }
       const before = driver.peek().chat.length;
       const had = c.done === 'new-caster' ? new Set((await casters()).map((i) => i.guid)) : c.done === 'new-items' ? new Set((await all()).map((i) => i.guid)) : null;
       await driver.chat(c.text);
@@ -1620,6 +1727,8 @@ export function giveCandidates(inv: AgentItem[]): AgentItem[] {
 
 /** The server's no to the item itself (try another), as against the NPC's no to a gift it could take. */
 const NOT_GIVEABLE = /can't be given|cannot be given/i;
+/** The NPC's own no to a gift (ACE WeenieError TradeAiDoesntWant 0x046A, AC1999 the same text). */
+const NPC_TURNED_DOWN = /doesn't know what to do with that|is not accepting gifts|cowers from you/i;
 
 /**
  * What each NPC takes, from the era's world data: an NPC's Give emotes (weenie_properties_emote category 6, ACE
@@ -1628,12 +1737,35 @@ const NOT_GIVEABLE = /can't be given|cannot be given/i;
  */
 export type GiveTables = Map<string, Set<number>>;
 
+/** A weenie SQL file's name (PropertyString 1), or null. */
+export function weenieSqlName(text: string): string | null {
+  return /\(\d+, *1, *'((?:[^'\\]|\\.|'')*)'\)/.exec(/INSERT INTO `weenie_properties_string`[\s\S]*?;\s*(?:\n|$)/.exec(text)?.[0] ?? '')?.[1]?.replace(/\\'|''/g, "'") ?? null;
+}
+
 export function parseGiveTable(text: string): { name: string; accepts: number[] } | null {
   if (!text.includes('/* Give */')) return null;
-  const name = /\(\d+, *1, *'((?:[^'\\]|\\.|'')*)'\)/.exec(/INSERT INTO `weenie_properties_string`[\s\S]*?;\s*(?:\n|$)/.exec(text)?.[0] ?? '')?.[1]?.replace(/\\'|''/g, "'");
+  const name = weenieSqlName(text);
   if (!name) return null;
   const accepts = [...text.matchAll(/\(\d+,\s*6 \/\* Give \*\/,\s*[\d.]+,\s*(\d+)/g)].map((m) => Number(m[1]));
   return accepts.length ? { name, accepts } : null;
+}
+
+/**
+ * Per NPC name, the items EVERY weenie of that name takes. The client doesn't tell the play-through which weenie class an
+ * NPC is, and a name is shared: Holtburg's Training Master doesn't take the Calling Stone another Training Master's Give
+ * emote names (fast run 4, 2026-11-07: "Training Master doesn't know what to do with that.", ACE
+ * GiveObjectToNPC → HasGiveOrRefuseEmoteForItem found no Give emote for the item's class: TradeAiDoesntWant). A name
+ * one of whose weenies has no Give emote at all takes nothing for sure.
+ */
+export function giveTablesFrom(files: Array<{ name: string; accepts: number[] }>): GiveTables {
+  const m: GiveTables = new Map();
+  for (const f of files) {
+    const k = f.name.toLowerCase();
+    const prev = m.get(k);
+    m.set(k, prev ? new Set(f.accepts.filter((w) => prev.has(w))) : new Set(f.accepts));
+  }
+  for (const [k, v] of m) if (!v.size) m.delete(k);
+  return m;
 }
 
 export function loadGiveTables(era: EraPlan, roots: string[]): GiveTables | null {
@@ -1641,16 +1773,16 @@ export function loadGiveTables(era: EraPlan, roots: string[]): GiveTables | null
   for (const root of roots) {
     const dir = join(root, era.worldCore, '9 WeenieDefaults/SQL');
     if (!existsSync(dir)) continue;
-    const m: GiveTables = new Map();
+    // Every named weenie (an NPC with no Give emote counts: it takes nothing), then per name what all of them take.
+    const files: Array<{ name: string; accepts: number[] }> = [];
     for (const f of sqlFiles(dir)) {
-      const t = parseGiveTable(readFileSync(f, 'utf8'));
-      if (!t) continue;
-      const k = t.name.toLowerCase();
-      const set = m.get(k) ?? new Set<number>();
-      for (const w of t.accepts) set.add(w);
-      m.set(k, set);
+      const text = readFileSync(f, 'utf8');
+      const t = parseGiveTable(text);
+      if (t) { files.push(t); continue; }
+      const name = weenieSqlName(text);
+      if (name) files.push({ name, accepts: [] });
     }
-    return m;
+    return giveTablesFrom(files);
   }
   return null;
 }
@@ -1699,6 +1831,10 @@ export const giveStep: Step = {
     for (const item of items) {
       const r = await ctx.driver.call<AgentResult>('give', [item.guid, npc.guid, null], 90_000);
       if (r.ok) return ok(`gave ${item.name} to ${npc.name}: ${msg(r)}${tried.length ? ` (after: ${tried.join('; ')})` : ''}`, { screenshots: await shots(ctx, 'give-npc'), allow: [GIVE_REFUSED] });
+      // The NPC's no ("<npc> doesn't know what to do with that.", ACE TradeAiDoesntWant) comes with the client's own
+      // attempt-failed line ("The X can't be given", ServerSaysAttemptFailed 0x7e4190): that is the NPC turning it down,
+      // not the item refusing to go. Only "can't be given" alone (attuned, bonded) means try another item.
+      if (NPC_TURNED_DOWN.test(r.message)) return ok(`${npc.name} turned down ${item.name} (nothing held is on its Give list): ${msg(r)}`, { screenshots: await shots(ctx, 'give-npc'), allow: [GIVE_REFUSED] });
       if (NOT_GIVEABLE.test(r.message)) { tried.push(`${item.name}: ${msg(r)}`); continue; }
       if (GIVE_REFUSED.test(r.message)) return ok(`${npc.name} turned down ${item.name} (nothing held is on its Give list): ${msg(r)}`, { screenshots: await shots(ctx, 'give-npc'), allow: [GIVE_REFUSED] });
       return fail(`giving ${item.name} to ${npc.name}: ${msg(r)}`, { screenshots: await shots(ctx, 'give-npc'), allow: [GIVE_REFUSED] });
@@ -1788,7 +1924,6 @@ export const logoutAndBackStep: Step = {
 export function playthroughSteps(era: EraPlan, opts: { admin?: boolean } = {}): Step[] {
   return [
     enterWorldStep,
-    ...(opts.admin ? [adminPrepStep] : []),
     ...era.panels.map(panelStep),
     vendorBuyStep,
     vendorSellStep,
@@ -1800,6 +1935,9 @@ export function playthroughSteps(era: EraPlan, opts: { admin?: boolean } = {}): 
     readScrollStep,
     eatFoodStep,
     healKitStep,
+    // The --admin prep right before the magic it supplies (fast run 2, 2026-11-07: run first, @comps filled ClassicACE's
+    // main pack and the vendor steps had no room), and only when a magic step runs.
+    ...(opts.admin ? [adminPrepStep] : []),
     magicModeStep,
     castAtCreatureStep,
     castAtSelfStep,
@@ -1818,7 +1956,8 @@ export function selectSteps(all: Step[], only: string[] | null): Step[] {
   if (!only) return all;
   const unknown = only.filter((id) => !all.some((s) => s.id === id));
   if (unknown.length) throw new Error(`unknown step id(s): ${unknown.join(', ')} (have: ${all.map((s) => s.id).join(', ')})`);
-  return all.filter((s) => s.required || s.withOnly || only.includes(s.id));
+  const picked = (s: Step): boolean => s.withOnly === true || (Array.isArray(s.withOnly) && s.withOnly.some((id) => only.includes(id)));
+  return all.filter((s) => s.required || picked(s) || only.includes(s.id));
 }
 
 export const freshState = (): RunState => ({ character: null, vendor: null, bought: null, kill: null, caster: null, unwielded: null, supplies: {} });

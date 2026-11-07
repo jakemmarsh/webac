@@ -12695,7 +12695,7 @@ async function main() {
           parsed.vendorGuid,
           // CORE.17.k.b.b.c.c.a.a.c.a.a.a.a.a.a — the VendorProfile fields
           // VendorSellUI::DragItemAcceptable's InqAcceptability reads.
-          { itemTypes: parsed.merchandiseItemTypes ?? 0, minValue: parsed.merchandiseMinValue ?? 0, maxValue: parsed.merchandiseMaxValue ?? 0 },
+          { itemTypes: parsed.merchandiseItemTypes ?? 0, minValue: parsed.merchandiseMinValue ?? 0, maxValue: parsed.merchandiseMaxValue ?? 0, dealsMagic: !!parsed.dealMagicalItems },
         );
         if (hasAltCurrency) {
           console.log(`[AC] Vendor trades in alt currency: ${parsed.altCurrencyName} (player holds ${parsed.altCurrencyAmount})`);
@@ -18269,6 +18269,7 @@ async function main() {
         setCombatMode: (mode) => { agentPrimeMoveState(); sendChangeCombatMode({ peace: CombatMode.NonCombat, melee: CombatMode.Melee, missile: CombatMode.Missile, magic: CombatMode.Magic }[mode]); },
         attack: (guid, power, height) => { agentPrimeMoveState(); agentHostAttack.attack(guid, power, height); },
         attackHeight: () => gameUI.getCombatAttackHeight(),
+        bodyHeights: (guid) => { const b = objectRangeBody(guid); return b ? { target: b.height, self: playerRangeBody().height } : null; },
         attackPower: () => gameUI.getCombatPowerLevel(),
         setAttackPower: (p) => gameUI.adjustCombatPowerLevel(p - gameUI.getCombatPowerLevel()),
         setAttackHeight: (h) => gameUI.setCombatAttackHeight(h),
@@ -18367,7 +18368,7 @@ async function main() {
           return {
             name: v.name, guid: v.vendorGuid >>> 0, currency: v.altCurrencyName ?? 'Pyreals',
             items: v.buyItems.filter((i) => i.guid).map((i) => ({ guid: i.guid! >>> 0, name: i.name, price: i.price, ...(i.stackSize && i.stackSize > 1 ? { stack: i.stackSize } : {}), ...((i.itemType ?? 0) & ItemType.Service ? { service: true } : {}) })),
-            ...(v.profile ? { buys: { itemTypes: v.profile.itemTypes >>> 0, minValue: v.profile.minValue, maxValue: v.profile.maxValue } } : {}),
+            ...(v.profile ? { buys: { itemTypes: v.profile.itemTypes >>> 0, minValue: v.profile.minValue, maxValue: v.profile.maxValue, ...(v.profile.dealsMagic !== undefined ? { magic: v.profile.dealsMagic } : {}) } } : {}),
           };
         },
         // The vendor bar's Buy / Sell buttons send their whole list in one message (onBuyList / onSellList).

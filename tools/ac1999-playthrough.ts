@@ -22,8 +22,10 @@
  * <extra page parameters, e.g. datSet=…>; --out <dir>; --only step,step (enter-world always runs);
  * --data-root <checkout with reference/ and world-db-raw/>; --profile <fixed Chrome profile dir, kept>;
  * --headed; --swiftshader (default: headless on the real GPU); --admin (off by default; needs an admin test account:
- * after entering the world it types @spellcomps 74 5 and @spawnwcidinv 2472 into the chat box and trains the schools
- * the magic steps need with skill credits; the regression steps spawn what they need with the era's spawn command);
+ * before the magic steps it types the era's component and wand commands (AC1999 @spellcomps 74 5 / @spawnwcidinv 2472,
+ * ACE @comps / @ci 2472; not again when already held) and trains the schools the magic steps need with skill credits;
+ * the regression steps spawn what they need with the era's spawn command and drop it again before they end);
+ * --keep-spawned (the regression steps leave what they spawned: the live gate's screen-account prep);
  * --list (print the era's step ids and titles, run nothing).
  *
  * Output: verification/ac1999-playthrough/<timestamp>-<era>/report.md (each step ok / skipped (why) /
@@ -109,7 +111,7 @@ const withTimeout = <T>(p: Promise<T>, ms: number, what: string): Promise<T> => 
 
 async function main(): Promise<number> {
   const args = parsePlaythroughArgs(process.argv.slice(2));
-  const plan = withRegressionSteps(playthroughSteps(args.era, { admin: args.admin }), regressionSteps(args.era, { admin: args.admin }));
+  const plan = withRegressionSteps(playthroughSteps(args.era, { admin: args.admin }), regressionSteps(args.era, { admin: args.admin, keepSpawned: args.keepSpawned }));
   if (args.list) {
     console.log(`${args.era.label} (${args.era.key}): ${plan.length} steps; --only takes the ids (enter-world${args.admin ? ' and admin-prep' : ''} always run)`);
     for (const s of plan) console.log(`  ${s.id.padEnd(26)} ${s.title}`);

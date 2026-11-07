@@ -266,7 +266,7 @@ export const STEP_DEPS: Record<string, readonly string[]> = {
 };
 
 /** Steps the play-through always runs itself (selectSteps: required / withOnly), never passed to --only. */
-export const IMPLICIT_STEPS = new Set(['enter-world', 'admin-prep']);
+export const IMPLICIT_STEPS = new Set(['enter-world', 'admin-prep', 'pack-space']);
 
 /**
  * The --only ids for one era: aliases resolved against the era's plan, dependencies added, ids the era doesn't have

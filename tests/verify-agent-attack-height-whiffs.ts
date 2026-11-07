@@ -10,7 +10,7 @@
  * other height one. ACE's gone-target ends (ActionCancelled 0x36) keep the old answer unchanged.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AgentApi } from '../packages/renderer/src/agent/AgentApi.ts';
+import { AgentApi, attackHeightForSize } from '../packages/renderer/src/agent/AgentApi.ts';
 import type { RoutineAction, RoutineProfile } from '../packages/shared/src/routines/index.ts';
 import { ALL_MODULES_OFF } from '../packages/shared/src/routines/index.ts';
 import { mapCoordsText } from '../packages/renderer/src/agent/RoutineEngine.ts';
@@ -65,6 +65,31 @@ describe('melee attacks whose swings pass over the target (AC1999 cone height)',
     expect(host.sent).toContain('height low');
     expect(evs.some((e) => e.type === 'chat' && /swings at Desert Rabbit hit nothing at medium height: attacking low instead/.test(e.text))).toBe(true);
     expect(AgentApi.reachHeights.get('desert rabbit')).toBe('low');
+  });
+
+  // HARNESS.agent-attack-height-1999 (the live gate's fast run 3, 2026-11-07: three rabbits, every medium swing over
+  // them): a creature under half your height gets a Low swing from the first request, as a 1999 player swings.
+  it('a short creature (under half your height) is attacked Low from the first swing; nothing to cycle', () => {
+    (host as unknown as { bodyHeights: (g: number) => { target: number; self: number } | null }).bodyHeights = (g) => (g === RABBIT ? { target: 0.45, self: 1.8 } : null);
+    server1999((h) => h === 'low', () => host.dying.add(RABBIT));
+    const since = api.observe().seq;
+    api.attack('Desert Rabbit');
+    run(api, host, 8_000, { physics: false });
+    expect(swings[0]).toBe('low');
+    expect(swings).not.toContain('medium');
+    expect(api.eventsSince(since).some((e) => e.type === 'target-died')).toBe(true);
+  });
+
+  it('a creature at least half your height keeps the combat bar\'s height; an asked-for height still wins', () => {
+    (host as unknown as { bodyHeights: (g: number) => { target: number; self: number } | null }).bodyHeights = () => ({ target: 1.2, self: 1.8 });
+    server1999(() => true, () => host.dying.add(RABBIT));
+    api.attack('Desert Rabbit');
+    run(api, host, 3_000, { physics: false });
+    expect(swings[0]).toBe('medium');
+    expect(attackHeightForSize(0.45, 1.8)).toBe('low');
+    expect(attackHeightForSize(0.9, 1.8)).toBeNull();
+    expect(attackHeightForSize(0, 1.8)).toBeNull(); // unknown body: the bar's height
+    expect(attackHeightForSize(0.5, 0)).toBeNull();
   });
 
   it('a creature only a high swing reaches: medium, then low, then high (the first end after a switch can be the old swing\'s, so two at each)', () => {

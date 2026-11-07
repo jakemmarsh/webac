@@ -157,6 +157,22 @@ export interface AgentHostSelf {
 export type CombatModeName = 'peace' | 'melee' | 'missile' | 'magic';
 export type AttackHeightName = 'high' | 'medium' | 'low';
 
+/** A body under this fraction of yours is short enough that a Medium swing passes over it (see attackHeightForSize). */
+export const LOW_SWING_TARGET_FRACTION = 0.5;
+
+/**
+ * The attack height a body's size calls for, or null when either height is unknown (the combat bar's then). The AC1999
+ * server lands a melee swing only when the swing's height (its attack animation's AttackHook cone height x your scale)
+ * is at or under the target's height (CMeleeAttackEvent::ConeHitHeight: UNDEF_ATTACK_HEIGHT above it, and
+ * HandlePerformAttack then does nothing: no hit, no evade, no text). A Medium swing is about waist high, so it passes
+ * over a rabbit; a 1999 player swings Low at anything under about half their height. ACE has no such test: a Low
+ * swing at a short creature lands there too.
+ */
+export function attackHeightForSize(targetHeight: number, selfHeight: number): AttackHeightName | null {
+  if (!(targetHeight > 0) || !(selfHeight > 0)) return null;
+  return targetHeight < selfHeight * LOW_SWING_TARGET_FRACTION ? 'low' : null;
+}
+
 export interface AgentHost {
   screen(): AgentScreen;
   self(): AgentHostSelf | null;
@@ -387,6 +403,11 @@ export interface AgentHost {
   /** Set the combat bar's power / accuracy level (0..1), as its slider does. */
   setAttackPower?(p: number): void;
   setAttackHeight?(h: AttackHeightName): void;
+  /**
+   * Bodies' heights in metres (Setup height x scale: CPartArray::GetHeight, ServerObject.collisionHeight): the
+   * object's, and your own. Null when the object isn't known here.
+   */
+  bodyHeights?(guid: number): { target: number; self: number } | null;
   /** An attack request is in flight or the server's swing chain is running (no new request should go out). */
   attackPending(): boolean;
   cancelAttack(): void;
@@ -14766,8 +14787,12 @@ export class AgentApi {
     }
     const guid = g;
     const name = this.nameOf(guid);
-    // The height that connected on this kind of creature before, else the asked-for one, else the combat bar's.
-    let height: AttackHeightName = AgentApi.reachHeights.get(name.toLowerCase()) ?? opts.height ?? this.host.attackHeight?.() ?? 'medium';
+    // The height that connected on this kind of creature before, else the asked-for one, else the one its size calls for
+    // (a creature under half your height gets a Low swing, as a 1999 player learns: HARNESS.agent-attack-height-1999),
+    // else the combat bar's.
+    const bodies = this.host.bodyHeights?.(guid) ?? null;
+    let height: AttackHeightName = AgentApi.reachHeights.get(name.toLowerCase()) ?? opts.height
+      ?? (bodies ? attackHeightForSize(bodies.target, bodies.self) : null) ?? this.host.attackHeight?.() ?? 'medium';
     const power = Math.min(Math.max((opts.power === 'bar' ? this.host.attackPower?.() : opts.power) ?? 0.6, 0), 1);
     this.host.select(guid);
     this.attackTarget = guid;
@@ -15026,9 +15051,11 @@ export class AgentApi {
           return { ok: false, message: `the server ended ${n} attacks on ${name}${everyHeight ? ' at all three heights' : ''} at once, with no swing: it is probably dead or gone on the server's side (the client still shows it), or out of reach. Pick another target, or walk_to it if it should be there.` };
         }
         if (now - start > 120_000) { this.host.cancelAttack(); lost('still alive after 120 s of attacking'); return { ok: false, message: `${name} still alive after 120 s` }; }
-        // Any swing either way since the last tick counts as progress.
+        // Any swing either way since the last tick counts as progress: a combat line, or a swing of yours the server
+        // finished (AttackDone 0) even when it named the target in no line (an AC1999 whiff over a short creature is a
+        // swing: the height cycling below answers it, not "no swings for 20 s").
         const fresh = this.events.filter((e) => e.seq > lastCombatSeq && e.type === 'chat' && e.text.startsWith('(combat)'));
-        if (fresh.length) lastActivity = now;
+        if (fresh.length || this.attackDones.some((d) => d.swung && d.at > lastActivity)) lastActivity = now;
         lastCombatSeq = this.seqN;
         if (fresh.some((e) => swingReached(e.text, name))) { quietSince = null; quietHeights = 0; AgentApi.reachHeights.set(name.toLowerCase(), height); }
         // Once the server has cancelled an attack on it (an error code, no swing), it isn't swinging at all: the height
@@ -15998,7 +16025,7 @@ export class AgentApi {
       unequip: (t: TargetArg) => this.unequip(t),
       moveItem: (t: TargetArg, to?: string | number | null) => this.moveItem(t, to ?? null),
       moveItems: (f: string, to?: string | number | null, max?: number) => this.moveItems(f, to ?? null, max ?? 50),
-      appraise: (t: TargetArg) => this.appraise(t),
+      appraise: (t: TargetArg, o?: { quiet?: boolean } | null) => this.appraise(t, o ?? {}),
       // The kind word (attribute= / vital= / skill=) reaches the raise: the surface dropped it, so raiseKindNote never ran.
       raise: (s: string, n?: number, w?: 'attribute' | 'vital' | 'skill' | null) => this.raise(s, n, w),
       trainSkill: (s: string) => this.trainSkill(s),
@@ -16007,6 +16034,10 @@ export class AgentApi {
       keys: (f?: string) => this.keys(f ?? ''),
       vendor: (f?: string | null) => this.vendorView(f ?? null),
       vendorAt: (t: TargetArg, f?: string | null) => this.vendorAt(t, f ?? null),
+      // The open vendor window as data (its merchandise and what it buys: AgentVendor.buys). The live gate's vendor-sell
+      // read it through the page and got nothing (fast run 3, 2026-11-07: not on the surface), so it offered Hudriffa a
+      // Turquoise Taper his trade refuses ("That item cannot be sold here", the client's own InqAcceptability).
+      vendorData: () => this.vendorData(),
       // A vendor named (or the one beside you, with no window open): its window first (vendorReady).
       buy: (i: TargetArg, n?: number | null, v?: TargetArg | null) => this.buyAt(i, n ?? null, v ?? null),
       sell: (i: TargetArg, n?: number | null, v?: TargetArg | null) => this.sellAt(i, n ?? null, v ?? null),

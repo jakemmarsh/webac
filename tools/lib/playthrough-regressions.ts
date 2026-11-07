@@ -33,6 +33,7 @@ import type { AgentResult } from '../../packages/renderer/src/agent/types.ts';
 import { capacityBarFraction, structureBarFraction } from '../../packages/renderer/src/ui/structureBar.ts';
 import { type HeldPose, heldPoseDifferences } from '../../packages/renderer/src/models/HeldPose.ts';
 import { compassPoint } from '../../packages/renderer/src/agent/format.ts';
+import { shortcutDropRefusal1999 } from '../../packages/renderer/src/network/itemShortcutRestore.ts';
 import { type EraPlan, type Step, type StepContext, type StepOutcome, fail, ok, settle, skip } from './playthrough.ts';
 
 // ── Geometry ────────────────────────────────────────────────────────────────
@@ -341,11 +342,16 @@ export const GRID_JS = `(() => { ${RECT_FN}
 })()`;
 
 /** The carried items and packs (GameUI's own lists), for picking what a step works with. */
-export interface HeldItem { guid: number; name: string; wcid: number; container: number; structure?: number; maxStructure?: number; itemsCapacity?: number; itemType: number; validLocations: number }
+export interface HeldItem {
+  guid: number; name: string; wcid: number; container: number; structure?: number; maxStructure?: number; itemsCapacity?: number; itemType: number; validLocations: number;
+  /** ITEM_USEABLE, the combat use and the pwd bitfield: what the 1999 shortcut tray reads (shortcutDropRefusal1999). */
+  usable?: number; combatUse?: number; objectDescFlags?: number;
+}
 export interface HeldState { packs: number[]; items: HeldItem[]; equipped: HeldItem[]; mainCapacity: number; selectedPack: number; open: boolean }
 export const HELD_JS = `(() => { const ui = window.__ac && window.__ac.gameUI; if (!ui) return null;
   const m = (i) => ({ guid: i.id >>> 0, name: i.name, wcid: i.weenieClassId, container: (i.containerId || 0) >>> 0, structure: i.structure, maxStructure: i.maxStructure,
-    itemsCapacity: i.itemsCapacity, itemType: (i.itemType || 0) >>> 0, validLocations: ((i.validLocations || 0) | (i.slot || 0)) >>> 0 });
+    itemsCapacity: i.itemsCapacity, itemType: (i.itemType || 0) >>> 0, validLocations: ((i.validLocations || 0) | (i.slot || 0)) >>> 0,
+    usable: i.usable, combatUse: i.combatUse, objectDescFlags: i.objectDescFlags });
   return { packs: (ui.sidePackGuids || []).map((g) => g >>> 0), items: (ui.inventoryItems || []).map(m), equipped: (ui.equippedItems || []).map(m),
     mainCapacity: ui.inventoryItemsCapacity, selectedPack: ui.selectedPackSlot, open: !!ui.inventoryVisible }; })()`;
 
@@ -410,7 +416,15 @@ const box = (ctx: StepContext, selector: string): Promise<Rect | null> => ctx.dr
 export interface RegressionOptions {
   /** --admin: a step may spawn what it needs with the era's admin commands. */
   admin?: boolean;
+  /**
+   * --keep-spawned: leave what the steps spawned on the character (the live gate's AC1999 screen-account prep wants
+   * its filled side pack and used kit kept). Otherwise every step drops what it spawned before it ends.
+   */
+  keepSpawned?: boolean;
 }
+
+/** What the running step spawned (spawnHeld adds to it; leavesNoTrace drops it afterwards). */
+const SPAWNED = new WeakMap<StepContext['state'], number[]>();
 
 /** Type admin spawns into the chat box and wait for the objects; the new guids (fewer when some never came). */
 export async function spawnHeld(ctx: StepContext, wcid: number, count: number): Promise<number[]> {
@@ -426,7 +440,94 @@ export async function spawnHeld(ctx: StepContext, wcid: number, count: number): 
     if (got.length >= count) break;
     await ctx.driver.sleep(500);
   }
+  SPAWNED.get(ctx.state)?.push(...got);
   return got;
+}
+
+/**
+ * Drop what a step spawned (taking off anything worn first): each step leaves the character as it found it, so no
+ * step's outcome depends on what an earlier one left behind (fast run 2, 2026-11-07: thirty spawned lockpicks and the
+ * admin components left ClassicACE's pack too full for the vendor steps). A side pack drops with what is in it.
+ * Returns what could not be dropped.
+ */
+export async function dropSpawned(ctx: StepContext, guids: number[]): Promise<string[]> {
+  const { driver } = ctx;
+  const left: string[] = [];
+  const h = await held(ctx);
+  const sidePacks = new Set((h?.packs ?? []).slice(1)); // packs[0] is the main pack
+  const spawned = new Set(guids);
+  // A spawned side pack: what the character put in it goes back to the main pack first; the rest drops with it.
+  for (const p of guids.filter((g) => sidePacks.has(g))) {
+    for (const i of (h?.items ?? []).filter((x) => x.container === p && !spawned.has(x.guid))) {
+      await driver.call<AgentResult>('moveItem', [i.guid, 0], 30_000).catch(() => null);
+    }
+  }
+  const insideSpawnedPack = new Set((h?.items ?? []).filter((i) => spawned.has(i.container)).map((i) => i.guid));
+  for (const g of guids) {
+    if (insideSpawnedPack.has(g)) continue; // goes with its pack
+    const now = await held(ctx);
+    const worn = (now?.equipped ?? []).find((i) => i.guid === g);
+    const item = worn ?? (now?.items ?? []).find((i) => i.guid === g);
+    if (!item && !(now?.packs ?? []).includes(g)) continue; // used up, merged or already gone
+    if (worn) await driver.call<AgentResult>('unequip', [g], 30_000).catch(() => null);
+    const r = await driver.call<AgentResult>('drop', [g], 30_000).catch((e: Error) => ({ ok: false, message: e.message } as AgentResult));
+    if (!r.ok) left.push(`${item?.name ?? `#${g.toString(16)}`}: ${msg(r)}`);
+  }
+  return left;
+}
+
+/** A step that drops what it spawned before it ends (unless --keep-spawned). */
+export function leavesNoTrace(step: Step, opts: RegressionOptions = {}): Step {
+  return {
+    ...step,
+    async run(ctx) {
+      const mine: number[] = [];
+      SPAWNED.set(ctx.state, mine);
+      let out: StepOutcome;
+      try { out = await step.run(ctx); } finally { SPAWNED.delete(ctx.state); }
+      if (!mine.length || opts.keepSpawned) return out;
+      const left = await dropSpawned(ctx, mine);
+      const note = left.length ? `; left behind (could not drop): ${left.join(', ')}` : `; dropped the ${mine.length} item(s) it spawned`;
+      return { ...out, detail: `${out.detail}${note}`, allow: [...(out.allow ?? []), /drop|dropped/i] };
+    },
+  };
+}
+
+// ── Free pack slots before the vendor and loot steps ───────────────────────
+
+/** Main-pack slots the vendor, supplies and loot steps need free. */
+export const PACK_SPACE_WANTED = 15;
+
+/** The main pack's free slots (side packs and what is in them don't count against it). */
+export function mainPackFree(h: Pick<HeldState, 'packs' | 'items' | 'mainCapacity'>): number {
+  const main = h.packs[0];
+  const packs = new Set(h.packs);
+  const inMain = h.items.filter((i) => i.container === main && !packs.has(i.guid)).length;
+  return Math.max(0, (h.mainCapacity ?? 0) - inMain);
+}
+
+/**
+ * Right after entering the world: free main-pack slots, dropping regression filler an earlier run left (the Crude
+ * Lockpicks pack-scroll-sort spawns) until PACK_SPACE_WANTED are free. Its own drops only; anything else stays.
+ */
+export function packSpaceStep(): Step {
+  return {
+    id: 'pack-space', title: `Free main-pack slots for the vendor and loot steps (${PACK_SPACE_WANTED} wanted)`, timeoutMs: 180_000, withOnly: true,
+    async run(ctx) {
+      const h = await held(ctx);
+      if (!h || !h.mainCapacity) return skip('the client lists no main pack capacity');
+      let free = mainPackFree(h);
+      if (free >= PACK_SPACE_WANTED) return ok(`${free} of ${h.mainCapacity} main-pack slots free`);
+      const filler = h.items.filter((i) => i.wcid === REGRESSION_WCIDS.filler && i.container === h.packs[0]).map((i) => i.guid);
+      const want = Math.min(filler.length, PACK_SPACE_WANTED - free);
+      const left = await dropSpawned(ctx, filler.slice(0, want));
+      const after = await held(ctx);
+      free = after ? mainPackFree(after) : free;
+      const what = `dropped ${want - left.length} leftover Crude Lockpick(s) from earlier runs; ${free} of ${h.mainCapacity} main-pack slots free`;
+      if (free >= PACK_SPACE_WANTED) return ok(what, { allow: [/drop|dropped/i] });
+      return fail(`${what}, ${PACK_SPACE_WANTED} wanted: the pack is full of the character's own things (or the drops failed: ${left.join(', ') || 'none'})`, { allow: [/drop|dropped/i] });
+    },
+  };
 }
 
 /** Open the inventory with the real mouse on its toolbar button (no-op when open). */
@@ -576,6 +677,10 @@ export function packScrollSortStep(opts: RegressionOptions = {}): Step {
 }
 
 /** A used kit or lockpick: structure below its max. */
+/** An own item that may go into the side pack: not a pack, not wearable, not a kit or lockpick (usedTool's kinds). */
+export const sidePackFiller = (i: Pick<HeldItem, 'itemType' | 'validLocations' | 'name' | 'maxStructure'>): boolean =>
+  (i.itemType & 0x200) === 0 && (i.validLocations ?? 0) === 0 && !((i.maxStructure ?? 0) > 0) && !/kit|lockpick/i.test(i.name);
+
 export const usedTool = (i: HeldItem): boolean => (i.maxStructure ?? 0) > 0 && (i.structure ?? 0) < (i.maxStructure ?? 0) && /kit|lockpick/i.test(i.name);
 
 /** The toolbar slot the pack-bars step puts its kit on: the first empty of slots 2-9 (slot 1 is toolbar-relog's). */
@@ -606,8 +711,15 @@ export function packBarsStep(opts: RegressionOptions = {}): Step {
         if (!empty) { empty = (await spawnHeld(ctx, REGRESSION_WCIDS.sack, 1))[0] ?? 0; await driver.sleep(1500); notes.push(empty ? 'spawned a Sack' : 'the Sack spawn brought nothing'); }
         h = await held(ctx);
         const slot = (h?.packs ?? []).indexOf(empty);
-        const item = (h?.items ?? []).find((i) => i.container === h!.packs[0] && !h!.packs.includes(i.guid) && i.wcid === REGRESSION_WCIDS.filler)
-          ?? (h?.items ?? []).find((i) => i.container === h!.packs[0] && !h!.packs.includes(i.guid) && (i.itemType & 0x200) === 0 && (i.validLocations ?? 0) === 0);
+        // What goes in the side pack: filler (spawned for it when none is held), never a kit or a lockpick (the uses
+        // bar below is checked on the kit in the main pack: fast run 4 moved the Handy Healing Kit into the Sack).
+        let item = (h?.items ?? []).find((i) => i.container === h!.packs[0] && !h!.packs.includes(i.guid) && i.wcid === REGRESSION_WCIDS.filler);
+        if (!item) {
+          const g = (await spawnHeld(ctx, REGRESSION_WCIDS.filler, 1))[0];
+          h = await held(ctx);
+          item = (h?.items ?? []).find((i) => i.guid === g);
+        }
+        item ??= (h?.items ?? []).find((i) => i.container === h!.packs[0] && !h!.packs.includes(i.guid) && sidePackFiller(i));
         if (slot > 0 && item) {
           const r = await driver.call<AgentResult>('moveItem', [item.guid, slot], 30_000);
           await settle(driver, 10_000);
@@ -657,7 +769,10 @@ export function packBarsStep(opts: RegressionOptions = {}): Step {
       if (!kit) skipped.push(`no used kit or lockpick held${opts.admin ? ' (the kit was not used up by one)' : ' (run use-healing-kit while hurt first, or --admin)'}`);
       else {
         const want = structureBarFraction(kit.structure, kit.maxStructure);
-        if (!(await scrollCellIntoView(ctx, kit.guid))) problems.push(`${kit.name}'s grid cell could not be scrolled into view`);
+        // The grid shows the pack the kit is in (the main pack, or the side pack holding it).
+        const kitSlot = Math.max(0, (h?.packs ?? []).indexOf(kit.container));
+        if (!(await showPack(ctx, kitSlot))) problems.push(`could not show pack ${kitSlot} (${kit.name}'s container) in the grid`);
+        else if (!(await scrollCellIntoView(ctx, kit.guid))) problems.push(`${kit.name}'s grid cell could not be scrolled into view`);
         else {
           const cell = await driver.evaluate<{ rect: Rect; meter: MeterSeen | null } | null>(itemCellJs(kit.guid));
           problems.push(...judgeMeter(`${kit.name} in the pack (${kit.structure}/${kit.maxStructure})`, cell?.meter ?? null, want));
@@ -704,6 +819,14 @@ export function judgeShortcutIcon(slotIcon: string | null | undefined, cellIcon:
 type SlotSeen = { rect: Rect; object: number; drawsItem: boolean; covered: boolean; icon?: string | null };
 type CellSeen = { rect: Rect; icon?: string | null };
 
+/** The era's toolbar refusal for an item (null = it takes it): the 1999 tray's AcceptDragObject rule, none in other eras. */
+export function shortcutTrayRefusal(era: string, it: Pick<HeldItem, 'usable' | 'combatUse' | 'validLocations' | 'itemType' | 'objectDescFlags'>): string | null {
+  if (era !== 'ac1999-retail') return null;
+  const flags = (it.objectDescFlags ?? 0) >>> 0;
+  // A whole stack dragged (no partial split held): the split refusal is not the item's.
+  return shortcutDropRefusal1999({ usable: it.usable, combatUse: it.combatUse, validLocations: it.validLocations, itemType: it.itemType, stuck: (flags & 0x4) !== 0, isPlayer: (flags & 0x8) !== 0 }, { splitSize: 1, maxSplitSize: 1 });
+}
+
 export function toolbarRelogStep(): Step {
   return {
     id: 'toolbar-relog', title: 'An item on toolbar slot 1 is still there after a relog', timeoutMs: 300_000,
@@ -716,8 +839,15 @@ export function toolbarRelogStep(): Step {
       const g = await grid(ctx);
       const inView = (g?.cells ?? []).filter((c) => c.guid && g && rectInside(c.rect, g.viewport));
       const isPack = (guid: number): boolean => !!h?.packs.includes(guid);
-      const pick = inView.find((c) => !isPack(c.guid));
-      if (!pick) return skip('no item in view in the main pack to put on the toolbar');
+      // An item the era's tray takes: the 1999 ShortcutSlot::AcceptDragObject @ 0x00500240 refuses one that isn't usable,
+      // wearable, a container or a caster ("Only usable items can go here": fast run 5's Calling Stone, ItemUseable No);
+      // end of retail's gmToolbarUI takes any item.
+      const takes = (guid: number): boolean => {
+        const it = h?.items.find((i) => i.guid === guid);
+        return !it || shortcutTrayRefusal(ctx.era.key, it) === null;
+      };
+      const pick = inView.find((c) => !isPack(c.guid) && takes(c.guid));
+      if (!pick) return skip(`no item in view in the main pack that the ${ctx.era.label} toolbar takes`);
       const name = h?.items.find((i) => i.guid === pick.guid)?.name ?? `#${pick.guid.toString(16)}`;
       let slot = await driver.evaluate<{ rect: Rect; object: number } | null>(shortcutSlotJs(0));
       if (!slot) return skip('this era draws no item shortcut slots');
@@ -999,27 +1129,52 @@ export function judgeWalk(from: { x: number; y: number } | null, to: { x: number
   return moved >= minMoved ? [] : [`moved ${moved.toFixed(2)} m (want at least ${minMoved} m)`];
 }
 
+/**
+ * Where the short walk goes, from how far the movement probe got along each bearing: the bearing with the most open
+ * ground, and a distance that stays half a metre short of what stopped the probe (at most WALK_SHORT_METRES). Null when
+ * no bearing has WALK_SHORT_MIN_MOVED + 0.5 m open (the character is boxed in: walk out through a door instead).
+ */
+export function walkPlan(reaches: Array<{ bearing: number; reach: number }>): { bearing: number; metres: number } | null {
+  const best = [...reaches].sort((x, y) => y.reach - x.reach)[0];
+  if (!best || best.reach < WALK_SHORT_MIN_MOVED + 0.5) return null;
+  return { bearing: best.bearing, metres: Math.min(WALK_SHORT_METRES, Math.floor((best.reach - 0.5) * 10) / 10) };
+}
+
 export function walkShortStep(): Step {
   return {
-    id: 'walk-short', title: 'Walk a few metres: the position follows (the live gate\'s smoke)', timeoutMs: 90_000,
+    id: 'walk-short', title: 'Walk a few metres: the position follows (the live gate\'s smoke)', timeoutMs: 150_000,
     async run(ctx) {
       const { driver } = ctx;
       await driver.call('close', ['all']);
       const from = await driver.call<{ x: number; y: number } | null>('where');
       if (!from) return fail('the agent API has no position');
-      // A compass point with open ground (the client's own movement probe), else straight ahead.
-      let target = '4m ahead';
+      // How far each compass point is open (the client's own movement probe); the most open one is walked.
+      const reaches: Array<{ bearing: number; reach: number }> = [];
       for (const b of WALK_BEARINGS) {
-        const to = pointAlong(from, b, WALK_SHORT_METRES);
-        const end = await driver.call<{ x: number; y: number } | null>('probe', [to]);
-        if (end && Math.hypot(end.x - to.x, end.y - to.y) < 1) { target = `${WALK_SHORT_METRES}m ${compassPoint(b)}`; break; }
+        const end = await driver.call<{ x: number; y: number } | null>('probe', [pointAlong(from, b, WALK_SHORT_METRES)]);
+        reaches.push({ bearing: b, reach: end ? Math.hypot(end.x - from.x, end.y - from.y) : 0 });
       }
-      const r = await driver.call<AgentResult>('walkTo', [target, { stopOnAggro: false }], 60_000);
+      const plan = walkPlan(reaches);
+      let target: string | number;
+      let how: string;
+      if (plan) {
+        target = `${plan.metres}m ${compassPoint(plan.bearing)}`;
+        how = `the most open way (${reaches.map((r) => `${compassPoint(r.bearing)} ${r.reach.toFixed(1)} m`).join(', ')})`;
+      } else {
+        // Boxed in (fast run 5: a fresh AC1999 character in a small room, no way past 3 m): out through the nearest door,
+        // which walk_to routes to.
+        const o = await driver.call<{ nearby: Array<{ guid: number; name: string; kind: string; dist: number }> }>('observe', [{ filter: 'door', radius: 40, max: 5 }]).catch(() => ({ nearby: [] }));
+        const door = o.nearby.filter((x) => x.kind === 'door').sort((x, y) => x.dist - y.dist)[0];
+        if (!door) return fail(`boxed in: no bearing has ${WALK_SHORT_MIN_MOVED + 0.5} m open (${reaches.map((r) => `${compassPoint(r.bearing)} ${r.reach.toFixed(1)} m`).join(', ')}) and no door within 40 m`);
+        target = door.guid;
+        how = `out through ${door.name} ${door.dist.toFixed(0)} m off (no bearing had ${WALK_SHORT_MIN_MOVED + 0.5} m open)`;
+      }
+      const r = await driver.call<AgentResult>('walkTo', [target, { stopOnAggro: false }], 90_000);
       await driver.sleep(500);
       const to = await driver.call<{ x: number; y: number } | null>('where');
       const screenshots = await shots(ctx, 'walk-short');
       const problems = judgeWalk(from, to);
-      const what = `walked "${target}" (${msg(r) || (r.ok ? 'ok' : 'no answer')})`;
+      const what = `walked ${typeof target === 'number' ? `to #${target.toString(16)}` : `"${target}"`}, ${how} (${msg(r) || (r.ok ? 'ok' : 'no answer')})`;
       return problems.length ? fail(`${what}: ${problems.join('; ')}`, { screenshots })
         : ok(`${what}: moved ${Math.hypot(to!.x - from.x, to!.y - from.y).toFixed(1)} m`, { screenshots });
     },
@@ -1085,11 +1240,12 @@ export function createCharacterClickStep(): Step {
 // ── Composition ────────────────────────────────────────────────────────────
 
 /** The regression step ids, in run order (option-defaults runs right after entering the world). */
-export const REGRESSION_STEP_IDS = ['option-defaults', 'walk-short', 'pack-scroll-sort', 'pack-bars', 'toolbar-relog', 'shield-relog', 'running-jump-coast', 'create-character-click'] as const;
+export const REGRESSION_STEP_IDS = ['option-defaults', 'pack-space', 'walk-short', 'pack-scroll-sort', 'pack-bars', 'toolbar-relog', 'shield-relog', 'running-jump-coast', 'create-character-click'] as const;
 
 /** The regression steps for an era (every one exists in all three eras: none is skipped by era). */
 export function regressionSteps(_era: EraPlan, opts: RegressionOptions = {}): Step[] {
-  return [optionDefaultsStep(), walkShortStep(), packScrollSortStep(opts), packBarsStep(opts), toolbarRelogStep(), shieldRelogStep(opts), runningJumpCoastStep(), createCharacterClickStep()];
+  return [optionDefaultsStep(), packSpaceStep(), walkShortStep(), ...[packScrollSortStep(opts), packBarsStep(opts), toolbarRelogStep(), shieldRelogStep(opts)].map((s) => leavesNoTrace(s, opts)),
+    runningJumpCoastStep(), createCharacterClickStep()];
 }
 
 /**
@@ -1098,10 +1254,11 @@ export function regressionSteps(_era: EraPlan, opts: RegressionOptions = {}): St
  * run still ends with the era's Yes / No command and the logout.
  */
 export function withRegressionSteps(base: Step[], regressions: Step[]): Step[] {
-  const first = regressions.filter((s) => s.id === 'option-defaults');
-  const rest = regressions.filter((s) => s.id !== 'option-defaults');
+  const FIRST = ['option-defaults', 'pack-space'];
+  const first = regressions.filter((s) => FIRST.includes(s.id));
+  const rest = regressions.filter((s) => !FIRST.includes(s.id));
   const out = [...base];
-  const afterEnter = Math.max(out.findIndex((s) => s.id === 'enter-world'), out.findIndex((s) => s.id === 'admin-prep')) + 1;
+  const afterEnter = out.findIndex((s) => s.id === 'enter-world') + 1;
   out.splice(afterEnter, 0, ...first);
   const beforeCmds = out.findIndex((s) => s.id === 'cmd-help');
   out.splice(beforeCmds < 0 ? out.length : beforeCmds, 0, ...rest);

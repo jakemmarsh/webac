@@ -135,6 +135,11 @@ describe('AgentApi', () => {
     expect(api.closeWindow()).toEqual({ ok: true, message: 'closed every window' });
     // The surface key is the tool's name without ac_ (tools.ts act()), as for every action.
     expect(typeof (api.surface() as Record<string, unknown>).close).toBe('function');
+    // The open vendor as data, what it buys included (the live gate's vendor-sell read it and got nothing: not on the
+    // surface; fast run 3 offered Hudriffa a Turquoise Taper his trade refuses).
+    host.vendorOpen = { name: 'Hudriffa', guid: 0x7001, currency: 'Pyreals', items: [], buys: { itemTypes: 0x20, minValue: -1, maxValue: -1 } } as never;
+    expect((api.surface() as { vendorData: () => unknown }).vendorData()).toEqual(host.vendorOpen);
+    host.vendorOpen = null;
     host.dialogList = [];
     expect(formatObservation(api.observe())).not.toMatch(/windows open|ac_dialog, e\.g\./);
   });

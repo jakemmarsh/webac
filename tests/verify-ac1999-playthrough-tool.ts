@@ -5,7 +5,7 @@ import {
   freshState, killStep, logoutAndBackStep, mergeCreatureFacts, nearestTown, ok, panelStep, parseCreatureDanger, parsePlaythroughArgs,
   parseVendorListing, pickPrey, playthroughSteps, playthroughUrl, preyVerdict, renderReport, runPlaythrough,
   selectSteps, skip, statusLabel, vendorBuyStep,
-  type VendorStockRow, type Place, type MagicFacts, type SkillRow, adminPrepStep, armForKill, castAtSelfStep, castVerdict, magicModeStep, pickCastable, schoolTrained, schoolsToTrain, selfEnchantment, atCreatureSpell, ADMIN_PREP_COMMANDS, acceptedGift, castAtCreatureStep, parseGiveTable, refusedSaleEcho, cellTarget, nearestVendorSpot, sameFloorOnly, vendorSpotsIn, vendorWeenies, giveCandidates, giveStep, planSupplies, preyReachable, saleEcho, vendorSellStep, vendorSuppliesStep, ACE_ADMIN_PREP_COMMANDS, adminPrepCommands, sellableTo, purchaseLanded,
+  type VendorStockRow, type Place, type MagicFacts, type SkillRow, adminPrepStep, armForKill, castAtSelfStep, castVerdict, magicModeStep, pickCastable, schoolTrained, schoolsToTrain, selfEnchantment, atCreatureSpell, ADMIN_PREP_COMMANDS, acceptedGift, castAtCreatureStep, parseGiveTable, refusedSaleEcho, cellTarget, nearestVendorSpot, sameFloorOnly, vendorSpotsIn, vendorWeenies, giveCandidates, giveStep, planSupplies, preyReachable, saleEcho, vendorSellStep, vendorSuppliesStep, ACE_ADMIN_PREP_COMMANDS, adminPrepCommands, sellableTo, purchaseLanded, refusesMagic, giveTablesFrom, plainCaster, pickCaster,
 } from '../tools/lib/playthrough.ts';
 import type { AgentItem, AgentSpell } from '../packages/renderer/src/agent/types.ts';
 import type { AgentObject } from '../packages/renderer/src/agent/types.ts';
@@ -704,6 +704,21 @@ describe('playthrough: third calibration (2026-10-23 three-era run)', () => {
       give: () => ({ ok: false, message: "Hardunna did not get your Apple; the server said:\nHardunna doesn't know what to do with that." }) });
     expect((await giveStep.run(ctxOf(no))).status).toBe('ok');
   });
+  it('fast run 4: a name several NPC weenies share takes only what every one of them takes; the NPC\'s no beside "can\'t be given" is a no', async () => {
+    // Four Training Masters in ACE-World; another one's Give emote names the Calling Stone, Holtburg's doesn't.
+    const t = giveTablesFrom([
+      { name: 'Training Master', accepts: [12345] }, { name: 'Training Master', accepts: [] },
+      { name: 'Orcud the Beggar', accepts: [273, 274] }, { name: 'Orcud the Beggar', accepts: [273] },
+    ]);
+    expect(t.has('training master')).toBe(false);
+    expect([...t.get('orcud the beggar')!]).toEqual([273]);
+    // The generic give: ACE's TradeAiDoesntWant comes with the client's "The X can't be given" (ServerSaysAttemptFailed).
+    const d = new FakeDriver({ observe: npcObs([{ guid: 7, name: 'Training Master' }]), inventory: () => [{ guid: 3, name: 'Calling Stone', where: 'pack', value: 3, itemType: 0x80, appraised: true }],
+      give: () => ({ ok: false, message: "Training Master did not get your Calling Stone; the server said:\nTraining Master doesn't know what to do with that.\nThe Calling Stone can't be given" }) });
+    const r = await giveStep.run({ ...ctxOf(d, 'eor'), giveTables: t });
+    expect(r.status).toBe('ok');
+    expect(r.detail).toMatch(/^Training Master turned down Calling Stone/);
+  });
   it('the vendor step prefers a general vendor within 600 m to a specialist in view', async () => {
     let walked = false;
     const d = new FakeDriver({
@@ -718,23 +733,45 @@ describe('playthrough: third calibration (2026-10-23 three-era run)', () => {
     expect(ctx.state.vendor?.name).toBe('Fispur Ansel the Grocer');
   });
   const aceEcho = { source: 'server', code: 'we:0x0000', context: 'inventory_failed', text: null, sink: 'none' };
-  it('ACE\'s silent answer to a refused sale item is expected once a sale was refused; a sale after it still passes', async () => {
+  it('one item is sold and judged: what the vendor itself sold goes last, and an appraisal\'s "unsellable" is passed over', async () => {
     expect(refusedSaleEcho(aceEcho)).toBe(true);
     expect(refusedSaleEcho({ ...aceEcho, sink: 'spew' })).toBe(false);
+    const sold: number[] = [];
     const d = new FakeDriver({
       inventory: () => [{ guid: 1, name: 'Arrow', where: 'pack', value: 2 }, { guid: 2, name: 'Hawthorn', where: 'pack', value: 140 }],
-      sell: (g: number) => { if (g === 1) { d.sig.refusals.push(aceEcho); return { ok: false, message: 'Arrow was not sold\nThe Arrow is unsellable.' }; } return { ok: true, message: 'sold Hawthorn for 70 pyreals' }; },
+      sell: (g: number) => { sold.push(g); return { ok: true, message: `sold #${g}` }; },
       close: () => ({ ok: true, message: 'closed' }),
     });
     const ctx = ctxOf(d, 'classicace-customdm');
     ctx.state.vendor = { guid: 5, name: 'Oi Ra the Shopkeeper' };
     ctx.state.bought = { guid: 1, name: 'Arrow' };
     expect((await runPlaythrough([vendorSellStep], ctx)).records[0].status).toBe('ok');
-    // All refused (the EoR Bowyer): a skip, not a FAIL.
-    const all = new FakeDriver({ inventory: () => [{ guid: 1, name: 'Quarrel', where: 'pack', value: 2 }], sell: () => { all.sig.refusals.push(aceEcho); return { ok: false, message: 'The Quarrel is unsellable.' }; }, close: () => ({ ok: true, message: 'closed' }) });
-    const c2 = ctxOf(all, 'eor');
-    c2.state.vendor = { guid: 6, name: 'Ladim al-Faji the Bowyer' };
-    expect((await runPlaythrough([vendorSellStep], c2)).records[0].status).toBe('skipped');
+    expect(sold).toEqual([2]); // Hawthorn, not the Arrow the shop sold (fast run 2: the Grocer's Water)
+    // Its appraisal marks the first unsellable: the next is the one sold, and the detail says so.
+    const inv2 = [{ guid: 7, name: 'Water', where: 'pack', value: 2 }, { guid: 8, name: 'Crude Lockpick', where: 'pack', value: 135 }] as AgentItem[];
+    const d2 = new FakeDriver({
+      appraise: (g: number) => { if (g === 7) inv2[0] = { ...inv2[0], unsellable: true }; return { ok: true, message: 'appraised' }; },
+      inventory: () => inv2,
+      sell: (g: number) => { sold.push(g); return { ok: true, message: `sold #${g}` }; },
+      close: () => ({ ok: true, message: 'closed' }),
+    });
+    const c2 = ctxOf(d2, 'eor');
+    c2.state.vendor = { guid: 6, name: 'Fispur Ansel the Grocer' };
+    const r2 = (await runPlaythrough([vendorSellStep], c2)).records[0];
+    expect(r2.status).toBe('ok');
+    expect(r2.detail).toContain('(passed over: Water (unsellable))');
+    expect(sold).toEqual([2, 8]);
+    // The one item its trade and appraisal allow, refused: a FAIL naming it (no second try hides it).
+    const d3 = new FakeDriver({
+      inventory: () => [{ guid: 1, name: 'Quarrel', where: 'pack', value: 2 }],
+      sell: () => { d3.sig.refusals.push(aceEcho); return { ok: false, message: 'The Quarrel is unsellable.' }; },
+      close: () => ({ ok: true, message: 'closed' }),
+    });
+    const c3 = ctxOf(d3, 'eor');
+    c3.state.vendor = { guid: 6, name: 'Ladim al-Faji the Bowyer' };
+    const r3 = (await runPlaythrough([vendorSellStep], c3)).records[0];
+    expect(r3.status).toBe('fail');
+    expect(r3.detail).toMatch(/^selling Quarrel #1 to Ladim al-Faji the Bowyer/);
   });
   const castDriver = (opts: { components: boolean; refuse?: string }) => {
     const walks: unknown[][] = [];
@@ -781,6 +818,40 @@ describe('playthrough: third calibration (2026-10-23 three-era run)', () => {
     const r = await killStep.run({ ...ctxOf(d), facts: mergeCreatureFacts([{ name: 'Brown Rabbit', level: 1, maxHealth: 5, casts: false, maxHit: 7, armed: false }]) });
     expect(r.status).toBe('fail');
     expect(r.detail).toMatch(/^ATTACK NEVER SWUNG at Brown Rabbit/);
+    expect(r.detail).toContain('and no other creature to try');
+  });
+  it('an attack that never swings moves on to the next creature (fast run 2: a Black Rabbit 68 m off); the result names it', async () => {
+    const far = mon('Black Rabbit', 68, { guid: 0x600002fd, level: 1 });
+    const near = mon('Brown Rabbit', 30, { guid: 0x60001dc9, level: 1 });
+    let target = 0;
+    let t = 0;
+    const d = new FakeDriver({
+      observe: (o: { filter: string }) => ({ me: null, nearby: o.filter === 'monster' ? [near, far] : [], remembered: [], dialogs: [] }),
+      inventory: () => [],
+      attack: (g: number) => { target = g; t = 0; return { ok: true, message: 'attacking' }; },
+      waitFor: () => {
+        t++;
+        if (target === near.guid && t > 2) return [{ type: 'target-lost', text: 'Brown Rabbit: no swings either way for 20 s (blocked, unreachable, fleeing, or not there on the server\'s side)' }];
+        if (target === far.guid && t > 2) return [{ type: 'target-died', text: 'Black Rabbit died', guid: far.guid }];
+        return [];
+      },
+      self: () => ({ dead: false, health: { cur: 50, max: 50 } }),
+    });
+    const facts = mergeCreatureFacts([{ name: 'Brown Rabbit', level: 1, maxHealth: 5, casts: false, maxHit: 7, armed: false }, { name: 'Black Rabbit', level: 1, maxHealth: 3, casts: false, maxHit: 7, armed: false }]);
+    const r = await killStep.run({ ...ctxOf(d), facts });
+    expect(r.status).toBe('ok');
+    expect(r.detail).toMatch(/^killed Black Rabbit .*\(after no swings at Brown Rabbit\)/);
+    // Every creature never swinging: still a FAIL, naming each.
+    const all = new FakeDriver({
+      observe: (o: { filter: string }) => ({ me: null, nearby: o.filter === 'monster' ? [near, far] : [], remembered: [], dialogs: [] }),
+      inventory: () => [],
+      attack: () => { t = 0; return { ok: true, message: 'attacking' }; },
+      waitFor: () => { t++; return t > 2 ? [{ type: 'target-lost', text: 'no swings either way for 20 s' }] : []; },
+      self: () => ({ dead: false, health: { cur: 50, max: 50 } }),
+    });
+    const r2 = await killStep.run({ ...ctxOf(all), facts });
+    expect(r2.status).toBe('fail');
+    expect(r2.detail).toMatch(/^ATTACK NEVER SWUNG at Brown Rabbit .*; Black Rabbit /);
   });
 });
 
@@ -991,8 +1062,12 @@ describe('playthrough: fourth calibration (2026-10-23 1999 run with agenta99: Wa
     expect(parsePlaythroughArgs(['--admin']).admin).toBe(true);
     expect(playthroughSteps(eraPlan('ac1999-retail')).some((s) => s.id === 'admin-prep')).toBe(false);
     const ids = playthroughSteps(eraPlan('ac1999-retail'), { admin: true }).map((s) => s.id);
-    expect(ids.slice(0, 2)).toEqual(['enter-world', 'admin-prep']);
+    // Right before the magic it supplies (fast run 2: first, its components filled ClassicACE's pack before the vendors).
+    expect(ids.indexOf('admin-prep') + 1).toBe(ids.indexOf('magic-mode'));
+    expect(ids.indexOf('admin-prep')).toBeGreaterThan(ids.indexOf('loot-rest'));
     expect(selectSteps(playthroughSteps(eraPlan('ac1999-retail'), { admin: true }), ['cast-self']).map((s) => s.id)).toEqual(['enter-world', 'admin-prep', 'cast-self']);
+    // Only with a magic step: an --only run of anything else doesn't spawn components and a wand.
+    expect(selectSteps(playthroughSteps(eraPlan('ac1999-retail'), { admin: true }), ['vendor-buy']).map((s) => s.id)).toEqual(['enter-world', 'vendor-buy']);
     expect(ADMIN_PREP_COMMANDS.map((c) => c.text)).toEqual(['@spellcomps 74 5', '@spawnwcidinv 2472']);
   });
 
@@ -1112,5 +1187,84 @@ describe('live gate fast-run fixes: era admin prep, vendor sell / buy checks', (
     expect(purchaseLanded([arrow1], [arrow1], 'Arrow')).toBeNull();
     const fresh = { guid: 9, name: 'Torch', where: 'pack' } as AgentItem;
     expect(purchaseLanded([arrow1], [arrow1, fresh], 'Torch')).toEqual(fresh);
+  });
+});
+
+describe('admin prep spawns nothing already held (no pile-up across runs)', () => {
+  it('ten or more component stacks and a caster held: neither command is typed', async () => {
+    const inv = [
+      ...Array.from({ length: 12 }, (_, i) => ({ guid: 100 + i, name: `Comp ${i}`, where: 'pack', itemType: 0x1000 } as AgentItem)),
+      { guid: 9, name: 'Wand', where: 'pack', itemType: 0x8000 } as AgentItem,
+    ];
+    const d = new FakeDriver({ inventory: () => inv, spells: () => [] });
+    const r = await adminPrepStep.run(ctxOf(d, 'eor'));
+    expect(d.chats).toEqual([]);
+    expect(r.status).toBe('ok');
+    expect(r.detail).toMatch(/^@comps: not typed, 12 component stacks already held; @ci 2472: not typed, Wand already held/);
+  });
+});
+
+describe('vendor-sell and the servers\' magic-item rule (DealMagicalItems)', () => {
+  const wand = { guid: 11, name: 'Wand', where: 'pack', itemType: 0x8000, value: 50, mana: { cur: 100, max: 100 } } as AgentItem;
+  const bread = { guid: 12, name: 'Bread', where: 'pack', itemType: 0x20, value: 5 } as AgentItem;
+  const buys = (magic: boolean) => ({ itemTypes: 0x8020, minValue: -1, maxValue: -1, magic });
+  const sellRun = async (era: string, magic: boolean) => {
+    const sold: number[] = [];
+    const d = new FakeDriver({
+      vendorAt: () => ({ ok: true, message: 'open' }),
+      vendorData: () => ({ name: 'Hudriffa', guid: 0x77, items: [], currency: 'Pyreals', buys: buys(magic) }),
+      inventory: () => [wand, bread],
+      sell: (g: number) => { sold.push(g); return { ok: true, message: 'sold' }; },
+      close: () => undefined,
+    });
+    const ctx = ctxOf(d, era);
+    ctx.state.vendor = { guid: 0x77, name: 'Hudriffa' };
+    const rec = (await runPlaythrough([vendorSellStep], ctx)).records[0];
+    return { sold, rec };
+  };
+  it('the eras: the GDLE-family AC1999 server refuses mana items from a non-magic vendor; ACE and ClassicACE never check', () => {
+    expect(eraPlan('ac1999-retail').vendorsRefuseMagicUnlessDealer).toBe(true);
+    expect(eraPlan('eor').vendorsRefuseMagicUnlessDealer).toBe(false);
+    expect(eraPlan('classicace-customdm').vendorsRefuseMagicUnlessDealer).toBe(false);
+    expect(refusesMagic(eraPlan('ac1999-retail'), buys(false), wand)).toBe(true);
+    expect(refusesMagic(eraPlan('ac1999-retail'), buys(true), wand)).toBe(false);
+    expect(refusesMagic(eraPlan('ac1999-retail'), buys(false), bread)).toBe(false);
+    expect(refusesMagic(eraPlan('ac1999-retail'), { itemTypes: 0x8020, minValue: -1, maxValue: -1 }, wand)).toBe(false); // flag unknown
+    expect(refusesMagic(eraPlan('eor'), buys(false), wand)).toBe(false);
+  });
+  it('AC1999, a vendor without magic: the Wand is passed over, the Bread sold', async () => {
+    const { sold, rec } = await sellRun('ac1999-retail', false);
+    expect(sold).toEqual([12]);
+    expect(rec.detail).toContain("Wand (has mana; Hudriffa doesn't deal magic items)");
+  });
+  it('AC1999 with a magic vendor, and end of retail with any vendor: the Wand is sold', async () => {
+    expect((await sellRun('ac1999-retail', true)).sold).toEqual([11]);
+    expect((await sellRun('eor', false)).sold).toEqual([11]);
+  });
+});
+
+// The first full run (2026-11-07): ClassicACE's magic-mode wielded a looted Wand (ItemDifficulty 23) and the server said
+// "Your Arcane Lore is too low to use that item's magic."; the admin prep had skipped its plain Wand because that one was held.
+describe('a plain caster for the magic steps (no Arcane Lore activation requirement)', () => {
+  const looted = { guid: 0x8000d545, name: 'Wand', where: 'pack', itemType: 0x8000, wcid: 2472, workmanship: 2 } as AgentItem;
+  const plain = { guid: 0x80001234, name: 'Wand', where: 'pack', itemType: 0x8000, wcid: 2472 } as AgentItem;
+  it('a loot-made caster (workmanship, mana) is not plain; magic mode wields a plain one first', () => {
+    expect(plainCaster(looted)).toBe(false);
+    expect(plainCaster({ ...plain, mana: { cur: 50, max: 50 } })).toBe(false);
+    expect(plainCaster(plain)).toBe(true);
+    expect(pickCaster([{ ...looted, where: 'equipped' }, plain])?.guid).toBe(plain.guid);
+    expect(pickCaster([looted])?.guid).toBe(looted.guid); // none plain: the old way
+  });
+  it('the admin prep spawns its world-default Wand when only a looted one is held', async () => {
+    let inv: AgentItem[] = [...Array.from({ length: 12 }, (_, i) => ({ guid: 100 + i, name: `Comp ${i}`, where: 'pack', itemType: 0x1000 } as AgentItem)), looted];
+    const d = new FakeDriver({
+      onChat: (t: string) => { if (t === '@ci 2472') inv = [...inv, plain]; },
+      inventory: () => inv,
+      spells: () => [],
+    });
+    const r = await adminPrepStep.run(ctxOf(d, 'classicace-customdm'));
+    expect(d.chats).toEqual(['@ci 2472']);
+    expect(r.status).toBe('ok');
+    expect(r.detail).toContain('@ci 2472: Wand #80001234 in the pack');
   });
 });
