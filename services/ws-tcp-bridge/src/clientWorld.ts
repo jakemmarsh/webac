@@ -136,6 +136,17 @@ export interface ClientFirstMinuteEvent extends WorldIds {
   charging?: boolean | null;
   batteryLevel?: number | null;
   cpuProbeMs?: number | null;
+  /**
+   * BUG.dungeon-login-black — what the world canvas showed (the latest luma sample: mean 0..255, percent dark,
+   * ms since enter) and the indoor view at the event (cells as 8 hex digits, the cells drawn).
+   */
+  lumaMean?: number | null;
+  lumaDarkPct?: number | null;
+  lumaAtMs?: number | null;
+  viewCell?: string | null;
+  viewCellFound?: boolean | null;
+  cameraCell?: string | null;
+  visibleCells?: number | null;
 }
 
 /** frameStep's phases (renderer telemetry/MainThreadCost.ts FRAME_PHASES): phaseMs keeps only these keys. */
@@ -207,6 +218,13 @@ function perfFields(b: Record<string, unknown>): Partial<ClientFirstMinuteEvent>
   set('charging', bool(b.charging));
   set('batteryLevel', batteryLevel(b.batteryLevel));
   set('cpuProbeMs', tenths(b.cpuProbeMs, CPU_PROBE_MAX_MS));
+  set('lumaMean', uint(b.lumaMean, 255));
+  set('lumaDarkPct', uint(b.lumaDarkPct, 100));
+  set('lumaAtMs', uint(b.lumaAtMs, MINUTE_MS));
+  set('viewCell', match(b.viewCell, /^[0-9a-f]{8}$/));
+  set('viewCellFound', bool(b.viewCellFound));
+  set('cameraCell', match(b.cameraCell, /^[0-9a-f]{8}$/));
+  set('visibleCells', uint(b.visibleCells, 100_000));
   return out;
 }
 

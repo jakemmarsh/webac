@@ -430,6 +430,119 @@ describe('GameUI — spell bar shortcuts drag off, back on, and onto another tab
   });
 });
 
+describe('BUG.spellbook-drag-to-bar — a spell goes to the spell bar, never the item shortcut bar (all eras)', () => {
+  const saved: Partial<Record<(typeof DOM_GLOBALS)[number], unknown>> = {};
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let GameUICtor: any;
+  beforeAll(async () => {
+    installDomGlobals(domWindow, DOM_GLOBALS, saved);
+    GameUICtor = (await import('../packages/renderer/src/ui/GameUI.js')).GameUI;
+  });
+  afterAll(() => restoreDomGlobals(DOM_GLOBALS, saved));
+
+  const spell = (id: number, name: string) => ({
+    id, name, school: 1, level: 1, power: 1, manaCost: 10, difficulty: 50, duration: 0, components: [], targetType: 2,
+  });
+  const A = spell(100, 'Spell A');
+  const B = spell(200, 'Spell B');
+
+  function setup() {
+    domWindow.localStorage.clear();
+    domWindow.document.body.innerHTML = '';
+    const container = domWindow.document.createElement('div');
+    domWindow.document.body.appendChild(container);
+    const ui = new GameUICtor(container);
+    const events: string[] = [];
+    ui.setSpellData([A, B]);
+    ui.setSpellCallbacks({
+      onAddSpellFavorite: (id: number, pos: number, bar: number) => events.push(`add ${id} @${pos} bar${bar}`),
+      onRemoveSpellFavorite: (id: number, bar: number) => events.push(`remove ${id} bar${bar}`),
+    });
+    ui.spellBarSlots[0] = [A, null, null, null, null, null, null, null, null];
+    return { ui, events };
+  }
+
+  // gmToolbarUI::HandleDropRelease @ 004be7c0 reads only the drag's object id (InqDropIconInfo's
+  // first out), and AddShortcut @ 004bd9a0 builds CShortCutData(index, objectID, 0): the spell field
+  // is always 0, and UseShortcut @ 004bd350 uses only the object. A spell drag carries no object, so
+  // OnItemListDragOver @ 004bd150 shows no art and the drop does nothing. 1999: ShortcutSlot::
+  // AcceptDragObject @ 0x00500240 takes UI_Item types 1 / 2 only; a spellbook SpellRegion is neither.
+  it('a spellbook row over / on a toolbar shortcut slot: not accepted, nothing placed or sent (retail, both clients)', async () => {
+    const { ui } = setup();
+    const sent: string[] = [];
+    ui.itemShortcutCallbacks = {
+      onDropShortcut: (i: number) => sent.push(`shortcut ${i}`),
+      onDropItem: (i: number) => sent.push(`item ${i}`),
+      onDropPlayer: (i: number) => sent.push(`player ${i}`),
+    };
+    const { eraClientRules } = await import('../packages/renderer/src/era/EraFeatures.js');
+    const { eraProfile } = await import('../packages/renderer/src/era/EraProfiles.js');
+    for (const era of ['end-of-retail', 'ac1999-retail']) {
+      if (era === 'ac1999-retail') ui.setClientRules(eraClientRules(eraProfile('ac1999-retail')));
+      const slot = domWindow.document.createElement('div');
+      ui.bindItemShortcutSlot(slot, 1);
+      const over = dragEvent('dragover', { 'text/spell-id': '100' });
+      slot.dispatchEvent(over);
+      expect(over.defaultPrevented).toBe(false);
+      expect(slot.querySelector('[data-ac-drag-accept]')).toBeNull();
+      slot.dispatchEvent(dragEvent('drop', { 'text/spell-id': '100' }));
+    }
+    expect(sent).toEqual([]);
+  });
+
+  // gmSpellcastingUI::HandleDropRelease @ 004c7930: released on m_spellcastBackground (0x100000a0)
+  // itself → AddSpellShortcut(spell, −1). 1999: SpellCastSubPanel::AcceptDragObject @ 0x00513320
+  // drops at the list's end too.
+  function backdrop(ui: { wireSpellcastBackgroundDrop: (bg: HTMLElement, name?: HTMLElement) => void }) {
+    const bg = domWindow.document.createElement('div');
+    const name = domWindow.document.createElement('div');
+    bg.appendChild(name);
+    domWindow.document.body.appendChild(bg);
+    ui.wireSpellcastBackgroundDrop(bg, name);
+    return { bg, name };
+  }
+
+  it('a spellbook row released on the bar backdrop is appended to the open tab', () => {
+    const { ui, events } = setup();
+    const { bg } = backdrop(ui);
+    const over = dragEvent('dragover', { 'text/spell-id': '200' });
+    bg.dispatchEvent(over);
+    expect(over.defaultPrevented).toBe(true);
+    bg.dispatchEvent(dragEvent('drop', { 'text/spell-id': '200' }));
+    expect((ui.spellBarSlots[0] as Array<{ id: number } | null>).filter(Boolean).map((s) => s!.id)).toEqual([100, 200]);
+    // AddFavorite(−1) ships m_numSpells after the add (the tab-label append above does the same).
+    expect(events).toEqual(['add 200 @2 bar0']);
+  });
+
+  it('the backdrop takes no item drag, and a drop on its name text (a child) is not the backdrop', () => {
+    const { ui, events } = setup();
+    const { bg, name } = backdrop(ui);
+    const item = dragEvent('dragover', { 'text/plain': 'inv:0' });
+    bg.dispatchEvent(item);
+    expect(item.defaultPrevented).toBe(false);
+    const onName = dragEvent('dragover', { 'text/spell-id': '200' });
+    name.dispatchEvent(onName);
+    expect(onName.defaultPrevented).toBe(false);
+    name.dispatchEvent(dragEvent('drop', { 'text/spell-id': '200' }));
+    expect(events).toEqual([]);
+  });
+
+  it('the backdrop takes the pointer only while a spell drag runs (clicks over it keep reaching the world)', () => {
+    const { ui } = setup();
+    ui.installSpellBarDragScroll();
+    const { bg, name } = backdrop(ui);
+    expect(bg.style.pointerEvents).toBe('');
+    domWindow.document.dispatchEvent(dragEvent('dragstart', { 'text/plain': 'inv:0' }));
+    expect(bg.style.pointerEvents).toBe('');
+    domWindow.document.dispatchEvent(dragEvent('dragstart', { 'text/spell-id': '200' }));
+    expect(bg.style.pointerEvents).toBe('auto');
+    expect(name.style.pointerEvents).toBe('auto');
+    domWindow.document.dispatchEvent(dragEvent('dragend'));
+    expect(bg.style.pointerEvents).toBe('');
+    expect(name.style.pointerEvents).toBe('');
+  });
+});
+
 describe('GameUI — a sell-list entry drags off the list and on as the player\'s item (gmVendorUI @ 004c4380)', () => {
   const saved: Partial<Record<(typeof DOM_GLOBALS)[number], unknown>> = {};
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

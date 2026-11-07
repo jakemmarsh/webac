@@ -21,6 +21,9 @@ export interface TradeItemSource {
   iconUnderlayDid?: number;
   iconOverlayId?: number;
   iconUnderlayId?: number;
+  /** webac#25 — the cell's UIItem StructureBar inputs (same name on InventoryItem and ServerObject). */
+  structure?: number;
+  maxStructure?: number;
 }
 
 export interface TradeItemRow {
@@ -33,6 +36,8 @@ export interface TradeItemRow {
   uiEffects?: number;
   iconOverlayDid?: number;
   iconUnderlayDid?: number;
+  structure?: number;
+  maxStructure?: number;
 }
 
 export function tradeItemEntryFor(guid: number, obj: TradeItemSource | undefined, isSelf: boolean): TradeItemRow {
@@ -47,5 +52,7 @@ export function tradeItemEntryFor(guid: number, obj: TradeItemSource | undefined
     uiEffects: obj?.uiEffects,
     iconOverlayDid: (obj?.iconOverlayDid ?? obj?.iconOverlayId) || undefined,
     iconUnderlayDid: (obj?.iconUnderlayDid ?? obj?.iconUnderlayId) || undefined,
+    // webac#25 — a partly used kit keeps its uses-remaining bar in the trade list.
+    ...(obj?.maxStructure ? { structure: obj.structure ?? 0, maxStructure: obj.maxStructure } : {}),
   };
 }

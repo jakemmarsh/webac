@@ -37,6 +37,8 @@ const FIRST_MINUTE_KEYS = [
   'fontSheetBad', 'canvas2dLost',
   // PERF.slow-minute-power-evidence (verify-slow-minute-power-evidence.ts): battery + the CPU probe, null when unknown.
   'charging', 'batteryLevel', 'cpuProbeMs',
+  // BUG.dungeon-login-black (verify-bug-dungeon-login-black.ts): the canvas luma sample + the indoor view, null when unknown.
+  'lumaMean', 'lumaDarkPct', 'lumaAtMs', 'viewCell', 'viewCellFound', 'cameraCell', 'visibleCells',
 ].sort();
 const WORLD_LEFT_BASE_KEYS = ['outcome', 'era', 'server', 'trace', 'build', 'exit', 'sessionMs', 'contextLost', 'errors', 'eid'].sort();
 // BUG.hidden-tab-session-drop: the page adds hiddenMs / freezes / frozenMs to every world_left (endCause / closeCode

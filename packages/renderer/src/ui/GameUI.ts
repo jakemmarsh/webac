@@ -379,6 +379,8 @@ const EFFECTS_INFO_TEXT_REF = descRef(0x2100001b, 0x10000122, 0x10000125, 0x1000
 // SWEEP1999.magic MAG-3 — the spell bar's name text (0x21000010:0x100000a0 → 0x1000048b), whose font the
 // 1999 Charge caption and its "%u%" readout take.
 const SPELLBAR_NAME_TEXT_REF = descRef(0x21000010, 0x1000009f, 0x100000a0, 0x1000048b);
+/** gmSpellcastingUI::m_spellcastBackground (PostInit @ 004c5d00): the spell bar's backdrop, a drop target (HandleDropRelease @ 004c7930). */
+const SPELLCAST_BACKGROUND = 0x100000a0;
 /** The 1999 Cast button's width (SpellCastSubPanel ctor @ 0x512390: the 200 x 0x20 button 0x60019e9/eb/ea). */
 const CAST_BUTTON_1999_WIDTH = 200;
 /**
@@ -2418,6 +2420,8 @@ export class GameUI {
   /** VISUAL.ac1999-spellbar-drag-autoscroll — the spell drag being tracked (pointer in client px), or null. */
   private spellDragScroll: { clock: DragScrollClock; rule: DragScrollRule; x: number; y: number; raf: number } | null = null;
   private spellDragScrollInstalled = false;
+  /** The spell bar backdrop 0x100000a0 + its name text 0x1000048b (wireSpellcastBackgroundDrop). */
+  private spellcastBackgroundEls: HTMLElement[] = [];
   private spellBarArrowRule: SpellBarArrowRule = 'pair';
   private magicPanelTab: 'spells' | 'components' | 'research' = 'spells'; // VISUAL.139 — 'foci' removed (foci retired from AC in 2010; not an EoL page)
   private spellComponents: Array<{ name: string; quantity: number; icon?: number }> = [];
@@ -3477,7 +3481,7 @@ export class GameUI {
   // the panel split nested packs/foci (ContainerType.Container/Foci per the
   // ViewContents wire data) from plain items, mirroring the retail client's
   // _itemsList vs _containersList (ACCObjectMaint::ViewObjectContents).
-  private containerItems: Array<{ guid: number; name: string; pluralName?: string; iconDid: number; stackSize: number; containerId?: number; isContainer?: boolean; itemsCapacity?: number; itemType?: number; uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number }> = [];
+  private containerItems: Array<{ guid: number; name: string; pluralName?: string; iconDid: number; stackSize: number; containerId?: number; isContainer?: boolean; itemsCapacity?: number; itemType?: number; uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number; structure?: number; maxStructure?: number }> = [];
   /** [0] = the open container itself, [1..] = nested container guids (the strip's upper lists). */
   private containerPackGuids: number[] = [];
   /**
@@ -4343,8 +4347,9 @@ export class GameUI {
       0x06007498, 0x06007499, 0x0600749a, // server-load 0x100000f8
       0x060074b1, 0x060074b2, // fellowship 0x100000fa
       0x0600749b, // pressed-highlight overlay (0x100000f2 state 3)
-      // CORE.5.b.d.a — item-shortcut slot art from the UIItem template
-      // layout 0x21000037 (toolbar variant root 0x10000341). The slot
+      // CORE.5.b.d.a — item-shortcut slot art from the UIItem templates in
+      // layout 0x21000037 (each slot's own 0x1000043b..43 / 0x100006c1..c9,
+      // base 0x1000045c; 0x10000341 is the spell bar's, webac#25). The slot
       // backing is the root/icon media 0x06001a97 (dark leather recess);
       // the ShortcutNum child 0x1000034a swaps its media from the
       // empty-slot table (prop 0x1000005e: blue embossed tile with
@@ -4937,10 +4942,33 @@ export class GameUI {
    * ui/structureBar.ts.
    */
   buildStructureBarEl(structure: number | undefined, maxStructure: number | undefined, size: number): HTMLElement | null {
+    // webac#25 — a 1999 world's icons have no meters (EraClientRules.itemIconMeters).
+    if (!this.clientRules.itemIconMeters) return null;
     const bar = this.buildIconMeterEl(structureBarFraction(structure, maxStructure),
       STRUCTURE_BAR_BG_TEXTURE, STRUCTURE_BAR_FILL_TEXTURE, size);
     if (bar) bar.dataset.structureBar = '1';
     return bar;
+  }
+
+  /**
+   * webac#25 — the use meters of one item UIItem (overlay group
+   * 0x21000037:0x10000346, which every item-list template with child
+   * 0x1000033c inherits: pack grid, paperdoll, toolbar shortcuts, ground
+   * container, trade, salvage, vendor, slumlord): UIItem_Update @ 004e21d0
+   * runs UpdateStructureDisplay and UpdateCooldownDisplay on each. Appends
+   * the cooldown decile and the uses-remaining bar (each hidden by its own
+   * rule) to `parent`, which must be positioned.
+   */
+  appendItemUseMeters(
+    parent: HTMLElement,
+    item: { cooldownId?: number; cooldownDuration?: number; structure?: number; maxStructure?: number } | undefined,
+    size: number,
+  ): void {
+    if (!item) return;
+    const cooldownEl = this.buildCooldownOverlayEl(item.cooldownId, item.cooldownDuration, size);
+    if (cooldownEl) parent.appendChild(cooldownEl);
+    const structureEl = this.buildStructureBarEl(item.structure, item.maxStructure, size);
+    if (structureEl) parent.appendChild(structureEl);
   }
 
   /**
@@ -4950,6 +4978,7 @@ export class GameUI {
    * capacityBarFraction in ui/structureBar.ts.
    */
   buildCapacityBarEl(itemsCapacity: number | undefined, containedItems: number, size: number): HTMLElement | null {
+    if (!this.clientRules.itemIconMeters) return null;
     const bar = this.buildIconMeterEl(capacityBarFraction(itemsCapacity, containedItems),
       CAPACITY_BAR_BG_TEXTURE, CAPACITY_BAR_FILL_TEXTURE, size);
     if (bar) bar.dataset.capacityBar = '1';
@@ -5011,9 +5040,12 @@ export class GameUI {
     if (this.cooldownMeterTimer) return;
     this.cooldownMeterTimer = setInterval(() => {
       const now = Date.now() / 1000;
-      const anyActive = this.inventoryItems.some(it =>
+      const anyActive = [...this.inventoryItems, ...this.equippedItems].some(it =>
         it.cooldownId && cooldownDecile(it.cooldownId, it.cooldownDuration ?? 0, this.activeEnchantments.values(), now) > 0);
-      if (!this.inventoryVisible || !anyActive) {
+      // webac#25 — the shortcut slots' decile overlays tick with the bar
+      // always on screen, inventory open or not.
+      const shortcutCooling = this.refreshItemShortcutOverlays();
+      if (!shortcutCooling && (!this.inventoryVisible || !anyActive)) {
         clearInterval(this.cooldownMeterTimer!);
         this.cooldownMeterTimer = null;
       }
@@ -5035,9 +5067,12 @@ export class GameUI {
   private refreshInventoryCooldownOverlays(now: number): boolean {
     const panel = this.inventoryPanel;
     if (!panel || !panel.isConnected) return false;
-    for (const cell of panel.querySelectorAll<HTMLElement>('[data-inv-slot]')) {
-      const guid = Number(cell.dataset.invGuid);
-      const item = this.inventoryItems.find((i) => i.id === guid);
+    // webac#25 — the paperdoll's wear slots carry the same overlay.
+    for (const cell of panel.querySelectorAll<HTMLElement>('[data-inv-slot], [data-equip-guid]')) {
+      const guid = Number(cell.dataset.invGuid ?? cell.dataset.equipGuid);
+      const item = cell.dataset.invGuid !== undefined
+        ? this.inventoryItems.find((i) => i.id === guid)
+        : this.equippedItems.find((i) => i.id === guid);
       if (!item) return false;
       const decile = item.cooldownId
         ? cooldownDecile(item.cooldownId, item.cooldownDuration ?? 0, this.activeEnchantments.values(), now)
@@ -14570,6 +14605,9 @@ export class GameUI {
     if (this.inventoryVisible && (this.inventoryPanel || this.inventoryPanelHandle)) {
       this.renderInventoryPanel();
     }
+    // webac#25 — ItemAttributesChanged reaches the toolbar's UIItems too: a
+    // used kit's Structure, a stack merge or a pack filling redraws its slot.
+    this.refreshItemShortcutOverlays();
     // CORE.17.k.b.b.a.g.e — gmSpellcastingUI::RecvNotice_ServerSaysMoveItem
     // @ 004c72d0: a move of the player's own item re-runs UpdateEndowmentIcon
     // + UpdateCastButtonTooltip (a caster wielded / unwielded).
@@ -16169,6 +16207,10 @@ export class GameUI {
     const icon = this.buildItemIconElement(pending.iconDid, 32, pending.iconOverlayDid, pending.iconUnderlayDid,
       { itemType: pending.itemType, effects: pending.uiEffects });
     if (icon) cell.appendChild(icon);
+    // webac#25 — the pending cell is the moving object's own UIItem
+    // (ItemList_InsertItem + SetWaitingState): its use meters stay on.
+    this.appendItemUseMeters(cell, this.inventoryItems.find((i) => i.id === pending.guid)
+      ?? this.equippedItems.find((i) => i.id === pending.guid), 32);
     const ghost = document.createElement('div');
     ghost.dataset.waitingGhost = ITEM_WAITING_GHOST_MEDIA.toString(16);
     Object.assign(ghost.style, {
@@ -16589,6 +16631,11 @@ export class GameUI {
           // the slot is a UIItem whose quantity text only a vendor list sets
           // (UIElement_UIItem::UpdateQuantityDisplay @ 004e1da0). Its
           // shortcut tag shows like a pack item's (same overlays 0x10000346).
+          // webac#25 — the wear slot's UIItem (templates 0x10000446..,
+          // base 0x10000445 → 0x10000346) keeps the uses-remaining bar and
+          // cooldown decile of a pack cell.
+          slotEl.dataset.equipGuid = String(equipped.id);
+          this.appendItemUseMeters(slotEl, equipped, 32);
           this.applyItemShortcutTag(slotEl, equipped.id);
           this.applyItemWaitingGhost(slotEl, equipped.id);
           this.applyItemSellStateBadge(slotEl, this.sellStateGuids().has(equipped.id));
@@ -17616,7 +17663,7 @@ export class GameUI {
    */
   showContainerPanel(
     containerGuid: number,
-    items: Array<{ guid: number; name: string; pluralName?: string; iconDid: number; stackSize: number; containerId?: number; isContainer?: boolean; itemsCapacity?: number; itemType?: number; uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number }>,
+    items: Array<{ guid: number; name: string; pluralName?: string; iconDid: number; stackSize: number; containerId?: number; isContainer?: boolean; itemsCapacity?: number; itemType?: number; uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number; structure?: number; maxStructure?: number }>,
     listCapacity = -1,
     owner: { name?: string; iconDid?: number; itemType?: number; uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number; itemsCapacity?: number } = {},
     nestedListCapacity = -1,
@@ -17679,7 +17726,7 @@ export class GameUI {
   }
 
   /** Update items in an already-open container panel. */
-  updateContainerItems(items: Array<{ guid: number; name: string; pluralName?: string; iconDid: number; stackSize: number; containerId?: number; isContainer?: boolean; itemsCapacity?: number; itemType?: number; uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number }>): void {
+  updateContainerItems(items: Array<{ guid: number; name: string; pluralName?: string; iconDid: number; stackSize: number; containerId?: number; isContainer?: boolean; itemsCapacity?: number; itemType?: number; uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number; structure?: number; maxStructure?: number }>): void {
     this.containerItems = items;
     if (this.containerPanel) {
       this.renderContainerPanel();
@@ -18560,6 +18607,10 @@ export class GameUI {
         } else {
           cell.appendChild(this.renderACText(item.name[0]?.toUpperCase() ?? '?', AC_COLORS.textMed));
         }
+        // webac#25 — gmExternalContainerUI's item list (0x21000008 el
+        // 0x1000006a, template 0x1000033a) is the same UIItem: a partly used
+        // kit on a corpse or in a chest shows its uses-remaining bar.
+        this.appendItemUseMeters(cell, item, 32);
 
         // RECON.inventory-grid-dat-cells — no count on the icon (only a
         // vendor list sets a UIItem's quantity text, UpdateQuantityDisplay
@@ -18834,8 +18885,21 @@ export class GameUI {
     Object.assign(slot.style, this.texBgStyle(bgTex, 'rgba(8,12,34,0.85)'), {
       backgroundSize: '32px 32px', backgroundRepeat: 'no-repeat', imageRendering: 'pixelated',
     });
+    slot.dataset.uiItemOverlays = '';
     if (iconEl) {
       slot.appendChild(iconEl);
+      // webac#25 — the shortcut is a UIItem of the same overlay group as a
+      // pack cell: each slot's template (0x21000016 slot prop 0x1000000e =
+      // 0x1000043b..43 / 0x100006c1..c9, base 0x21000037:0x1000045c) carries
+      // child 0x1000033c = 0x10000346, the Icon_Cooldown_N0 deciles, the
+      // CapacityBar 0x10000347 and the StructureBar 0x10000348, and
+      // ItemList_AddItem @ 004e3e00 / ItemAttributesChanged @ 004e4f90 run
+      // UIItem_Update @ 004e21d0 → UpdateCapacityDisplay / UpdateStructure
+      // Display / UpdateCooldownDisplay on it. Drawn under the numeral
+      // (0x1000034a follows 0x10000348 in the template).
+      const { els, sig } = this.buildItemShortcutOverlays(index, !!data?.look?.isThePlayer);
+      for (const el of els) slot.appendChild(el);
+      slot.dataset.uiItemOverlays = sig;
       // Occupied slots 1-9 overlay the corner numeral badge.
       if (index < 9) {
         const ghosted = this.hud.combatMode === CombatMode.Magic;
@@ -18869,6 +18933,77 @@ export class GameUI {
     // UpdateTooltip: the object's name), through UIElementManager's machine;
     // an empty slot has none (the invented "Shortcut N" title is gone).
     this.tagHudTooltip(slot, data ? data.title : null);
+  }
+
+  /** UIItem::weenObj of shortcut slot `index`: the held object it points at (pack or wielded), if known. */
+  private itemShortcutWeenie(index: number): InventoryItem | undefined {
+    const id = this.itemShortcutObjectAt?.(index) ?? 0;
+    if (!id) return undefined;
+    return this.inventoryItems.find((i) => i.id === id) ?? this.equippedItems.find((i) => i.id === id);
+  }
+
+  /**
+   * webac#25 — the UIItem overlays a shortcut slot draws for its object
+   * (UIItem_Update @ 004e21d0): the cooldown decile, the container fullness
+   * meter (the main pack — the player — against its own ItemsCapacity, a
+   * side pack against its _itemsCapacity) and the uses-remaining bar, each
+   * built by the same helper the pack cells use. `sig` names what is shown,
+   * so a refresh rebuilds a slot only when one of them changed.
+   */
+  private buildItemShortcutOverlays(index: number, isThePlayer: boolean): { els: HTMLElement[]; sig: string } {
+    const st = this.itemShortcutOverlayState(index, isThePlayer);
+    const els: HTMLElement[] = [];
+    const item = st.item;
+    if (st.decile > 0 && item) {
+      const cd = this.buildCooldownOverlayEl(item.cooldownId, item.cooldownDuration, 32);
+      if (cd) els.push(cd);
+    }
+    if (st.capFrac !== null) {
+      const cap = this.buildCapacityBarEl(st.capacity, st.contained, 32);
+      if (cap) els.push(cap);
+    }
+    if (st.structFrac !== null && item) {
+      const bar = this.buildStructureBarEl(item.structure, item.maxStructure, 32);
+      if (bar) els.push(bar);
+    }
+    return { els, sig: st.sig };
+  }
+
+  /** What buildItemShortcutOverlays would show for slot `index`, and its signature. */
+  private itemShortcutOverlayState(index: number, isThePlayer: boolean): {
+    item: InventoryItem | undefined; decile: number; capacity: number | undefined; contained: number;
+    capFrac: number | null; structFrac: number | null; sig: string;
+  } {
+    const objectId = this.itemShortcutObjectAt?.(index) ?? 0;
+    const item = this.itemShortcutWeenie(index);
+    const decile = item?.cooldownId
+      ? Math.max(0, cooldownDecile(item.cooldownId, item.cooldownDuration ?? 0, this.activeEnchantments.values(), Date.now() / 1000))
+      : 0;
+    const capGuid = isThePlayer ? objectId : (item?.id ?? 0);
+    const capacity = isThePlayer ? this.inventoryItemsCapacity : item?.itemsCapacity;
+    const contained = capGuid ? this.containedItemCount(capGuid) : 0;
+    const capFrac = capGuid ? capacityBarFraction(capacity, contained) : null;
+    const structFrac = item ? structureBarFraction(item.structure, item.maxStructure) : null;
+    return { item, decile, capacity, contained, capFrac, structFrac, sig: `${decile}|${capFrac ?? '-'}|${structFrac ?? '-'}` };
+  }
+
+  /**
+   * webac#25 — keep the shortcut slots' UIItem overlays live
+   * (UIElement_ItemList::ItemAttributesChanged @ 004e4f90 → UIItem_Update):
+   * a Structure / cooldown / pack-contents change re-applies only the slots
+   * whose overlays changed. Returns true while any slot shows a cooldown.
+   */
+  refreshItemShortcutOverlays(): boolean {
+    let cooling = false;
+    for (let i = 0; i < this.itemShortcutSlots.length; i++) {
+      const data = this.itemShortcutData[i];
+      const slot = this.itemShortcutSlots[i];
+      if (!data || !slot) continue;
+      const { sig, decile } = this.itemShortcutOverlayState(i, !!data.look?.isThePlayer);
+      if (sig !== slot.dataset.uiItemOverlays) this.applyItemShortcutSlot(i);
+      if (decile > 0) cooling = true;
+    }
+    return cooling;
   }
 
   /** The shortcut slots' selected overlay follows the global selection (RecvNotice_SetSelectedItem). */
@@ -19600,12 +19735,17 @@ export class GameUI {
       this.spellDragScroll = { clock: new DragScrollClock(rule.delaySeconds), rule, x, y, raf: 0 };
       this.spellDragScroll.raf = requestAnimationFrame(this.spellDragScrollTick);
     };
-    document.addEventListener('dragstart', (e) => { if (isSpellDrag(e.dataTransfer)) begin(e.clientX, e.clientY); });
+    document.addEventListener('dragstart', (e) => {
+      if (!isSpellDrag(e.dataTransfer)) return;
+      this.spellcastBackgroundDragTarget(true);
+      begin(e.clientX, e.clientY);
+    });
     document.addEventListener('dragover', (e) => {
       const s = this.spellDragScroll;
       if (s) { s.x = e.clientX; s.y = e.clientY; } else if (isSpellDrag(e.dataTransfer)) begin(e.clientX, e.clientY);
     });
     const end = () => {
+      this.spellcastBackgroundDragTarget(false);
       const s = this.spellDragScroll;
       if (!s) return;
       cancelAnimationFrame(s.raf);
@@ -19790,6 +19930,39 @@ export class GameUI {
   }
 
 
+  /**
+   * BUG.spellbook-drag-to-bar — gmSpellcastingUI::HandleDropRelease @ 004c7930's middle arm: a
+   * spell released on the bar's backdrop m_spellcastBackground (0x100000a0, PostInit @ 004c5d00;
+   * the element itself, not a child) is AddSpellShortcut(spell, −1): appended to the open tab.
+   * Ours had no drop there, so a spellbook row let go on the backdrop strip (beside the cells, the
+   * band under them) did nothing. The backdrop takes the pointer only while a spell drag runs
+   * (spellcastBackgroundDragTarget), so clicks over it still reach the world as before; the name
+   * text child takes it too, so a drop on the name stays a drop on a child (no append): retail
+   * appends only when the drop target is the backdrop element itself (HandleDropRelease @ 004c7930).
+   */
+  wireSpellcastBackgroundDrop(bg: HTMLElement | undefined, name: HTMLElement | undefined): void {
+    this.spellcastBackgroundEls = bg ? [bg, ...(name ? [name] : [])] : [];
+    if (!bg) return;
+    bg.dataset.spellcastBackground = '1';
+    const spellDrag = (e: DragEvent): boolean => {
+      const types = e.dataTransfer?.types ?? [];
+      return e.target === bg && (types.includes('text/spell-id') || types.includes('text/spell-index'));
+    };
+    bg.addEventListener('dragover', (e) => { if (spellDrag(e)) e.preventDefault(); });
+    bg.addEventListener('drop', (e) => {
+      if (!spellDrag(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const spell = this.spellOfDrag(e.dataTransfer);
+      if (spell) this.dropSpellOnBar(spell, -1);
+    });
+  }
+
+  /** The spell bar backdrop (and its name text) take the pointer only during a spell drag. */
+  private spellcastBackgroundDragTarget(on: boolean): void {
+    for (const el of this.spellcastBackgroundEls) el.style.pointerEvents = on ? 'auto' : '';
+  }
+
   /** Render the floating spell bar panel using LayoutRenderer with LayoutDesc 0x21000010. */
   private renderSpellBarPanel(): void {
     if (this.spellBarPanelEl) this.spellBarPanelEl.remove();
@@ -19836,6 +20009,8 @@ export class GameUI {
       const castDesc = handle.descs?.get(SPELLBAR_CAST_BUTTON);
       handle.resizeElement?.(SPELLBAR_CAST_BUTTON, CAST_BUTTON_1999_WIDTH, castDesc?.height ?? 32);
     }
+
+    this.wireSpellcastBackgroundDrop(handle.elements.get(SPELLCAST_BACKGROUND), handle.elements.get(SPELLBAR_SPELL_NAME_TEXT));
 
     // Set up tab elements with their DAT states, labels and click handlers.
     // CORE.17.k.b.b.c.a — the tab base 0x21000010:0x1000048f defines 0xb
@@ -23930,6 +24105,8 @@ export class GameUI {
     console.log(`[Enchantment] ${data.isBeneficial ? '+' : '-'} ${data.name} (${data.spellId}) dur=${data.duration}s`);
     this.refreshEffectsWindows();
     this.updateEnchantmentIndicator();
+    // webac#25 — a shared cooldown starting shows on its shortcut slots.
+    if (data.isCooldown) this.refreshItemShortcutOverlays();
   }
 
   /**
@@ -23959,6 +24136,7 @@ export class GameUI {
     if (ench) {
       console.log(`[Enchantment] Removed: ${ench.name}`);
       this.activeEnchantments.delete(key);
+      if (ench.isCooldown) this.refreshItemShortcutOverlays();
     }
     this.refreshEffectsWindows();
     this.updateEnchantmentIndicator();
@@ -31256,8 +31434,8 @@ export class GameUI {
     // render the actual DAT item icon next to the name + value, matching
     // AC retail (the original trade window showed 32x32 icons per slot).
     // CORE.18.c.a — plus IconData::RenderIcons' inputs for the UIItem cell.
-    yourItems: Array<{ name: string; value: number; guid: number; burden: number; iconDid: number; itemType?: number; uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number }>;
-    theirItems: Array<{ name: string; value: number; guid: number; burden: number; iconDid: number; itemType?: number; uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number }>;
+    yourItems: Array<{ name: string; value: number; guid: number; burden: number; iconDid: number; itemType?: number; uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number; structure?: number; maxStructure?: number }>;
+    theirItems: Array<{ name: string; value: number; guid: number; burden: number; iconDid: number; itemType?: number; uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number; structure?: number; maxStructure?: number }>;
     theirName: string;
     // FAITHFUL.543 — local player's name for the left-side trade label.
     // DAT elem 0x1000007e shows "..." as a placeholder for the runtime
@@ -31619,7 +31797,7 @@ export class GameUI {
     handle: LayoutHandle,
     listId: number,
     barId: number,
-    items: ReadonlyArray<{ name: string; guid: number; iconDid: number; itemType?: number; uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number }>,
+    items: ReadonlyArray<{ name: string; guid: number; iconDid: number; itemType?: number; uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number; structure?: number; maxStructure?: number }>,
     trailingEmpty: boolean,
     getScrollX: () => number,
     setScrollX: (x: number) => void,
@@ -31684,6 +31862,9 @@ export class GameUI {
         : null;
       if (iconEl) cell.appendChild(iconEl);
       else cell.appendChild(this.renderACText(item.name[0]?.toUpperCase() ?? '?', AC_COLORS.textMed));
+      // webac#25 — gmSecureTradeUI's lists (0x2100000d els 0x10000081 /
+      // 0x10000088, template 0x1000033a): the UIItem's uses-remaining bar.
+      this.appendItemUseMeters(cell, item, CELL);
       // Our own listed items carry tradeState (the partner's never do).
       this.applyItemTradeStateOverlay(cell, inTradeGuids.has(guid));
       if (guid === this.containerSelectedGuid()) this.styleSlotTile(cell, 'selected', 0x06004d20, true);
@@ -33567,6 +33748,9 @@ export class GameUI {
         { itemType: item.itemType, effects: item.uiEffects });
       if (iconEl) cell.appendChild(iconEl);
       else cell.appendChild(this.renderACText(item.name[0]?.toUpperCase() ?? '?', AC_COLORS.textMed));
+      // webac#25 — gmSalvageUI's list (0x2100000c el 0x10000074, template
+      // 0x1000033a) is the same UIItem: its use meters.
+      this.appendItemUseMeters(cell, item, CELL);
       // ListenToElementMessage: message 0x1c dwParam1 10 (double-click) on
       // a cell → RemoveItem; RecvNotice_ItemListBeginDrag @ 004cb220 (a
       // cell dragged out) → RemoveItem.

@@ -612,6 +612,15 @@ export interface EraClientRules {
    */
   spellBarChargeMeter: boolean;
   /**
+   * webac#25 — the item icon's meters: the uses-remaining StructureBar (0x10000348) and the
+   * container CapacityBar (0x10000347) of the EoL UIItem overlay group 0x21000037:0x10000346
+   * (UIElement_UIItem::UpdateStructureDisplay @ 004e17a0 / UpdateCapacityDisplay @ 004e16e0, on
+   * every item list and the toolbar shortcuts). The 1999 UI_Item draw @ 0x004e7d20 paints the icon,
+   * the selection / drag-accept art, the shortcut digit, the waiting overlay and a stack count, and
+   * no meter; no 1999 code past PublicWeenieDesc::UnPack reads _structure / _maxStructure.
+   */
+  itemIconMeters: boolean;
+  /**
    * The one combined effects window's title, or null for end of retail's two (MAG-4). The 1999
    * PanelUI has one magic status indicator, lit while any enchantment is in effect (0x4fa740 →
    * 0x52b4e0: the registry's mult + add list counts), opening one "Spells in Effect" panel (ctor
@@ -1214,6 +1223,7 @@ const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
   deleteCharacterConfirm: null,
   placementText: EOR_PLACEMENT_TEXT,
   spellBarChargeMeter: false,
+  itemIconMeters: true, // UIElement_UIItem::UIItem_Update @ 004e21d0
   combinedEffectsTitle: null,
   spellDurationText: 'eor' as const,
   castButtonText: null,
@@ -1314,6 +1324,7 @@ const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
   deleteCharacterConfirm: 'Deleting %s cannot be undone.  Are you sure?', // IntroUI_ListenToMessage
   placementText: AC1999_PLACEMENT_TEXT, // AttemptPlaceInContainerIsLegal / AttemptMergeIsLegal
   spellBarChargeMeter: true, // SpellCastSubPanel ctor @ 0x512390, UpdateChargeMeter @ 0x513390
+  itemIconMeters: false, // the UI_Item draw @ 0x004e7d20 has no meter
   combinedEffectsTitle: 'Spells in Effect', // SpellsInEffectPanel ctor @ 0x59ac70
   spellDurationText: 'ac1999' as const, // SpellExaminePanel_ExamineSpell @ 0x511110
   castButtonText: AC1999_CAST_BUTTON_TEXT, // UpdateCastButton @ 0x513e00

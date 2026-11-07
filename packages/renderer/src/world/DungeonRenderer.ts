@@ -300,6 +300,16 @@ export class DungeonRenderer {
     return this.loadedCellMeshes.get(cellId >>> 0)?.visible;
   }
 
+  /**
+   * BUG.dungeon-login-black — streamed cells drawing this frame (applyPortalVisibility's result): the
+   * first_minute event's visibleCells in a dungeon.
+   */
+  get drawnCellCount(): number {
+    let n = 0;
+    for (const mesh of this.loadedCellMeshes.values()) if (mesh.visible) n++;
+    return n;
+  }
+
   /** Get the landblock-local coords for proximity checks from world coords. */
   worldToLocal(worldX: number, worldZ: number): { localX: number; localY: number } {
     return {

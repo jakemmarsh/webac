@@ -75,6 +75,9 @@ export interface OpenContainerItem {
   uiEffects?: number;
   iconOverlayDid?: number;
   iconUnderlayDid?: number;
+  /** webac#25 — uses left / when fresh (PropertyInt Structure 92 / MaxStructure 91); the cell's StructureBar. */
+  structure?: number;
+  maxStructure?: number;
   /**
    * CORE.17.o.b — the resolved list capacity of a nested container
    * (itemListCapacity of its CreateObject bitfield + ItemsCapacity):
@@ -122,15 +125,25 @@ interface TrackedData {
   uiEffects?: number;
   iconOverlayDid?: number;
   iconUnderlayDid?: number;
+  structure?: number;
+  maxStructure?: number;
 }
 
-/** CORE.18.c.a — the RenderIcons inputs a tracked object carries. */
-type IconLook = { uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number };
+/**
+ * CORE.18.c.a — the RenderIcons inputs a tracked object carries; webac#25 —
+ * and its _structure / _maxStructure, which the cell's UIItem StructureBar
+ * reads (UIElement_UIItem::UpdateStructureDisplay @ 004e17a0).
+ */
+type IconLook = { uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number; structure?: number; maxStructure?: number };
 function iconLookOf(d: IconLook): IconLook {
   const out: IconLook = {};
   if (d.uiEffects) out.uiEffects = d.uiEffects;
   if (d.iconOverlayDid) out.iconOverlayDid = d.iconOverlayDid;
   if (d.iconUnderlayDid) out.iconUnderlayDid = d.iconUnderlayDid;
+  if (d.maxStructure) {
+    out.maxStructure = d.maxStructure;
+    out.structure = d.structure ?? 0;
+  }
   return out;
 }
 

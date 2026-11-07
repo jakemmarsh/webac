@@ -204,6 +204,70 @@ export interface FirstMinuteEvent {
    * clock (battery saver, thermal limits, an efficiency-mode tab) reads several times that.
    */
   cpuProbeMs?: number | null;
+  /**
+   * BUG.dungeon-login-black (The Tower, 2026-11-07: four logins into the dungeon 0x5950 reported the world drawn,
+   * ~475 draw calls a frame, no errors, while the player saw a black world). What the world canvas showed: the
+   * latest of the samples taken right after a world draw (1 s after the first one, then every 10 s): the mean
+   * luma (0..255) of a LUMA_SAMPLE_W × LUMA_SAMPLE_H downscale of the canvas, the share of those samples darker
+   * than LUMA_DARK (percent), and when it was taken (ms since enter_ok). Null when none was taken.
+   */
+  lumaMean?: number | null;
+  lumaDarkPct?: number | null;
+  lumaAtMs?: number | null;
+  /**
+   * BUG.dungeon-login-black — indoors (a dungeon or a building's room) at the event: the player's interior cell
+   * (8 hex digits), whether the body is in that cell's volume, the camera's cell (8 hex digits; "00000000" when
+   * the camera is in no cell's volume), and how many interior cells drew that frame. All null outdoors.
+   */
+  viewCell?: string | null;
+  viewCellFound?: boolean | null;
+  cameraCell?: string | null;
+  visibleCells?: number | null;
+}
+
+/** BUG.dungeon-login-black — the canvas downscale a luma sample reads, and the luma below which a sample counts dark. */
+export const LUMA_SAMPLE_W = 32;
+export const LUMA_SAMPLE_H = 18;
+export const LUMA_DARK = 16;
+/** The first luma sample's delay after the first world draw, and the spacing of the later ones. */
+export const LUMA_FIRST_MS = 1_000;
+export const LUMA_EVERY_MS = 10_000;
+
+/** A luma sample of the world canvas (lumaStats). */
+export interface LumaSample { mean: number; darkPct: number }
+
+/** The indoor view at the event (WorldReporterSources.indoorView). */
+export interface IndoorViewState {
+  /** The player's interior cell (full id). */
+  cell: number;
+  /** The body is in that cell's volume (a containment test found it). */
+  cellFound: boolean;
+  /** The camera's cell (full id), 0 when the camera is in no cell's volume. */
+  cameraCell: number;
+  /** Interior cells drawn in the last frame. */
+  visibleCells: number;
+}
+
+/**
+ * BUG.dungeon-login-black — the mean Rec. 709 luma (0..255, of the sRGB bytes) of RGBA pixels and the percent of
+ * them darker than LUMA_DARK; null for no pixels.
+ */
+export function lumaStats(rgba: ArrayLike<number>): LumaSample | null {
+  const n = Math.floor(rgba.length / 4);
+  if (n === 0) return null;
+  let sum = 0;
+  let dark = 0;
+  for (let i = 0; i < n; i++) {
+    const l = 0.2126 * rgba[i * 4] + 0.7152 * rgba[i * 4 + 1] + 0.0722 * rgba[i * 4 + 2];
+    sum += l;
+    if (l < LUMA_DARK) dark++;
+  }
+  return { mean: Math.round(sum / n), darkPct: Math.round((dark / n) * 100) };
+}
+
+/** A full cell id as sent: 8 lowercase hex digits. */
+function cellHex(v: unknown): string | null {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 0xffffffff ? (v >>> 0).toString(16).padStart(8, '0') : null;
 }
 
 export interface WorldLeftEvent {
@@ -283,6 +347,13 @@ export interface WorldReporterSources {
   serverObjects?: () => number | null;
   /** The page's blank font sheets and lost 2D contexts so far (ContextHealth.uiCanvasHealth), at the event. */
   uiCanvasHealth?: () => { fontSheetBad: number; canvas2dLost: number } | null;
+  /**
+   * BUG.dungeon-login-black — ask for a luma sample of the world canvas, taken right after the next world draw
+   * (SceneManager.requestLumaSample); `done` gets it, or null when it could not be read.
+   */
+  requestLuma?: (done: (sample: LumaSample | null) => void) => void;
+  /** BUG.dungeon-login-black — the indoor view now; null outdoors. */
+  indoorView?: () => IndoorViewState | null;
 }
 
 /** A HandlerMeter as the reporter reads it (MainThreadCost). */
@@ -519,6 +590,12 @@ export class WorldReporter {
   private cpuBest: number | null = null;
   private cpuSamples = 0;
   private cpuNextAt = 0;
+  /** BUG.dungeon-login-black — this session's latest luma sample, when it was taken, the next one's due time, and a session stamp. */
+  private luma: LumaSample | null = null;
+  private lumaAt: number | null = null;
+  private lumaNextAt: number | null = null;
+  private lumaInFlight = false;
+  private lumaSession = 0;
   private worldDrawnAt: number | null = null;
   private firstMoveAt: number | null = null;
   private firstClickAt: number | null = null;
@@ -643,6 +720,11 @@ export class WorldReporter {
     this.cpuBest = null;
     this.cpuSamples = 0;
     this.cpuNextAt = at + CPU_PROBE_FIRST_MS;
+    this.luma = null;
+    this.lumaAt = null;
+    this.lumaNextAt = null;
+    this.lumaInFlight = false;
+    this.lumaSession++;
     this.drawCallSum = 0;
     this.triangleSum = 0;
     this.drawSamples = 0;
@@ -710,7 +792,10 @@ export class WorldReporter {
     this.lastFrameAt = now;
     if (worldDrawn) {
       this.worldFrames++;
-      if (this.worldDrawnAt === null) this.worldDrawnAt = now;
+      if (this.worldDrawnAt === null) {
+        this.worldDrawnAt = now;
+        this.lumaNextAt = now + LUMA_FIRST_MS;
+      }
     }
     if (this.firstMoveAt === null && this.src.moving) {
       let moving = false;
@@ -747,7 +832,26 @@ export class WorldReporter {
       const ms = safe(this.opts.cpuProbe ?? cpuProbeMs, NaN);
       if (Number.isFinite(ms) && ms >= 0 && (this.cpuBest === null || ms < this.cpuBest)) this.cpuBest = ms;
     }
+    if (!this.minuteSent && this.lumaNextAt !== null && at >= this.lumaNextAt && !this.lumaInFlight && this.src.requestLuma) {
+      this.lumaNextAt = at + LUMA_EVERY_MS;
+      this.requestLuma();
+    }
     if (!this.minuteSent && at - this.enterAt >= FIRST_MINUTE_MS) this.sendFirstMinute('still_in', at);
+  }
+
+  /** BUG.dungeon-login-black — one luma sample, kept when it lands in this session's first minute. */
+  private requestLuma(): void {
+    const session = this.lumaSession;
+    this.lumaInFlight = true;
+    try {
+      this.src.requestLuma!((sample) => {
+        if (session !== this.lumaSession) return;
+        this.lumaInFlight = false;
+        if (this.minuteSent || !sample) return;
+        this.luma = sample;
+        this.lumaAt = this.now();
+      });
+    } catch { this.lumaInFlight = false; }
   }
 
   /** The page went to the background: the first minute ends there (the session goes on). */
@@ -912,8 +1016,24 @@ export class WorldReporter {
       ...this.uiCanvasFields(),
       ...this.batteryFields(),
       cpuProbeMs: this.cpuBest === null ? null : Math.min(CPU_PROBE_MAX_MS, Math.round(this.cpuBest * 10) / 10),
+      ...this.viewFields(enterAt),
       ...detail,
     });
+  }
+
+  /** BUG.dungeon-login-black — what the canvas showed (the latest luma sample) and the indoor view at the event. */
+  private viewFields(enterAt: number): Pick<FirstMinuteEvent, 'lumaMean' | 'lumaDarkPct' | 'lumaAtMs' | 'viewCell' | 'viewCellFound' | 'cameraCell' | 'visibleCells'> {
+    const l = this.luma;
+    const v = safe(this.src.indoorView, null);
+    return {
+      lumaMean: l ? count(l.mean, 255) : null,
+      lumaDarkPct: l ? count(l.darkPct, 100) : null,
+      lumaAtMs: l && this.lumaAt !== null ? count(this.lumaAt - enterAt, FIRST_MINUTE_MS * 2) : null,
+      viewCell: v ? cellHex(v.cell) : null,
+      viewCellFound: v ? v.cellFound === true : null,
+      cameraCell: v ? cellHex(v.cameraCell) : null,
+      visibleCells: v ? count(v.visibleCells, 100_000) : null,
+    };
   }
 
   /** BUG.hud-text-blank-font-sheet — blank font sheets and lost 2D contexts (page totals). */

@@ -7,6 +7,8 @@ import { renderPixelRatio, renderAdaptConfig, contextAntialias, MIN_RENDER_PIXEL
 import { DynamicResolution } from './DynamicResolution.js';
 import { renderIndoorView, type IndoorViewContext } from './IndoorView.js';
 import { installHiddenSubtreeMatrixSkip } from './HiddenSubtreeMatrixSkip.js';
+import { sampleCanvasLuma, type LumaScratch } from './CanvasLuma.js';
+import type { LumaSample } from '../telemetry/WorldReporter.js';
 
 /** Retail `Render::znear` (globals.tsv: 0.1; SetFOVRad resets it to 0.1). */
 export const RETAIL_ZNEAR = 0.1;
@@ -282,6 +284,32 @@ export class SceneManager {
   /** A screenshot is waiting for a frame (the background beat draws one even while the window is covered). */
   get capturePending(): boolean { return this.pendingCaptures.length > 0; }
 
+  /** BUG.dungeon-login-black — a luma sample waiting for the next world render (scene/CanvasLuma.ts); one at a time. */
+  private pendingLuma: ((sample: LumaSample | null) => void) | null = null;
+  private lumaScratch: HTMLCanvasElement | null = null;
+
+  /**
+   * BUG.dungeon-login-black — the luma of the next frame the world draws, read right after its render (no draw:
+   * never called). A newer request replaces a waiting one, which gets null.
+   */
+  requestLumaSample(done: (sample: LumaSample | null) => void): void {
+    const prev = this.pendingLuma;
+    this.pendingLuma = done;
+    prev?.(null);
+  }
+
+  private flushLuma(): void {
+    const done = this.pendingLuma;
+    this.pendingLuma = null;
+    if (!done) return;
+    let sample: LumaSample | null = null;
+    if (typeof document !== 'undefined') {
+      this.lumaScratch ??= document.createElement('canvas');
+      sample = sampleCanvasLuma(this.renderer?.domElement, this.lumaScratch as unknown as LumaScratch);
+    }
+    done(sample);
+  }
+
   /**
    * AGENT.hosted-mcp-connector — the next frame the game draws, as a JPEG (base64, no data: prefix,
    * at most 1024 wide). Read right after that frame's render, in the same task, so the WebGL buffer
@@ -329,6 +357,7 @@ export class SceneManager {
     if (this.indoorView && this.renderer) renderIndoorView(this.renderer, this.scene, this.camera, this.indoorView);
     else this.renderer?.render(this.scene, this.camera);
     if (this.pendingCaptures.length) this.flushCaptures();
+    if (this.pendingLuma) this.flushLuma();
     // PERF.gpu-soak-frame-hitches-28a525da — no program is ever relinked.
     this.programRetention.retainNew();
   }

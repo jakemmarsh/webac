@@ -128,7 +128,8 @@ describe('GET /servers rows for AC1999', () => {
     });
     const servers = (): ServerEntry[] => [...parseServersXml(ACE_XML).servers, AC1999];
     const d = new ServerDirectory({
-      servers, refreshMs: 0, reachability,
+      // Pinned clock: the fixture's TreeStats rows are dated 2026-11-04, and a wall clock ages them out (failed from 2026-11-07).
+      servers, refreshMs: 0, reachability, now: () => Date.parse('2026-11-04T12:00:00Z'),
       fetchText: async (url) => JSON.stringify(url === TREESTATS_STATUS_URL ? STATUS : COUNTS),
     });
     return { d, probed, reachability };

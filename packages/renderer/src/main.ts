@@ -3228,7 +3228,7 @@ async function main() {
     syncObjectLights(itemMesh, setupModelRenderer.loadSetupModel(setupId)?.lights,
       serverObjectManager?.getObject(wieldedGuid)?.physicsState ?? visual.physicsState ?? 0);
     heldCopyScripts?.start(itemMesh, setupId);
-    console.log(`[Wield] Attached ${equipped.name} (setup 0x${setupId.toString(16)}) to part_${loc.partId} (location=${parentLocation})`);
+    console.log(`[Wield] Attached ${equipped.name} (setup 0x${setupId.toString(16)}) to part_${loc.partId} (location=${parentLocation}, placement=${itemMesh.userData[WIELDED_PLACEMENT_KEY]}${placement === undefined ? ' from CreateObject' : ' from ParentEvent'})`);
   }
 
   /**
@@ -3492,7 +3492,7 @@ async function main() {
     // BUG.server-object-setup-lights — the held item's own Setup lights.
     syncObjectLights(itemMesh, setupModelRenderer.loadSetupModel(item.setupId)?.lights, item.physicsState);
     heldCopyScripts?.start(itemMesh, item.setupId);
-    console.log(`[Wield] Attached ${item.name} to ${creature.name} part_${loc.partId} (location=${parentLocation})`);
+    console.log(`[Wield] Attached ${item.name} to ${creature.name} part_${loc.partId} (location=${parentLocation}, placement=${itemMesh.userData[WIELDED_PLACEMENT_KEY]}${placement === undefined ? ' from CreateObject' : ' from ParentEvent'})`);
   }
 
   /**
@@ -8346,6 +8346,30 @@ async function main() {
     },
     serverObjects: () => serverObjectManager?.getAllObjects().size ?? null,
     uiCanvasHealth,
+    // BUG.dungeon-login-black — what the world canvas showed, and the indoor view, so a "drawn but black"
+    // first minute says what was on screen (telemetry/WorldReporter.ts viewFields).
+    requestLuma: (done) => sceneManager.requestLumaSample(done),
+    indoorView: () => {
+      if (!gameStarted) return null;
+      const cam = sceneManager.camera.getWorldPosition(new THREE.Vector3());
+      if (playerInDungeon) {
+        const dc = dungeonCollision;
+        return {
+          cell: dungeonLandblockId,
+          cellFound: !!dc && dc.findCellContaining(playerWorldX, playerWorldZ, playerFeetY, dungeonLandblockId) !== 0,
+          cameraCell: dc ? dc.findCellContaining(cam.x, cam.z, cam.y, dungeonLandblockId) : 0,
+          visibleCells: dungeonRenderer.drawnCellCount,
+        };
+      }
+      if ((currentSurfaceCellId & 0xffff) < 0x100 && (indoorViewCellId & 0xffff) < 0x100) return null;
+      return {
+        cell: currentSurfaceCellId,
+        cellFound: (currentSurfaceCellId & 0xffff) >= 0x100 && outdoorCollision.findCellContaining(
+          playerWorldX, playerWorldZ, playerFeetY + outdoorCollision.lowerSphereHeight, currentSurfaceCellId) !== 0,
+        cameraCell: indoorViewCellId,
+        visibleCells: indoorViewPvs.size,
+      };
+    },
   });
   preworldChargenStep = () => chargenStepName(gameUI.chargenStep);
   const applyUpdatePolicy = (): void => {
@@ -10032,6 +10056,8 @@ async function main() {
           objectDescFlags: data.objectDescFlags ?? 0, itemsCapacity: data.itemsCapacity ?? 0,
           // CORE.18.c.a — the cell's RenderIcons inputs.
           uiEffects: data.uiEffects, iconOverlayDid: data.iconOverlayId, iconUnderlayDid: data.iconUnderlayId,
+          // webac#25 — the cell's UIItem StructureBar (a used kit in a chest).
+          structure: data.structure, maxStructure: data.maxStructure,
         };
         // RELEASE.gdle-contents-before-viewcontents — one not (yet) in the open
         // container is kept for its container's 0x196: GDLE sends a container's
@@ -10256,6 +10282,7 @@ async function main() {
             itemsCapacity: stored.itemsCapacity,
             // CORE.18.c.a — the cell's RenderIcons inputs.
             uiEffects: stored.uiEffects, iconOverlayDid: stored.iconOverlayDid, iconUnderlayDid: stored.iconUnderlayDid,
+            structure: stored.structure, maxStructure: stored.maxStructure,
           });
           syncOpenContainerUI();
         }
