@@ -158,7 +158,7 @@ export class MotionTableState {
     if (d.omega) { this.omega.x += d.omega.x * s; this.omega.y += d.omega.y * s; this.omega.z += d.omega.z * s; }
   }
 
-  /** Back to `substate` with no modifiers and no physics (a style change, a revive, Falling). */
+  /** Back to `substate` with no modifiers and no physics (a style change, a revive). */
   reset(substate: number): void {
     this.substate = substate;
     this.substateMod = 1;

@@ -1,8 +1,9 @@
 import type * as THREE from 'three';
+import type { SetupModel } from '@ac/dat-parser/file-types/SetupModel.js';
 import { datMissEpoch, noDatMissSince } from '@ac/dat-parser/streaming/DatMiss.js';
 import { buildAppearanceOverrides, type AppearanceData } from './AppearanceOverrides.js';
 import { setServerTranslucency } from './ObjectTranslucency.js';
-import { PLACEMENT_RESTING } from './SetupModelGroup.js';
+import { PLACEMENT_RESTING, resolvedPlacementFrameId } from './SetupModelGroup.js';
 
 /**
  * RECON.wielded-item-objdesc — the mesh of an item held at a wielder's
@@ -136,6 +137,8 @@ export interface WieldedMeshBuilder {
     perPartTextureOverrides?: Map<number, Map<number, number>>,
     paletteColors?: number[],
   ): THREE.Group | null;
+  /** The Setup, to record the placement frame actually used (WIELDED_FRAME_KEY); SetupModelRenderer has it. */
+  loadSetupModel?(setupId: number): Pick<SetupModel, 'placementFrames'> | null;
 }
 
 /**
@@ -148,6 +151,12 @@ export interface WieldedMeshBuilder {
 export const WIELDED_BUILT_WITH_MISS_KEY = 'acWieldedBuiltWithMiss';
 /** userData: the Placement the wielded mesh was built with (for a re-attach: streamed files, an ObjDesc). */
 export const WIELDED_PLACEMENT_KEY = 'acWieldedPlacement';
+/**
+ * userData: the placement frame id the Setup actually used for that Placement
+ * after SetPlacementFrame's fallback (resolvedPlacementFrameId; null = identity):
+ * a 1999 shield's Shield (6) draws frame 0. HeldPose.heldPoseOf reads it.
+ */
+export const WIELDED_FRAME_KEY = 'acWieldedFrame';
 
 /** Wielded meshes under `root` built across a streamed miss, with what a re-attach needs. */
 export function wieldedMeshesBuiltWithMiss(root: THREE.Object3D): Array<{ wieldedGuid: number; wielderGuid?: number; parentLocation: number; placement: number }> {
@@ -182,7 +191,11 @@ export function buildWieldedItemMesh(
   // (set_description's translucencyOriginal), e.g. a Crystal Caul orb at 0.5.
   const translucency = visual.translucency ?? 0;
   if (mesh && translucency > 0) setServerTranslucency(mesh, translucency);
-  if (mesh) mesh.userData[WIELDED_PLACEMENT_KEY] = placement;
+  if (mesh) {
+    mesh.userData[WIELDED_PLACEMENT_KEY] = placement;
+    const setup = builder.loadSetupModel?.(visual.setupId);
+    mesh.userData[WIELDED_FRAME_KEY] = setup ? resolvedPlacementFrameId(setup, placement) : null;
+  }
   // RELEASE.streaming-regression-gate — built while a streamed file was not
   // resident: the wielder re-attaches it when the files land (main.ts
   // reattachStreamedWieldedItems), with the same Placement.

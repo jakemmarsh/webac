@@ -444,6 +444,10 @@ describe('GameUI: the texture menus per era', () => {
     expect(a.ui.optionsSettings.environmentTextureDetail).toBe(1);
     expect(a.tex.at(-1)).toMatchObject({ landscapeTextureDetail: 1, environmentTextureDetail: 1 });
     openConfig(a.ui);
+    // The plates' drawn labels (data-option-value: what the play-through's option-defaults step reads).
+    const drawn = (key: string) => (a.ui.optionsPanel.querySelector(`[data-option-key="${key}"]`) as HTMLElement).dataset.optionValue;
+    expect(drawn('landscapeTextureDetail')).toBe('Full');
+    expect(drawn('environmentTextureDetail')).toBe('Full');
     const land = menuOf(a.ui, 'landscapeTextureDetail');
     expect(land.options).toEqual(['Full', '1/2', '1/4', '1/8']);
     expect(land.current).toBe('Full');

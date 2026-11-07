@@ -31,13 +31,17 @@ import {
   type NoReplyMove, readLoginCredential1999, loginCredentialShape, loginRefusedFields,
 } from '../services/ws-tcp-bridge/src/egress';
 import {
-  createBridgeServer, CLOSE_IP_CAP, CLOSE_WORLD_FULL, CLOSE_NEW_ACCOUNT_CAP, CLOSE_NEW_ACCOUNT_UNAVAILABLE, type BridgeServer,
+  createBridgeServer, CLOSE_IP_CAP, CLOSE_IP_CAP_REASON, CLOSE_WORLD_FULL, CLOSE_NEW_ACCOUNT_CAP, CLOSE_NEW_ACCOUNT_UNAVAILABLE,
+  CLOSE_SERVER_IP_CAP_REASON, type BridgeServer,
 } from '../services/ws-tcp-bridge/src/server';
 import { buildDirectory } from '../services/ws-tcp-bridge/src/serverDirectory';
 import type { ServerEntry } from '../services/ws-tcp-bridge/src/serverList';
 import type { LogFields } from '../services/ws-tcp-bridge/src/log';
 import { ClientConnection, Connection1999, EOR_LOGIN_PROFILE } from '@ac/network';
-import { BRIDGE_CLOSE_IP_CAP, BRIDGE_CLOSE_WORLD_FULL, BRIDGE_CLOSE_NEW_ACCOUNT_CAP } from '../packages/network/src/BridgeRefusal';
+import {
+  BRIDGE_CLOSE_IP_CAP, BRIDGE_CLOSE_WORLD_FULL, BRIDGE_CLOSE_NEW_ACCOUNT_CAP, BRIDGE_SERVER_IP_CAP_REASON, bridgeRefusalFromClose, bridgeRefusalPerAddress,
+} from '../packages/network/src/BridgeRefusal';
+import { bridgeRefusalNotice } from '../packages/renderer/src/ui/ConnectionNotices';
 import { buildPacket1999, fragmentMessage1999, F1999 } from '../packages/network/src/era1999/Packet1999';
 
 // ─── Helpers ──────────────────────────────────────────
@@ -146,6 +150,25 @@ describe('egress config (BRIDGE_EGRESS_*)', () => {
     expect(resolveEgressConfig({})).toBeNull();
     expect(resolveEgressConfig({ BRIDGE_EGRESS_SERVERS: ' , ' })).toBeNull();
     expect(resolveBridgeConfig([], { BRIDGE_SERVERS_URL: 'none' }).egress).toBeNull();
+  });
+
+  it('BUG.dreamweave-per-ip-enter: the production value with DreamWeave (one session per address) beside AC1999', () => {
+    const dw = '1f069f0d-1b2a-421b-a723-297486a82cd7';
+    const DREAMWEAVE = { key: dw, sessionsPerAddress: 1, newAccountsPerRealIp: null, accountsPerAddress: null };
+    const AC1999 = { key: 'ac1999', sessionsPerAddress: 2, newAccountsPerRealIp: 2, accountsPerAddress: 2 };
+    // The exact string the lead sets (SSM /webac/bridge/env), and the 3-field AC1999 form the
+    // 2026-10-16 rollout used: the 4th field defaults to the 3rd, so both are the same rules.
+    for (const raw of [`ac1999:2:2:2,${dw}:1`, `ac1999:2:2,${dw}:1`]) {
+      const worlds = parseEgressServers(raw);
+      expect([...worlds.values()]).toEqual([AC1999, DREAMWEAVE]);
+      const c = resolveEgressConfig({ BRIDGE_EGRESS_SERVERS: raw })!;
+      expect(c.worlds.get(dw)).toEqual(DREAMWEAVE);
+      expect(c.provider).toBe('aws');
+      // Multi mode routes by server id; the bridge config takes it as is.
+      expect(resolveBridgeConfig([], { BRIDGE_SERVERS_URL: 'none', BRIDGE_EGRESS_SERVERS: raw }).egress?.worlds.has(dw)).toBe(true);
+    }
+    // Server ids are matched lower-cased, as the router keys them.
+    expect(parseEgressServers(`${dw.toUpperCase()}:1`).has(dw)).toBe(true);
   });
 
   it('parses worlds, provider, dir, slots and grace', () => {
@@ -806,6 +829,18 @@ describe('directory rows of an egress world', () => {
     expect(egress.compatWarning).toBeNull();
     expect(egress.era).toBe(plain.era);
   });
+
+  it('BUG.dreamweave-per-ip-enter: DreamWeave\'s one-character rule rides its row until it is an egress world, then drops like AC1999\'s', () => {
+    const dw = '1f069f0d-1b2a-421b-a723-297486a82cd7';
+    const servers: ServerEntry[] = [{ id: dw, name: 'DreamWeave', emu: 'ACE', host: 'dreamweave.example', port: 9000, source: 'list' }];
+    const plain = buildDirectory(servers, new Map(), new Map(), { now: Date.now() })[0];
+    expect(plain.perIpLimits).toEqual({ accounts: 0, sessions: 0, characters: 1 });
+    expect(plain.compatWarning).toBe('Only one webAC player can be in this world at a time.');
+    expect(plain.compat).toBe('ok');
+    const egress = buildDirectory(servers, new Map(), new Map(), { now: Date.now(), egressWorlds: new Set([dw]) })[0];
+    expect(egress.perIpLimits).toBeNull();
+    expect(egress.compatWarning).toBeNull();
+  });
 });
 
 // ─── The real bridge, end to end ──────────────────────
@@ -927,6 +962,56 @@ describe('bridge end to end (static provider, one slot on 127.0.0.1)', () => {
     expect(bridge!.metrics.rejects.get('egress_ip_cap')).toBe(1);
     expect(bridge!.metrics.rejects.get('egress_full')).toBe(1);
     expect(bridge!.snapshot().sessions).toBe(2); // refusals never count as sessions
+  });
+
+  it('BUG.dreamweave-per-ip-enter: a world of one session per address refuses a second tab of the same network with ip_cap\'s code and the server\'s reason, which the client reads', async () => {
+    const url = await start({ BRIDGE_EGRESS_SERVERS: 'pinned:1' });
+    await session(url, '203.0.113.1');
+    // A second tab of the same person: the real WebSocket close frame, code and reason.
+    const second = new WebSocket(url, { headers: { 'x-forwarded-for': '203.0.113.1' } });
+    sockets.push(second);
+    const [code, reason] = await new Promise<[number, string]>((r) => second.once('close', (c, why) => r([c, why.toString()])));
+    expect(code).toBe(CLOSE_IP_CAP);
+    expect(reason).toBe(`${CLOSE_SERVER_IP_CAP_REASON}:1`);
+    expect(CLOSE_SERVER_IP_CAP_REASON).toBe(BRIDGE_SERVER_IP_CAP_REASON);
+    // The client: this server's rule and its number; a page that reads only the code still says ip_cap.
+    expect(bridgeRefusalFromClose(code, reason)).toBe('server_ip_cap');
+    expect(bridgeRefusalPerAddress(code, reason)).toBe(1);
+    expect(bridgeRefusalFromClose(code)).toBe('ip_cap');
+    expect(bridgeRefusalNotice('server_ip_cap', 1).text).toBe(
+      'This server lets one game window in per network, and yours already has one on it. Close your other webAC tab on this server, then try again.');
+    // Another player gets no slot (one slot, one session per address on this world): full for webAC.
+    const other = await session(url, '203.0.113.2');
+    expect(await other.closed).toBe(CLOSE_WORLD_FULL);
+    expect(bridge!.metrics.rejects.get('egress_ip_cap')).toBe(1);
+  });
+
+  it('BUG.dreamweave-per-ip-enter: two egress worlds share the slots, each counting only its own sessions per address', async () => {
+    const dir = tempDir();
+    const m = await staticManager(dir, 'ac1999:2:2:2,dw:1', ['10.0.0.1', '10.0.0.2', '10.0.0.3']);
+    // Three slots: DreamWeave fits three players (one per address), whatever AC1999 holds on the same addresses.
+    for (const ip of ['198.51.100.1', '198.51.100.2']) expect(await m.acquire('ac1999', ip)).toMatchObject({ ok: true });
+    const dwLeases = [];
+    for (const ip of ['203.0.113.1', '203.0.113.2', '203.0.113.3']) {
+      const got = await m.acquire('dw', ip);
+      expect(got.ok).toBe(true);
+      if (got.ok) dwLeases.push(got.lease);
+    }
+    expect(new Set(dwLeases.map((l) => l.localAddress)).size).toBe(3);
+    // A fourth DreamWeave player: every address carries its one.
+    expect(await m.acquire('dw', '203.0.113.4')).toMatchObject({ ok: false, refusal: 'full' });
+    // A second tab of a DreamWeave player: its own network's one, with the number the close reason carries.
+    expect(await m.acquire('dw', '203.0.113.1')).toMatchObject({ ok: false, refusal: 'ip_cap', perAddress: 1 });
+    // AC1999 still has its room: four more (two per address across three, two used).
+    for (const ip of ['198.51.100.3', '198.51.100.4', '198.51.100.5', '198.51.100.6']) expect(await m.acquire('ac1999', ip)).toMatchObject({ ok: true });
+    expect(await m.acquire('ac1999', '198.51.100.7')).toMatchObject({ ok: false, refusal: 'full' });
+    await m.stop();
+  });
+
+  it('the bridge\'s own per-address cap keeps its plain reason', () => {
+    expect(CLOSE_IP_CAP_REASON).toBe('ip_cap');
+    expect(bridgeRefusalFromClose(CLOSE_IP_CAP, CLOSE_IP_CAP_REASON)).toBe('ip_cap');
+    expect(bridgeRefusalPerAddress(CLOSE_IP_CAP, CLOSE_IP_CAP_REASON)).toBeNull();
   });
 
   it('end of retail: a new account over the real IP\'s limit is closed before its login reaches the server', async () => {

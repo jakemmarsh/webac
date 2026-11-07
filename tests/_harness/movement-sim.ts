@@ -34,6 +34,8 @@ import { applyServerForwardToLocalPlayer } from '../../packages/renderer/src/wor
 import { MotionManager as MM } from '../../packages/renderer/src/animation/MotionManager.js';
 import { AttackRequestController } from '../../packages/renderer/src/controllers/AttackRequest.js';
 import { MotionCommand } from '../../packages/renderer/src/animation/MotionCommands.js';
+import { jumpLaunchVelocity } from '../../packages/renderer/src/player/JumpLaunch.js';
+import { landingGroundVelocity, type GroundVelocity } from '../../packages/renderer/src/player/LandingCoast.js';
 
 /** A server combat event for the mover (the fixture's serverCombat). */
 export interface ServerCombatRow { t: number; event: 'attackDone' | 'commenceAttack'; code: number }
@@ -55,7 +57,13 @@ const HUMAN_MOTION_TABLE = 0x09000001;
 
 export interface SimFrame { t: number; right: number; fwd: number; heading: number }
 export interface SimWire { t: number; a: WireAction }
-export interface SimResult { frames: SimFrame[]; wire: SimWire[]; endControlledByServer: boolean; attacks: SimAttack[] }
+/** A jump our client launched: the JumpPack's local velocity (x right, y forward, z up) and the heading then. */
+export interface SimJump { t: number; local: { x: number; y: number; z: number }; heading: number }
+export interface SimResult {
+  frames: SimFrame[]; wire: SimWire[]; endControlledByServer: boolean; attacks: SimAttack[];
+  /** The jumps launched (only with SimOptions.jumpVz), and when each landed (ms). */
+  jumps: SimJump[]; landings: number[];
+}
 
 export interface SimOptions {
   portal: DatDatabase;
@@ -93,6 +101,17 @@ export interface SimOptions {
    */
   combat?: 'melee' | 'missile';
   serverCombat?: ServerCombatRow[];
+  /**
+   * Fly the jumps (with a world only): a released charge launches as main.ts
+   * does (triggerJump, then get_leave_ground_velocity with this lift, m/s —
+   * the recording's own JumpPack z, since the mover's Jump skill is not in
+   * the capture), the body flies on its launch velocity under gravity
+   * (stepPlayerMovement's airborne step) and lands on the lane's level
+   * ground keeping that velocity on the walkable (LandingCoast.ts).
+   */
+  jumpVz?: number;
+  /** The pre-fix landing (BUG.remote-running-jump-snapback): the horizontal velocity dropped at touchdown. */
+  dropVelocityOnLanding?: boolean;
 }
 
 export function simulateKeys(o: SimOptions): SimResult {
@@ -133,8 +152,13 @@ export function simulateKeys(o: SimOptions): SimResult {
   const x0 = A9B4.OX + A9B4.START.x, z0 = A9B4.OY + A9B4.START.y;
   let wx = x0, wz = z0;
   if (W) cam.playerYaw = yawForHeading(0);
+  // The flight (SimOptions.jumpVz): airborne, the vertical offset and velocity, the horizontal launch velocity.
+  let air = false, offY = 0, vy = 0, jvx = 0, jvz = 0;
+  let groundVel: GroundVelocity | null = null;
+  const jumps: SimJump[] = [];
+  const landings: number[] = [];
   const pos = (): PlayerPosition => W
-    ? { worldX: wx, worldZ: wz, groundY: A9B4.Z, playerYaw: cam.playerYaw, landblock: 0, localX: 0, localY: 0, localZ: 0, inDungeon: false, onGround: true }
+    ? { worldX: wx, worldZ: wz, groundY: A9B4.Z + offY, playerYaw: cam.playerYaw, landblock: 0, localX: 0, localY: 0, localZ: 0, inDungeon: false, onGround: !air }
     : { worldX: 85 + 169 * 192 + cam.camera.position.x, worldZ: 20.5 + 180 * 192 + cam.camera.position.z, groundY: 94, playerYaw: cam.playerYaw, landblock: 0, localX: 0, localY: 0, localZ: 0, inDungeon: false, onGround: true };
 
   if (o.startControlled) cam.loseControlToServer();
@@ -169,8 +193,17 @@ export function simulateKeys(o: SimOptions): SimResult {
   let si = 0;
   let movingToUntil = -Infinity;
   const motions = o.serverMotions ?? [];
-  for (let i = 0; i * FRAME * 1000 <= o.endMs; i++) {
-    const t = i * FRAME * 1000;
+  // Frames of FRAME seconds, each split at a key time inside it: the key is
+  // acted on at its own time (retail's processing time), not up to a frame
+  // late — a turn released mid-frame used to run on for the rest of it
+  // (~2° at a running turn's 129°/s).
+  const keyStops = [...new Set(o.keyTimes)].sort((a, b) => a - b);
+  let ks = 0;
+  for (let t = 0; t <= o.endMs;) {
+    const frameEnd = (Math.floor(t / (FRAME * 1000) + 1e-9) + 1) * FRAME * 1000;
+    while (ks < keyStops.length && keyStops[ks] <= t) ks++;
+    const stepEnd = ks < keyStops.length && keyStops[ks] < frameEnd - 1e-6 ? keyStops[ks] : frameEnd;
+    const dt = (stepEnd - t) / 1000;
     clock.t = t;
     while (ei < o.events.length && o.keyTimes[ei] <= t) {
       clock.t = o.keyTimes[ei];
@@ -220,27 +253,53 @@ export function simulateKeys(o: SimOptions): SimResult {
     if (W) {
       const p = cam.camera.position;
       p.set(wx, A9B4.Z, wz);
-      cam.update(FRAME);
-      const r = stepPlayerMovement({ x: wx, z: wz, floorY: A9B4.Z, inDungeon: false, airborne: false, jumpVelocityX: 0, jumpVelocityZ: 0 }, p.x - wx, p.z - wz, FRAME, W);
+      cam.update(dt);
+      const r = stepPlayerMovement({ x: wx, z: wz, floorY: A9B4.Z + offY, inDungeon: false, airborne: air, jumpVelocityX: jvx, jumpVelocityZ: jvz, groundVelocity: air ? null : groundVel }, p.x - wx, p.z - wz, dt, W);
       wx = r.x; wz = r.z;
-        cam.useTime(anim.motionsPending, t < movingToUntil);
-      anim.update(FRAME, cam);
+      if (r.groundVelocity !== undefined) groundVel = r.groundVelocity;
+      cam.useTime(anim.motionsPending, t < movingToUntil);
+      // main.ts's order: the jump block (DoJump, the arc, the landing's HitGround) runs before the
+      // animation controller's update, which re-applies the held motion out of Falling the same frame.
+      if (o.jumpVz !== undefined) {
+        // main.ts's jump block: the release launches (DoJump), then the arc.
+        if (!air && anim.jumpCharging && !cam.isJumpHeld && anim.triggerJump(cam) !== null) {
+          const launch = jumpLaunchVelocity(cam, o.jumpVz);
+          jvx = launch.world.x; jvz = launch.world.z; vy = o.jumpVz; offY = 0; air = true;
+          groundVel = null;
+          jumps.push({ t, local: launch.local, heading: headingForYaw(cam.playerYaw) });
+          sync.noteJump();
+        }
+        if (air) {
+          offY += vy * dt - 4.9 * dt * dt;
+          vy -= 9.8 * dt;
+          if (offY <= 0 && vy <= 0) {
+            air = false; offY = 0; vy = 0;
+            groundVel = o.dropVelocityOnLanding ? null : landingGroundVelocity(jvx, jvz);
+            jvx = 0; jvz = 0;
+            landings.push(stepEnd);
+            anim.onLanded();
+          }
+        }
+      }
+      anim.update(dt, cam);
       if (ar) { if (anim.jumpCharging && !wasCharging) ar.commenceJump(); wasCharging = anim.jumpCharging; ar.useTime(); }
       sync.update(state(), pos(), t);
-      frames.push({ t: t + FRAME * 1000, right: wx - x0, fwd: wz - z0, heading: headingForYaw(cam.playerYaw) });
+      frames.push({ t: stepEnd, right: wx - x0, fwd: wz - z0, heading: headingForYaw(cam.playerYaw) });
+      t = stepEnd;
       continue;
     }
-    cam.update(FRAME);
+    cam.update(dt);
     cam.useTime(anim.motionsPending, t < movingToUntil);
-    anim.update(FRAME, cam);
+    anim.update(dt, cam);
     if (ar) { if (anim.jumpCharging && !wasCharging) ar.commenceJump(); wasCharging = anim.jumpCharging; ar.useTime(); }
     sync.update(state(), pos(), t);
     // Scene axes: x = east, −z = north (forward at yaw 0 is (−sin yaw, −cos yaw)); right = east here.
     const p = cam.camera.position;
     const deg = ((cam.playerYaw * 180) / Math.PI % 360 + 360) % 360;
-    frames.push({ t: t + FRAME * 1000, right: -p.x, fwd: -p.z, heading: deg });
+    frames.push({ t: stepEnd, right: -p.x, fwd: -p.z, heading: deg });
+    t = stepEnd;
   }
-  return { frames, wire, endControlledByServer: cam.controlledByServer, attacks };
+  return { frames, wire, endControlledByServer: cam.controlledByServer, attacks, jumps, landings };
 }
 
 /**

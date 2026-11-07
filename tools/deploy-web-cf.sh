@@ -4,7 +4,7 @@
 # (tools/build-web-release.mjs) and uploads it with wrangler. The AWS host is not involved, so a
 # web deploy can never touch the bridge or its players. docs/web-hosting-cloudflare-plan.md.
 #
-#   bash tools/deploy-web-cf.sh --ref <sha> [--env staging|production] [--urgent] [--skip-gate] [--dry-run] [--no-rollback]
+#   bash tools/deploy-web-cf.sh --ref <sha> [--env staging|production] [--urgent] [--skip-gate] [--skip-live "<reason>"] [--dry-run] [--no-rollback]
 #
 # Both --env values deploy the SAME Worker, `webac-web` (wrangler.jsonc's env.production sets
 # name "webac-web" too), and a Worker has one live version that serves every hostname attached to
@@ -21,27 +21,36 @@
 # --config deploy/web/cloudflare/wrangler.jsonc -y (instant; older versions stay;
 # `npx wrangler@4 versions list --config …` lists them).
 # wrangler signs in with `npx wrangler@4 login` (browser OAuth); no key is stored in the repo.
+#
+# The gates (tools/lib/deploy-gate.sh): <sha> needs tools/ci-local.sh's pass stamp AND tools/live-gate.sh's
+# (the play-through in every era + the screen regression). --skip-gate / --skip-live "<reason>" override,
+# loudly, and append a row to docs/deploy-overrides.md (commit it).
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=lib/deploy-gate.sh
 . "$REPO/tools/lib/deploy-gate.sh"
-REF="" ENV=staging URGENT="" SKIP_GATE=0 DRY=0 NO_ROLLBACK=""
+REF="" ENV=staging URGENT="" SKIP_GATE=0 SKIP_LIVE="" DRY=0 NO_ROLLBACK=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --ref) REF="$2"; shift 2 ;;
     --env) ENV="$2"; shift 2 ;;
     --urgent) URGENT="--urgent"; shift ;;
     --skip-gate) SKIP_GATE=1; shift ;;
+    --skip-live) [ $# -ge 2 ] && [ -n "$2" ] || { echo '--skip-live needs a reason: --skip-live "<why>"' >&2; exit 2; }; SKIP_LIVE="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
     --no-rollback) NO_ROLLBACK="--no-rollback"; shift ;;
-    *) echo "usage: deploy-web-cf.sh --ref <sha> [--env staging|production] [--urgent] [--skip-gate] [--dry-run] [--no-rollback]" >&2; exit 2 ;;
+    *) echo 'usage: deploy-web-cf.sh --ref <sha> [--env staging|production] [--urgent] [--skip-gate] [--skip-live "<reason>"] [--dry-run] [--no-rollback]' >&2; exit 2 ;;
   esac
 done
 case "$ENV" in staging|production) ;; *) echo "--env must be staging or production" >&2; exit 2 ;; esac
 [ -n "$REF" ] || { echo "--ref <sha> is required" >&2; exit 2; }
 git -C "$REPO" fetch -q origin
 SHA="$(git -C "$REPO" rev-parse --verify "$REF^{commit}")"
-gate_check "$REPO" "$SHA" "$SKIP_GATE"
+# Both gates: the test gate (tools/ci-local.sh) and the live gate (tools/live-gate.sh). Each refusal says what to run.
+GATES_OK=1
+gate_check "$REPO" "$SHA" "$SKIP_GATE" || GATES_OK=0
+live_check "$REPO" "$SHA" "$SKIP_LIVE" || GATES_OK=0
+[ "$GATES_OK" = 1 ] || exit 1
 BUILD="${SHA:0:12}"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/webac-cf-${BUILD}-XXXX")"

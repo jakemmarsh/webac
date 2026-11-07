@@ -3,7 +3,7 @@
 # "Images"). The one build path: tools/deploy-aws.sh runs it on the laptop, CI runs
 # it after the tests pass. The EC2 host never builds; its deploy agent only pulls.
 #
-#   bash tools/build-push-images.sh <commit> [--only web|bridge] [--skip-gate]
+#   bash tools/build-push-images.sh <commit> [--only web|bridge] [--skip-gate] [--skip-live "<reason>"]
 #   bash tools/build-push-images.sh --print-context-paths   # the build context's paths
 #
 # Every image carries the full sha of each commit it serves: the host deploys
@@ -16,8 +16,10 @@
 # The context is a `git archive` of <commit> (never the working tree).
 #
 # The gate: <commit> must have passed tools/ci-local.sh (its pass stamp,
-# tools/lib/deploy-gate.sh); --skip-gate overrides with a loud warning. In GitHub Actions
-# the workflow's test job is the gate.
+# tools/lib/deploy-gate.sh); --skip-gate overrides with a loud warning. It must also have passed
+# tools/live-gate.sh (its live stamp); --skip-live "<reason>" overrides that. Both overrides are
+# logged in docs/deploy-overrides.md. In GitHub Actions the workflow's test job is the gate (the
+# live gate can't run there).
 #
 # AWS: AWS_PROFILE (default webac, unless credentials are in the environment, as in
 # CI) and AWS_REGION (default us-east-1). WEBAC_REGISTRY overrides the registry host.
@@ -28,13 +30,14 @@ set -euo pipefail
 CONTEXT_PATHS=(package.json package-lock.json tsconfig.json vite.config.ts
   tools/lib/vite-head-from-stat.ts tools/lib/temp-profile.ts packages services deploy tools/ac-agent .dockerignore)
 
-usage() { echo "usage: build-push-images.sh <commit> [--only web|bridge] [--skip-gate] | --print-context-paths" >&2; exit 2; }
-COMMIT="" ONLY="" SKIP_GATE=0
+usage() { echo 'usage: build-push-images.sh <commit> [--only web|bridge] [--skip-gate] [--skip-live "<reason>"] | --print-context-paths' >&2; exit 2; }
+COMMIT="" ONLY="" SKIP_GATE=0 SKIP_LIVE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --print-context-paths) printf '%s\n' "${CONTEXT_PATHS[@]}"; exit 0 ;;
     --only) [ $# -ge 2 ] || usage; ONLY="$2"; shift 2 ;;
     --skip-gate) SKIP_GATE=1; shift ;;
+    --skip-live) [ $# -ge 2 ] && [ -n "$2" ] || usage; SKIP_LIVE="$2"; shift 2 ;;
     -*) usage ;;
     *) [ -z "$COMMIT" ] || usage; COMMIT="$1"; shift ;;
   esac
@@ -48,7 +51,10 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SHA="$(git -C "$REPO" rev-parse --verify "$COMMIT^{commit}")"
 # shellcheck source=tools/lib/deploy-gate.sh
 . "$REPO/tools/lib/deploy-gate.sh"
-gate_check "$REPO" "$SHA" "$SKIP_GATE" || exit 1
+GATES_OK=1
+gate_check "$REPO" "$SHA" "$SKIP_GATE" || GATES_OK=0
+live_check "$REPO" "$SHA" "$SKIP_LIVE" || GATES_OK=0
+[ "$GATES_OK" = 1 ] || exit 1
 if [ -n "${WEBAC_REGISTRY:-}" ]; then
   REGISTRY="$WEBAC_REGISTRY"
 else

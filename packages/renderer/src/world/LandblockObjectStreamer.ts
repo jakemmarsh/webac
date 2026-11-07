@@ -44,7 +44,7 @@ import type { CellStruct } from '@ac/dat-parser/file-types/Environment.js';
 import type { Frame } from '@ac/dat-parser/file-types/Frame.js';
 import { DungeonCollision, collisionKey, type CollisionKey } from './DungeonCollision.js';
 import { addObjectCollision, type ObjectPhysicsModel } from './ObjectCollision.js';
-import { LandblockLoadScheduler, DEFAULT_LANDBLOCK_BUDGET_MS } from './LandblockLoadScheduler.js';
+import { LandblockLoadScheduler, DEFAULT_LANDBLOCK_BUDGET_MS, type LoadViewer } from './LandblockLoadScheduler.js';
 import { objectUnloadRadius, objectRingRadius, OBJECT_PREFETCH_RINGS } from './LandscapeDrawDistance.js';
 import {
   collectBuildingStabCells, collectWalkableCells, buildBuildingGates, collectDrawingPortalPolys,
@@ -157,10 +157,16 @@ export interface LandblockObjectStreamerDeps {
    * object closure) are resident, and a request to make them so. A block
    * that is not ready is not built (not even by loadNow); `requestBlock`'s
    * promise re-queues it. Absent → every block is ready (whole DATs).
+   *
+   * BUG.scenery-pop-in-order — `urgent`: the block is inside the object
+   * ring, so its objects should be on screen NOW (fetch at critical
+   * priority, ahead of the prefetch ring and anything else queued). A
+   * block already requested is asked again with urgent = true the moment
+   * it enters the ring, which promotes its in-flight fetch.
    */
   blockData?: {
     isReady(blockX: number, blockY: number): boolean;
-    request(blockX: number, blockY: number): Promise<unknown>;
+    request(blockX: number, blockY: number, urgent?: boolean): Promise<unknown>;
   };
   /**
    * RELEASE.dat-streaming — run one build step inside a streamed-DAT miss
@@ -274,6 +280,13 @@ export function resolveBuildingGatePolys(
   }
   return result;
 }
+
+/**
+ * BUG.scenery-pop-in-order — streamed blocks outside the object ring
+ * (prefetch) fetched at once; the rest wait, re-scored as the player moves.
+ * Blocks inside the ring are never held (critical priority).
+ */
+export const MAX_PREFETCH_BLOCK_FETCHES = 4;
 
 function keyOf(blockX: number, blockY: number): number {
   return ((blockX & 0xff) << 8) | (blockY & 0xff);
@@ -420,9 +433,21 @@ export class LandblockObjectStreamer {
     const d = this.deps;
     const key = keyOf(blockX, blockY);
     if (d.blockData && !this.forcedReady.has(key) && !d.blockData.isReady(blockX, blockY)) {
-      if (this.awaitingData.has(key)) return;
+      if (this.awaitingData.has(key)) { this.promoteIfInRing(blockX, blockY); return; }
+      const urgent = this.inRing(blockX, blockY);
+      // BUG.scenery-pop-in-order — a few prefetch fetches at a time: the rest
+      // wait here, re-scored from wherever the player is when one lands, so a
+      // block the player turned toward is never stuck behind ones issued
+      // earlier for a direction they left (and on a bandwidth-bound link the
+      // nearest block is not one of 25 sharing it).
+      if (!urgent && this.prefetchFetchesInWindow() >= MAX_PREFETCH_BLOCK_FETCHES) {
+        this.deferredData.add(key);
+        return;
+      }
+      this.deferredData.delete(key);
       this.awaitingData.add(key);
-      d.blockData.request(blockX, blockY).then(
+      if (urgent) this.urgentData.add(key);
+      d.blockData.request(blockX, blockY, urgent).then(
         () => this.requeueAfterData(blockX, blockY),
         (err) => { d.warn.warn(`landblock 0x${key.toString(16)} DAT files failed to stream — built with what is resident`, err); this.requeueAfterData(blockX, blockY, true); },
       );
@@ -442,11 +467,55 @@ export class LandblockObjectStreamer {
     }
   }
 
+  /** Waiting blocks already asked for at critical priority (BUG.scenery-pop-in-order). */
+  private readonly urgentData = new Set<number>();
+  /** Prefetch blocks not requested yet because MAX_PREFETCH_BLOCK_FETCHES were in flight. */
+  private readonly deferredData = new Set<number>();
+
+  /**
+   * Prefetch fetches in flight for blocks still inside the prefetch window:
+   * ones the player left behind (a teleport, a turn) no longer hold a slot,
+   * so they never starve the blocks around where the player is now.
+   */
+  private prefetchFetchesInWindow(): number {
+    if (!this.center) return 0;
+    const r = this.prefetchRadius;
+    let n = 0;
+    for (const key of this.awaitingData) {
+      if (this.urgentData.has(key)) continue;
+      const bx = (key >> 8) & 0xff, by = key & 0xff;
+      if (Math.abs(bx - this.center.x) <= r && Math.abs(by - this.center.y) <= r) n++;
+    }
+    return n;
+  }
+
+  /** Queue the deferred prefetch blocks again (scheduler order: nearest and ahead first). */
+  private releaseDeferred(): void {
+    if (this.deferredData.size === 0 || !this.center) return;
+    const r = this.prefetchRadius;
+    for (const key of this.deferredData) {
+      const bx = (key >> 8) & 0xff, by = key & 0xff;
+      if (Math.abs(bx - this.center.x) <= r && Math.abs(by - this.center.y) <= r) this.scheduler.request(bx, by, 0);
+    }
+    this.deferredData.clear();
+  }
+
+  /** A waiting block inside the object ring: promote its fetch once (BUG.scenery-pop-in-order). */
+  private promoteIfInRing(blockX: number, blockY: number): void {
+    const key = keyOf(blockX, blockY);
+    if (!this.deps.blockData || !this.awaitingData.has(key) || this.urgentData.has(key) || !this.inRing(blockX, blockY)) return;
+    this.urgentData.add(key);
+    // The first request's promise re-queues the block; this one only re-prioritises the fetch.
+    this.deps.blockData.request(blockX, blockY, true).catch(() => { /* reported by the first request */ });
+  }
+
   /** Files arrived for a waiting block: queue it if the player is still near. */
   private forcedReady = new Set<number>();
   private requeueAfterData(blockX: number, blockY: number, force = false): void {
     const key = keyOf(blockX, blockY);
     this.awaitingData.delete(key);
+    this.urgentData.delete(key);
+    this.releaseDeferred();
     if (force) this.forcedReady.add(key);
     if (!this.center) return;
     const r = this.prefetchRadius;
@@ -506,11 +575,13 @@ export class LandblockObjectStreamer {
    * @ 00506cd0 → update_block), so the ring follows the player's block here,
    * not only on main.ts's 96 m terrain-refresh cadence.
    */
-  pump(playerBlockX: number, playerBlockY: number): void {
+  pump(playerBlockX: number, playerBlockY: number, viewer?: LoadViewer | null): void {
     if (!this.center || this.center.x !== playerBlockX || this.center.y !== playerBlockY) {
       this.recenter(playerBlockX, playerBlockY);
     }
-    this.scheduler.pump(playerBlockX, playerBlockY);
+    // BUG.scenery-pop-in-order — budgeted loads go nearest-and-ahead first
+    // from the player's exact position and facing (blockLoadScore).
+    this.scheduler.pump(playerBlockX, playerBlockY, viewer);
   }
 
   private recenter(cx: number, cy: number): void {
@@ -520,6 +591,9 @@ export class LandblockObjectStreamer {
     this.scheduler.request(cx, cy, prefetch);
     this.unloadDistant(cx, cy);
     for (const block of this.blocks.values()) this.setBlockShown(block, this.inRing(block.bx, block.by));
+    // BUG.scenery-pop-in-order — blocks still waiting for their files that
+    // the ring just reached are fetched ahead of everything non-critical.
+    for (const key of this.awaitingData) this.promoteIfInRing((key >> 8) & 0xff, key & 0xff);
   }
 
   private inRing(bx: number, by: number): boolean {

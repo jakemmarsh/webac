@@ -27,7 +27,9 @@
  * research handler for a formula under 5 components or with no Talisman), 0x3FC
  * WERROR_MAGIC_INVALID_SPELL_TYPE ("You are not trained in that skill!"), 0x1E
  * WERROR_EXTERNAL_ACTIONS_LOCKED ("{Name} is busy."), and 0x468 WERROR_SKILL_TOO_LOW from a scroll.
- * Nor 0x43 WERROR_NO_MTABLE_DATA (a server motion failure: no text could say anything true), nor any
+ * Nor 0x43 WERROR_NO_MTABLE_DATA (the server could not play a motion: a healing kit in a combat stance, the
+ * 1999 table having the heal motions only in peace; both clients only end a repeat attack on it,
+ * WeenieErrorNotices.ts abortRepeatAttackOnFailure, BUG.ac1999-server-no-mtable-data), nor any
  * code the 1999 switch has an arm for.
  */
 import { weenieErrorText, weenieErrorTextType } from '@ac/shared';

@@ -5,7 +5,7 @@ import {
   freshState, killStep, logoutAndBackStep, mergeCreatureFacts, nearestTown, ok, panelStep, parseCreatureDanger, parsePlaythroughArgs,
   parseVendorListing, pickPrey, playthroughSteps, playthroughUrl, preyVerdict, renderReport, runPlaythrough,
   selectSteps, skip, statusLabel, vendorBuyStep,
-  type VendorStockRow, type Place, type MagicFacts, type SkillRow, adminPrepStep, armForKill, castAtSelfStep, castVerdict, magicModeStep, pickCastable, schoolTrained, schoolsToTrain, selfEnchantment, atCreatureSpell, ADMIN_PREP_COMMANDS, acceptedGift, castAtCreatureStep, parseGiveTable, refusedSaleEcho, cellTarget, nearestVendorSpot, sameFloorOnly, vendorSpotsIn, vendorWeenies, giveCandidates, giveStep, planSupplies, preyReachable, saleEcho, vendorSellStep, vendorSuppliesStep,
+  type VendorStockRow, type Place, type MagicFacts, type SkillRow, adminPrepStep, armForKill, castAtSelfStep, castVerdict, magicModeStep, pickCastable, schoolTrained, schoolsToTrain, selfEnchantment, atCreatureSpell, ADMIN_PREP_COMMANDS, acceptedGift, castAtCreatureStep, parseGiveTable, refusedSaleEcho, cellTarget, nearestVendorSpot, sameFloorOnly, vendorSpotsIn, vendorWeenies, giveCandidates, giveStep, planSupplies, preyReachable, saleEcho, vendorSellStep, vendorSuppliesStep, ACE_ADMIN_PREP_COMMANDS, adminPrepCommands, sellableTo, purchaseLanded,
 } from '../tools/lib/playthrough.ts';
 import type { AgentItem, AgentSpell } from '../packages/renderer/src/agent/types.ts';
 import type { AgentObject } from '../packages/renderer/src/agent/types.ts';
@@ -54,6 +54,13 @@ class FakeDriver implements PlaythroughDriver {
   screenshot(name: string) { this.shots++; return Promise.resolve(`${this.shots}-${name}.png`); }
   sleep(ms: number) { this.t += ms; this.handlers.onSleep?.(ms); return Promise.resolve(); }
   now() { return this.t; }
+  // The regression steps' page access (tests/verify-playthrough-regression-steps.ts drives those).
+  evaluate<T>(): Promise<T> { return Promise.resolve(null as T); }
+  click() { return Promise.resolve(); }
+  drag() { return Promise.resolve(); }
+  key() { return Promise.resolve(); }
+  consoleLines(): string[] { return []; }
+  freshProfile = true;
 }
 
 const ctxOf = (driver: FakeDriver, era = 'ac1999-retail'): StepContext => ({ driver, era: eraPlan(era), facts: null, state: freshState(), log: () => undefined });
@@ -1020,5 +1027,90 @@ describe('playthrough: fourth calibration (2026-10-23 1999 run with agenta99: Wa
     const r = await adminPrepStep.run(ctxOf(d));
     expect(r.status).toBe('fail');
     expect(r.detail).toBe('@spellcomps 74 5 (spell components for the casts): "Unknown command!": --admin needs an admin test account');
+  });
+});
+
+// The live gate's first fast run (2026-11-07): the gate-side failures on ACE / ClassicACE.
+describe('live gate fast-run fixes: era admin prep, vendor sell / buy checks', () => {
+  it('admin prep is era-correct: ACE and ClassicACE type @comps and @ci 2472; AC1999 its own', () => {
+    expect(adminPrepCommands(eraPlan('ac1999-retail')).map((c) => c.text)).toEqual(['@spellcomps 74 5', '@spawnwcidinv 2472']);
+    for (const e of ['eor', 'classicace-customdm']) expect(adminPrepCommands(eraPlan(e)).map((c) => c.text)).toEqual(['@comps', '@ci 2472']);
+    expect(ACE_ADMIN_PREP_COMMANDS.every((c) => c.unknown === 'missing')).toBe(true);
+  });
+
+  it('on ACE: @comps lands as new items (silently), @ci 2472 as a new caster', async () => {
+    let inv: AgentItem[] = [];
+    const d = new FakeDriver({
+      onChat: (t: string) => {
+        if (t === '@comps') inv = [...inv, { guid: 1, name: 'Lead Scarab', where: 'pack' } as AgentItem, { guid: 2, name: 'Hyssop', where: 'pack' } as AgentItem];
+        if (t === '@ci 2472') inv = [...inv, { guid: 3, name: 'Wand', where: 'pack', itemType: 0x8000 } as AgentItem];
+      },
+      inventory: () => inv,
+      spells: () => [],
+    });
+    const r = await adminPrepStep.run(ctxOf(d, 'eor'));
+    expect(d.chats).toEqual(['@comps', '@ci 2472']);
+    expect(r.status).toBe('ok');
+    expect(r.detail).toMatch(/^@comps: 2 new item\(s\) in the pack \(Lead Scarab, Hyssop\); @ci 2472: Wand #3 in the pack;/);
+  });
+
+  it('on ACE an "Unknown command" is a command the server lacks: skipped with the reason, the rest still run', async () => {
+    let inv: AgentItem[] = [];
+    const d = new FakeDriver({
+      onChat: (t: string) => {
+        if (t === '@comps') d.sig.chat.push('Unknown command: comps');
+        if (t === '@ci 2472') inv = [{ guid: 3, name: 'Wand', where: 'pack', itemType: 0x8000 } as AgentItem];
+      },
+      inventory: () => inv,
+      spells: () => [],
+    });
+    const r = await adminPrepStep.run(ctxOf(d, 'classicace-customdm'));
+    expect(r.status).toBe('ok');
+    expect(r.detail).toContain('@comps: skipped, this server has no such command ("Unknown command: comps")');
+    expect(r.detail).toContain('@ci 2472: Wand #3 in the pack');
+  });
+
+  it('sellableTo keeps only what the vendor\'s profile accepts (type mask, value range); no profile = everything', () => {
+    const water = { guid: 1, name: 'Water', where: 'pack', itemType: 0x20, value: 0 } as AgentItem; // food, worth nothing
+    const focus = { guid: 2, name: 'Foci of Strife', where: 'pack', itemType: 0x8000, value: 500 } as AgentItem; // caster
+    const bread = { guid: 3, name: 'Bread', where: 'pack', itemType: 0x20, value: 5 } as AgentItem;
+    const grocer = { itemTypes: 0x20, minValue: -1, maxValue: -1 };
+    expect(sellableTo([water, focus, bread], grocer, 'eor').map((i) => i.name)).toEqual(['Bread']);
+    expect(sellableTo([water, focus, bread], { itemTypes: 0x8000, minValue: -1, maxValue: 100 }, 'eor')).toEqual([]);
+    expect(sellableTo([water, focus], undefined, 'eor')).toEqual([water, focus]);
+  });
+
+  it('vendor-sell offers only what this vendor buys, and skips cleanly (no refused tries) when it buys nothing held', async () => {
+    const water = { guid: 1, name: 'Water', where: 'pack', itemType: 0x20, value: 0 } as AgentItem;
+    const bread = { guid: 3, name: 'Bread', where: 'pack', itemType: 0x20, value: 5 } as AgentItem;
+    const sold: number[] = [];
+    const mk = (inv: AgentItem[]) => new FakeDriver({
+      vendorAt: () => ({ ok: true, message: 'open' }),
+      vendorData: () => ({ name: 'Fispur Ansel the Grocer', guid: 0x77, items: [], currency: 'Pyreals', buys: { itemTypes: 0x20, minValue: -1, maxValue: -1 } }),
+      inventory: () => inv,
+      sell: (g: number) => { sold.push(g); return { ok: true, message: 'sold' }; },
+      close: () => undefined,
+    });
+    const ctx = ctxOf(mk([water, bread]), 'eor');
+    ctx.state.vendor = { guid: 0x77, name: 'Fispur Ansel the Grocer' };
+    const res = await runPlaythrough([vendorSellStep], ctx);
+    expect(res.records[0].status).toBe('ok');
+    expect(sold).toEqual([3]);
+    const torch = { guid: 4, name: 'Torch', where: 'pack', itemType: 0x80, value: 3 } as AgentItem;
+    const c2 = ctxOf(mk([torch]), 'eor');
+    c2.state.vendor = { guid: 0x77, name: 'Fispur Ansel the Grocer' };
+    const r2 = await runPlaythrough([vendorSellStep], c2);
+    expect(r2.records[0].status).toBe('skipped');
+    expect(r2.records[0].detail).toContain('buys none of what the pack holds (its trade: item types 0x20; held: Torch)');
+    expect(sold).toEqual([3]);
+  });
+
+  it('purchaseLanded: a new object, or a held stack of that name grown (ClassicACE\'s Arrow "onto a stack of 1")', () => {
+    const arrow1 = { guid: 0x8000c465, name: 'Arrow', where: 'pack', stack: 1 } as AgentItem;
+    const arrow2 = { ...arrow1, stack: 2 };
+    expect(purchaseLanded([arrow1], [arrow2], 'Arrow')).toEqual(arrow2);
+    expect(purchaseLanded([arrow1], [arrow1], 'Arrow')).toBeNull();
+    const fresh = { guid: 9, name: 'Torch', where: 'pack' } as AgentItem;
+    expect(purchaseLanded([arrow1], [arrow1, fresh], 'Torch')).toEqual(fresh);
   });
 });

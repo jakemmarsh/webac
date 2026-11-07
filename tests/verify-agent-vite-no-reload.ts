@@ -7,13 +7,15 @@
  * Drives a real Vite dev server through the real config files.
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
-import { createServer, type ViteDevServer } from 'vite';
+import { createServer, type Plugin, type ViteDevServer } from 'vite';
 import WebSocket from 'ws';
-import { AGENT_VITE_CONFIG_SOURCE, NO_RELOAD_ENV, noReloadServerOptions } from '../tools/lib/vite-no-reload';
+import {
+  AGENT_VITE_CONFIG_SOURCE, NO_RELOAD_CLIENT_SOURCE, NO_RELOAD_ENV, isViteClientRequest, noReloadClientPlugin, noReloadServerOptions,
+} from '../tools/lib/vite-no-reload';
 
 let tmp: string;
 let server: ViteDevServer | null = null;
@@ -69,5 +71,75 @@ describe('agent dev server: nothing in the page reloads it', () => {
     expect(noReloadServerOptions({ [NO_RELOAD_ENV]: '1' })).toEqual({ hmr: false, ws: false });
     expect(noReloadServerOptions({})).toEqual({});
     expect(noReloadServerOptions({ [NO_RELOAD_ENV]: '0' })).toEqual({});
+    expect(noReloadClientPlugin({})).toBeNull();
+    expect(noReloadClientPlugin({ [NO_RELOAD_ENV]: '1' })?.name).toBe('acjs-no-reload-client');
+  });
+});
+
+// The live gate's first full run (2026-11-07): with `ws: false` Vite still served the real /@vite/client,
+// which opened ws://…/?token=… and logged "Unexpected response code: 200" twice per load; the play-through
+// counts console errors, so every era's enter-world failed. A no-reload server now serves an inert client.
+describe('no-reload dev server: /@vite/client opens no socket', () => {
+  const clientOf = async (port: number) => (await fetch(`http://127.0.0.1:${port}/@vite/client`)).text();
+
+  it("the daemon's config serves the stand-in, with no WebSocket in it", async () => {
+    const port = await start('vite.agent.config.mjs');
+    const js = await clientOf(port);
+    expect(js).toContain('acjs no-reload /@vite/client stand-in');
+    expect(js).not.toMatch(/WebSocket|location\.reload/);
+  });
+
+  it('vite.config.ts\'s plugin (ACJS_VITE_NO_RELOAD=1) serves it too, query string or not; without it the real client', async () => {
+    server = await createServer({
+      configFile: false, root: tmp, logLevel: 'silent', publicDir: false, optimizeDeps: { noDiscovery: true, include: [] },
+      plugins: [noReloadClientPlugin({ [NO_RELOAD_ENV]: '1' }) as Plugin],
+      server: { host: '127.0.0.1', port: 0, watch: null, ...noReloadServerOptions({ [NO_RELOAD_ENV]: '1' }) },
+    });
+    await server.listen();
+    const port = (server.httpServer!.address() as AddressInfo).port;
+    expect(await clientOf(port)).toBe(NO_RELOAD_CLIENT_SOURCE);
+    expect(await (await fetch(`http://127.0.0.1:${port}/@vite/client?t=1`)).text()).toBe(NO_RELOAD_CLIENT_SOURCE);
+    expect(isViteClientRequest('/@vite/clientx')).toBe(false);
+    await server.close();
+    server = await createServer({ configFile: join(tmp, 'vite.config.ts'), root: tmp });
+    await server.listen();
+    expect(await clientOf((server.httpServer!.address() as AddressInfo).port)).toMatch(/new WebSocket/);
+  });
+
+  it('exports everything the real client exports (dev modules import them)', () => {
+    const real = readFileSync(join(__dirname, '..', 'node_modules/vite/dist/client/client.mjs'), 'utf8');
+    const names = (/export \{([^}]*)\}/.exec(real)?.[1] ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    expect(names.length).toBeGreaterThan(3);
+    for (const n of names) expect(NO_RELOAD_CLIENT_SOURCE, n).toMatch(new RegExp(`export (function|class) ${n}\\b`));
+  });
+
+  it('the stand-in applies and removes CSS as Vite does; hot contexts are inert; injectQuery matches Vite', async () => {
+    interface FakeEl { attrs: Record<string, string>; textContent: string; setAttribute(k: string, v: string): void; insertAdjacentElement(w: string, e: FakeEl): void }
+    const head: FakeEl[] = [];
+    const mk = (): FakeEl => {
+      const el: FakeEl = {
+        attrs: {} as Record<string, string>, textContent: '',
+        setAttribute(k: string, v: string) { el.attrs[k] = v; },
+        insertAdjacentElement(_w: string, e: typeof el) { head.splice(head.indexOf(el) + 1, 0, e); },
+      };
+      return el;
+    };
+    const g = globalThis as Record<string, unknown>;
+    const prev = g.document;
+    g.document = { createElement: mk, head: { appendChild: (e: never) => head.push(e), removeChild: (e: never) => head.splice(head.indexOf(e), 1) } };
+    try {
+      const mod = await import(`data:text/javascript,${encodeURIComponent(NO_RELOAD_CLIENT_SOURCE)}`);
+      mod.updateStyle('/a.css', 'a{}');
+      mod.updateStyle('/b.css', 'b{}');
+      expect(head.map((s) => [s.attrs['data-vite-dev-id'], s.textContent])).toEqual([['/a.css', 'a{}'], ['/b.css', 'b{}']]);
+      mod.updateStyle('/a.css', 'a{color:red}');
+      expect(head[0].textContent).toBe('a{color:red}');
+      mod.removeStyle('/a.css');
+      expect(head.map((s) => s.attrs['data-vite-dev-id'])).toEqual(['/b.css']);
+      const hot = mod.createHotContext('/x.ts');
+      expect(() => { hot.accept(); hot.dispose(() => {}); hot.on('x', () => {}); hot.invalidate(); }).not.toThrow();
+      expect(mod.injectQuery('/a.ts?x=1#h', 'import')).toBe('/a.ts?import&x=1#h');
+      expect(mod.injectQuery('https://e/a.ts', 'import')).toBe('https://e/a.ts');
+    } finally { g.document = prev; }
   });
 });

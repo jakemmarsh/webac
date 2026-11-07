@@ -313,8 +313,29 @@ export const BRIDGE_NEW_ACCOUNT_UNAVAILABLE_TOKEN = 'BRIDGE_NEW_ACCOUNT_UNAVAILA
 export const BRIDGE_NEW_ACCOUNT_UNAVAILABLE_TEXT = "New accounts can't be made through webAC on this server right now. "
   + 'Try again later, or log in with an existing account.';
 
-export function bridgeRefusalNotice(refusal: BridgeRefusal): ConnectionNotice {
+/**
+ * An egress world's own per-address session limit, which the bridge applies
+ * to the player's network (BRIDGE_SERVER_IP_CAP_REASON; DreamWeave 1, AC1999
+ * 2): a second tab of the same person on DreamWeave. Says it is this server's
+ * rule, not too many webAC tabs in general.
+ */
+export const BRIDGE_SERVER_IP_CAP_TOKEN = 'BRIDGE_SERVER_IP_CAP';
+const WINDOW_WORDS = ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
+export function bridgeServerIpCapText(perAddress: number | null | undefined): string {
+  if (!perAddress || perAddress < 1 || !Number.isInteger(perAddress)) {
+    return 'This server limits how many game windows one network can have on it, and yours has reached that. '
+      + 'Close one of your other webAC tabs on this server, then try again.';
+  }
+  const n = WINDOW_WORDS[perAddress] ?? String(perAddress);
+  return perAddress === 1
+    ? 'This server lets one game window in per network, and yours already has one on it. Close your other webAC tab on this server, then try again.'
+    : `This server lets ${n} game windows in per network, and yours already has ${n} on it. Close one of your other webAC tabs on this server, then try again.`;
+}
+
+export function bridgeRefusalNotice(refusal: BridgeRefusal, perAddress?: number | null): ConnectionNotice {
   switch (refusal) {
+    case 'server_ip_cap':
+      return Object.freeze({ surface: 'dialog', token: BRIDGE_SERVER_IP_CAP_TOKEN, stringId: 0, text: bridgeServerIpCapText(perAddress) });
     case 'new_account_unavailable':
       return Object.freeze({ surface: 'dialog', token: BRIDGE_NEW_ACCOUNT_UNAVAILABLE_TOKEN, stringId: 0, text: BRIDGE_NEW_ACCOUNT_UNAVAILABLE_TEXT });
     case 'world_full':
@@ -335,10 +356,11 @@ export function bridgeRefusalNotice(refusal: BridgeRefusal): ConnectionNotice {
  */
 export function connectionFailureNotice(event: {
   bridgeRefusal?: BridgeRefusal;
+  bridgeRefusalPerAddress?: number;
   serverNetError?: { stringId: number; tableId: number };
   netErrorId?: string;
 }): ConnectionNotice | null {
-  if (event.bridgeRefusal) return bridgeRefusalNotice(event.bridgeRefusal);
+  if (event.bridgeRefusal) return bridgeRefusalNotice(event.bridgeRefusal, event.bridgeRefusalPerAddress);
   if (event.serverNetError) return serverNetErrorNotice(event.serverNetError.stringId, event.serverNetError.tableId);
   if (event.netErrorId) return netErrorNotice(event.netErrorId);
   return null;

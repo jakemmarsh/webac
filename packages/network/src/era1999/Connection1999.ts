@@ -36,7 +36,7 @@ import { ISAAC } from '../ISAAC.js';
 import type { NetConnection } from '../NetWorker.js';
 import { type NetDiagnostics, TxRing, hex32, messageLabel, msAgo } from '../NetDiagnostics.js';
 import type { DisconnectCause } from '../ClientConnection.js';
-import { bridgeRefusalFromClose } from '../BridgeRefusal.js';
+import { bridgeRefusalFromClose, bridgeRefusalPerAddress } from '../BridgeRefusal.js';
 import { SocketHandover, type HandoverResult, type HandoverSocket } from '../SocketHandover.js';
 import { armOpenTimeout, WS_OPEN_TIMEOUT_MS } from '../WsOpenTimeout.js';
 import { Adapter1999, Group1999 } from './Adapter1999.js';
@@ -435,12 +435,16 @@ export class Connection1999 implements NetConnection {
       if (ws !== this.ws) return;
       // BUG.multi-tab-login-pingpong — the bridge refused the connection (BridgeRefusal.ts):
       // no session existed, so no 'disconnected'; the page shows why.
-      const refusal = bridgeRefusalFromClose(ev?.code);
+      const refusal = bridgeRefusalFromClose(ev?.code, ev?.reason);
       if (refusal) {
         this.deliberate = true;
         this.ws = null;
         this.ended();
-        this.emit({ type: 'error', error: `Bridge refused the connection (${refusal})`, bridgeRefusal: refusal });
+        const perAddress = bridgeRefusalPerAddress(ev?.code, ev?.reason);
+        this.emit({
+          type: 'error', error: `Bridge refused the connection (${refusal})`, bridgeRefusal: refusal,
+          ...(perAddress !== null ? { bridgeRefusalPerAddress: perAddress } : {}),
+        });
         return;
       }
       this.ended(ev?.code);

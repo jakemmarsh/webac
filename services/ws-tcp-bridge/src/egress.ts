@@ -911,7 +911,8 @@ export type LoginVerdict = 'ok' | 'moved' | 'new_account_cap' | 'new_account_una
 
 export type AcquireResult =
   | { ok: true; lease: EgressLease }
-  | { ok: false; refusal: EgressRefusal; detail: string };
+  /** `perAddress`: on 'ip_cap', the world's sessionsPerAddress the real IP already holds (the client's text names it). */
+  | { ok: false; refusal: EgressRefusal; detail: string; perAddress?: number };
 
 interface LeaseState {
   record: SessionRecord;
@@ -1131,7 +1132,10 @@ export class EgressManager {
     } catch (err) {
       return this.refuse(world.key, realIpHash, 'full', `state: ${(err as Error).message}`);
     }
-    if ('refusal' in picked) return this.refuse(world.key, realIpHash, picked.refusal, picked.detail);
+    if ('refusal' in picked) {
+      const refused = this.refuse(world.key, realIpHash, picked.refusal, picked.detail);
+      return picked.refusal === 'ip_cap' && !refused.ok ? { ...refused, perAddress: world.sessionsPerAddress } : refused;
+    }
     let { slot } = picked;
     const { state } = picked;
     // A fresh address must answer from the session's own world server too (pathProbeFor), on every attach this session makes.

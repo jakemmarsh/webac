@@ -182,6 +182,18 @@ export const DRAINING_HANDOVER_FRAME = JSON.stringify({ bridgeDraining: true, ha
 export const CLOSE_IP_CAP = 4429;
 export const CLOSE_IP_CAP_REASON = 'ip_cap';
 /**
+ * An egress world's own per-address session limit, applied to the player's
+ * real IP (egress_ip_cap): the same code, so a page that predates it still
+ * reads the bridge's ip_cap, with the reason `server_ip_cap:<sessionsPerAddress>`
+ * so a current page says it is this server's rule and how many it allows
+ * (@ac/network bridgeRefusalFromClose; DreamWeave allows 1, AC1999 2).
+ */
+export const CLOSE_SERVER_IP_CAP_REASON = 'server_ip_cap';
+export function serverIpCapCloseReason(perAddress: number | undefined): string {
+  return perAddress !== undefined && Number.isInteger(perAddress) && perAddress > 0
+    ? `${CLOSE_SERVER_IP_CAP_REASON}:${perAddress}` : CLOSE_SERVER_IP_CAP_REASON;
+}
+/**
  * An egress world (egress.ts) has no slot for this session: every egress
  * address already carries the world's per-address session limit, or the
  * cloud refused a new address. The client says the world is full through
@@ -209,17 +221,18 @@ export const CLOSE_NEW_ACCOUNT_UNAVAILABLE_REASON = 'new_account_unavailable';
 /**
  * Refusals the browser must be able to read (it can't see an HTTP status on
  * a refused upgrade): accepted only to be closed at once with these codes.
- * An egress world's per-real-IP session cap reads as the bridge's own ip_cap.
+ * An egress world's per-real-IP session cap has the bridge's ip_cap code and
+ * its own reason (the admission's `closeReason`: serverIpCapCloseReason).
  */
 const READABLE_REFUSALS: Readonly<Record<string, readonly [number, string]>> = {
   ip_cap: [CLOSE_IP_CAP, CLOSE_IP_CAP_REASON],
-  egress_ip_cap: [CLOSE_IP_CAP, CLOSE_IP_CAP_REASON],
+  egress_ip_cap: [CLOSE_IP_CAP, CLOSE_SERVER_IP_CAP_REASON],
   egress_full: [CLOSE_WORLD_FULL, CLOSE_WORLD_FULL_REASON],
 };
 
 type Admission =
   | { ok: true; target: Target | null; protocol: SessionProtocol; egress: EgressLease | null; handover: boolean; release: () => void }
-  | { ok: false; status: number; reason: string; message: string };
+  | { ok: false; status: number; reason: string; message: string; closeReason?: string };
 
 export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}): BridgeServer {
   const log = deps.log ?? makeLogger(config.debug);
@@ -503,7 +516,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       if (serverKey) perServer.dec(serverKey);
       if (!got.ok) {
         return got.refusal === 'ip_cap'
-          ? { ok: false, status: 429, reason: 'egress_ip_cap', message: 'Too many sessions to this server from this address' }
+          ? { ok: false, status: 429, reason: 'egress_ip_cap', message: 'Too many sessions to this server from this address', closeReason: serverIpCapCloseReason(got.perAddress) }
           : { ok: false, status: 503, reason: 'egress_full', message: 'No free egress address for this server' };
       }
       lease = got.lease;
@@ -551,7 +564,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
         if (readable && !socket.destroyed) {
           // Accepted only to say why: closed at once, never counted as a session.
           try {
-            wss.handleUpgrade(req, socket, head, (ws) => ws.close(readable[0], readable[1]));
+            wss.handleUpgrade(req, socket, head, (ws) => ws.close(readable[0], a.closeReason ?? readable[1]));
           } catch { rejectUpgrade(socket, a.status, a.message); }
           return;
         }

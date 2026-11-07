@@ -2,7 +2,7 @@ import { defineConfig, type Plugin } from 'vite';
 import { resolve } from 'path';
 import { existsSync, readFileSync } from 'fs';
 import { headFromStatPlugin } from './tools/lib/vite-head-from-stat';
-import { noReloadServerOptions } from './tools/lib/vite-no-reload';
+import { noReloadClientPlugin, noReloadServerOptions } from './tools/lib/vite-no-reload';
 
 /**
  * The build id the update notifier compares against /version.json
@@ -37,7 +37,9 @@ export default defineConfig(({ command }) => {
   define: { 'import.meta.env.VITE_ACJS_BUILD_ID': JSON.stringify(buildId) },
   // headFromStatPlugin: a dev HEAD for a DAT answers from stat instead of
   // reading all 926 MB through sirv (OPS.vite-head-dat-stall).
-  plugins: [emitBuildId(buildId), headFromStatPlugin()],
+  // noReloadClientPlugin: under ACJS_VITE_NO_RELOAD=1, /@vite/client is an inert stand-in with no socket
+  // (tools/lib/vite-no-reload.ts), so a no-reload page logs no failed-WebSocket errors.
+  plugins: [emitBuildId(buildId), headFromStatPlugin(), noReloadClientPlugin() as Plugin | null],
   root: resolve(__dirname, 'packages/renderer'),
   // Dev serves the DATs (and the weenie side-files) straight out of dat/.
   // A production build must NOT copy them into the bundle (1.4 GB of DATs +

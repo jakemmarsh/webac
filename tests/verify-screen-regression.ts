@@ -6,7 +6,7 @@ import { describe, it, expect } from 'vitest';
 import { PNG } from 'pngjs';
 import {
   diffPair, judge, formatReport, kindFor, mergeNoise, thresholdFor, clusterThresholdFor, largestChangedCluster,
-  isBlankWorld, dominantColour, DEFAULT_THRESHOLDS, DEFAULT_CLUSTER_FLOORS, type PairDiff,
+  isBlankWorld, dominantColour, DEFAULT_THRESHOLDS, DEFAULT_CLUSTER_FLOORS, IN_PROGRESS_FLOORS, type PairDiff,
 } from '../tools/screen-regression-lib';
 
 function png(w: number, h: number, paint: (x: number, y: number) => [number, number, number]): Buffer {
@@ -51,6 +51,27 @@ describe('diffPair', () => {
     expect(diffPair('map', 'panel', null, grey).status).toBe('missing-base');
     expect(diffPair('map', 'panel', grey, null).status).toBe('missing-head');
     expect(diffPair('map', 'panel', grey, png(50, 50, () => [80, 80, 80])).status).toBe('size-mismatch');
+  });
+});
+
+describe('in-progress captures (preworld/loading: the load meters at the instant of the grab)', () => {
+  const W = 1568, H = 775;
+  const splash = png(W, H, (x, y) => (x > 384 && x < 1184 && y > 87 && y < 687 ? [40, 60, 120] : [0, 0, 0]));
+  /** The splash with a block of `w`x`h` changed at the meter's place (the live gate's 12% vs 17%). */
+  const withChange = (w: number, h: number) => png(W, H, (x, y) => (x >= 860 && x < 860 + w && y >= 670 && y < 670 + h ? [255, 255, 255]
+    : x > 384 && x < 1184 && y > 87 && y < 687 ? [40, 60, 120] : [0, 0, 0]));
+  const judgeLoading = (b: Buffer, name = 'preworld/loading') =>
+    diffPair(name, 'preworld', splash, b, thresholdFor(name, 'preworld', {}), clusterThresholdFor(name, 'preworld', {})).status;
+
+  it('a meter-sized difference (a whole 325x46 meter, its fill and text) is not a change; no calibration lowers the floor', () => {
+    expect(judgeLoading(withChange(66, 73))).toBe('unchanged'); // the first run's 12% → 17% region
+    expect(judgeLoading(withChange(325, 46))).toBe('unchanged');
+    expect(thresholdFor('preworld/loading', 'preworld', { 'preworld/loading': { ratio: 0, cluster: 0 } })).toBe(IN_PROGRESS_FLOORS['preworld/loading'].ratio);
+    expect(clusterThresholdFor('preworld/loading', 'preworld', { 'preworld/loading': { ratio: 0, cluster: 0 } })).toBe(IN_PROGRESS_FLOORS['preworld/loading'].cluster);
+  });
+  it('a broken splash still fails, and every other pre-world capture keeps the strict bar', () => {
+    expect(judgeLoading(withChange(400, 300))).toBe('changed');
+    expect(judgeLoading(withChange(66, 73), 'preworld/login')).toBe('changed');
   });
 });
 

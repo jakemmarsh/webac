@@ -50,22 +50,33 @@ export interface CompatEntry {
    */
   warning?: string;
   /**
-   * The server caps accounts created from, and sessions online at once from,
-   * one IP address. Every webAC player reaches it from the bridge's single
-   * egress address, so the caps apply to all webAC players together. The
-   * launcher reads its login refusals in that light (a ClientLogOnFailed is a
-   * refused new account, a ServerFull is the session cap): renderer
-   * launcher/worldDirectory.ts loginFailureText.
+   * The world's per-address rules: it caps accounts created from, sessions
+   * online at once from, or characters in the world at once from one IP
+   * address. A world property, not an era's: every webAC player reaches it
+   * from the bridge's single address, so the caps apply to all webAC players
+   * together. The client reads the world's refusals in that light (a
+   * ClientLogOnFailed is a refused new account, a ServerFull is the session
+   * cap: renderer launcher/worldDirectory.ts loginFailureText; a
+   * "character still in the world" on entering is another webAC player's
+   * character: session/InWorldHolder.ts). An egress world
+   * (BRIDGE_EGRESS_SERVERS) drops it: there the bridge applies the rules per
+   * real player address (serverDirectory.buildDirectory). docs/per-ip-worlds.md.
    */
   perIpLimits?: PerIpLimits;
 }
 
-/** Per-IP caps (0 = unlimited), as the server's own config names them. */
+/** Per-address caps (0 = unlimited), as the server's own config names them where it has one. */
 export interface PerIpLimits {
-  /** max_accounts_per_ip: accounts ever created from one address. */
+  /** Accounts ever created from one address (AC1999: max_accounts_per_ip). */
   accounts: number;
-  /** max_sessions_per_ip: clients online at once from one address. */
+  /** Clients online at once from one address (AC1999: max_sessions_per_ip). */
   sessions: number;
+  /**
+   * Characters in the world at once from one address (DreamWeave): logins
+   * pass, and the enter is refused with CharacterError 0x0D
+   * (EnterGameCharacterInWorld). Absent = no such rule (0).
+   */
+  characters?: number;
 }
 
 export interface CompatOverlay {
@@ -134,6 +145,27 @@ export const AC1999_PUBLIC_COMPAT: CompatEntry = {
   ...AC1999_COMPAT,
   warning: "Existing accounts only: webAC can't create new ones here yet.",
   perIpLimits: { accounts: 2, sessions: 2 },
+};
+
+/**
+ * DreamWeave (ACE, modified): one character in the world per source address.
+ * Prod bridge logs 2026-11-02..07 (BUG.dreamweave-per-ip-enter, progress.md
+ * 2026-11-07): every enter it refused with 0x0D outside a reconnect came
+ * while another webAC session was in its world, every enter with none in got
+ * in, and no two webAC characters were ever in at once. Logins are not capped:
+ * two sessions from the bridge's one address reached the character list at
+ * once (11-03 18:49 and 22:04, while a third was in the world), and new
+ * accounts were made through webAC all week (char_list count=0, then
+ * chargen). So accounts 0, sessions 0, characters 1. The client says another
+ * webAC player is in the world instead of retail's "one of your characters".
+ * Per-session egress (BRIDGE_EGRESS_SERVERS `1f069f0d-…:1`) drops both, as
+ * for AC1999.
+ */
+export const DREAMWEAVE_COMPAT: CompatEntry = {
+  compat: 'ok',
+  // Fits the launcher's 2-line details note (shorter than Reefcull's registration line).
+  warning: 'Only one webAC player can be in this world at a time.',
+  perIpLimits: { accounts: 0, sessions: 0, characters: 1 },
 };
 
 /**
@@ -234,6 +266,8 @@ export const SERVER_COMPAT: CompatOverlay = {
     '0c4eec44-a1cc-44b9-84b3-9df3e283e54b': CUSTOM_DATS, // Dark Destiny
     // Two accounts / two sessions per IP (AC1999_PUBLIC_COMPAT). serverList.AC1999_PUBLIC_SERVER.id.
     ac1999: AC1999_PUBLIC_COMPAT,
+    // One character in the world per address (DREAMWEAVE_COMPAT).
+    '1f069f0d-1b2a-421b-a723-297486a82cd7': DREAMWEAVE_COMPAT, // DreamWeave
   },
   byEmu: {
     GDL: GDLE_BETA,

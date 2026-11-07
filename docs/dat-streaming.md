@@ -1311,3 +1311,46 @@ the split check answers at once: about 6 s instead of 46 s.
 Tests: tests/verify-slow-cache-bypass.ts (CacheHealth, boundedHas, bypassed reads, bypass starting waiting hedges,
 offline fallback, healthy inverse, unawaited writes, a fully stalled OPFS boot, has-only stalls, phases + bridge keys),
 tests/verify-ac1999-server-seed.ts (the bounded stored-patch read both ways).
+
+### 6.19 Object blocks load nearest and ahead first; the object ring is critical (BUG.scenery-pop-in-order, 2026-11-07)
+
+Report (Jake, 2026-09-30, around Holtburg): small trees and plants popped in right next to him while big trees far
+away were already drawn. Whole DATs never reproduce it; retail has no order to copy (LScape::update_block @ 005063a0
+loads its grid synchronously, CLandBlock::init_static_objs @ 00530a40 builds a full-detail block's statics, buildings
+and scenery at once). Objects appearing at their DIDDegrade distances (get_degrade @ 0051e4b0) is retail and unchanged.
+
+Root causes in the streamed path:
+1. LandblockLoadScheduler scored blocks by block-centre distance from the player's BLOCK. The 16 prefetch-ring blocks
+   tie in fours and went lowest key first: running east out of Holtburg, 0xA7B4 (behind) was fetched first and the
+   blocks ahead 4th and 11th-16th.
+2. Every block was fetched at prefetch priority, all 25 at once. A block the 3x3 object ring had already reached waited
+   behind the rest, behind blocks issued for a direction the player left, and after a teleport behind the old place's.
+   On a bandwidth-bound link the nearest block shared the link with 24 others.
+3. SceneryInstancePool.levelMeshes and DegradeLod.holderFor cached "no meshes" when a degrade level's GfxObj missed
+   (an evicted leaf, a swept template rebuilt later). Those instances drew nothing until the player was near enough
+   for another level.
+
+Fix: `blockLoadScore` (distance from the player to the block's nearest point + up to 128 m for a block behind the
+character's facing), re-scored every pump. Blocks inside the object ring are fetched at Critical
+(`blockData.request(bx, by, urgent)` → `DatClosure.ensureLandblock(…, Critical)`, which now promotes an in-flight
+block load). A waiting block is promoted the moment the ring reaches it. At most `MAX_PREFETCH_BLOCK_FETCHES` (4)
+prefetch fetches are in flight for blocks inside the current window; the rest wait and are re-scored as each lands.
+Missed degrade levels retry on `onDatMissResolved`.
+
+Measured offline with `tools/probe-scenery-popin-order.ts` (the shipped streamer, scenery builder and degrade selection
+over real DATs; a simulated block network of N s per block, 2 at a time; Holtburg east 1500 m at 10 m/s; "late" =
+drawn after retail would have drawn it):
+
+| run | before late (near < 60 m) | after late (near) |
+|---|---|---|
+| EoL, whole DATs | 0 | 0 |
+| EoL, 3 s/block | 124 (0) | 0 |
+| EoL, 4 s/block | 308 (0) | 0 |
+| EoL, 6 s/block | 2,346 (34; 6 never drawn) | 263 (0; 0) |
+| EoL, teleport Holtburg → 0xDA55, 4 s | 576 | 0 |
+| EoL, north-east, 4 s | 405 | 59 |
+| Dark Majesty, 4 s / 6 s | 203 / 867 | 0 / 267 |
+| AC1999, 4 s / 6 s | 357 / 1,150 | 0 / 477 |
+
+Usage: `npx tsx tools/probe-scenery-popin-order.ts --latency 4 --conc 2 [--path east|ne|teleport] [--era eol|dm|1999]`
+(dm / 1999 need ACJS_DAT_SETS_DIR). Prints before and after. Tests: tests/verify-bug-scenery-pop-in-order.ts.

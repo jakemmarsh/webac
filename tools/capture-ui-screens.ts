@@ -58,6 +58,8 @@ async function snapHealthy(p: Page, path: string): Promise<void> {
 }
 
 const VIEW = { width: 1568, height: 775 };
+/** The game-clock seconds every panel capture's map Date/Time lines are drawn at (see the pin before the panels). */
+const CAPTURE_CALENDAR_TICKS = 1_000_000;
 
 // --attach [endpoint] — capture against a real GPU by attaching to a Chrome
 // the user started themselves:
@@ -155,6 +157,18 @@ interface Capture {
   notes?: string;
 }
 
+/** Show the first side pack that holds an item in the grid (GameUI state, so the selection is left alone). */
+const SHOW_FILLED_SIDE_PACK_JS = `(() => { const ui = window.__ac && window.__ac.gameUI; const packs = (ui && ui.sidePackGuids) || [];
+  const i = packs.findIndex((p, k) => k > 0 && (ui.inventoryItems || []).some((it) => (it.containerId >>> 0) === (p >>> 0)));
+  if (i < 1) { console.error('[capture] inventory-sidepack: no side pack holds an item (prepare: ac1999-playthrough --admin --only pack-bars)'); return; }
+  ui.selectedPackSlot = i; ui.renderInventoryPanel(); })()`;
+const SHOW_MAIN_PACK_JS = `(() => { const ui = window.__ac && window.__ac.gameUI; if (!ui) return; ui.selectedPackSlot = 0; if (ui.inventoryVisible) ui.renderInventoryPanel(); })()`;
+/** Say in the log when no shortcut holds a used kit (the toolbar-used-kit capture is then the plain HUD). */
+const ASSERT_USED_KIT_SHORTCUT_JS = `(() => { const ui = window.__ac && window.__ac.gameUI; const d = window.acDebug;
+  const on = new Set(((d && d.toolbarShortcuts) ? d.toolbarShortcuts() : []).map((g) => g >>> 0));
+  const kit = ((ui && ui.inventoryItems) || []).find((it) => on.has(it.id >>> 0) && (it.maxStructure || 0) > 0 && (it.structure || 0) < it.maxStructure);
+  if (!kit) console.error('[capture] toolbar-used-kit: no shortcut holds a used kit (prepare: ac1999-playthrough --admin --only pack-bars)'); })()`;
+
 // Toolbar toggles are stateful — each capture lists the toggles to flip ON
 // before the shot; the harness flips the same ids OFF afterward so captures
 // stay independent.
@@ -189,6 +203,13 @@ const CAPTURES: Capture[] = [
   { name: 'report-abuse', actions: [{ clickId: 'tb-opt' }, { clickSel: '[data-options-tab="gameplay"]' }, { clickSel: '[data-options-action="Report Abuse"]' }], refs: [], layouts: ['0x21000018'] },
   // VISUAL.126 — second page: name + description inputs (click the dialog's first red button to advance).
   { name: 'report-abuse-input', actions: [{ clickId: 'tb-opt' }, { clickSel: '[data-options-tab="gameplay"]' }, { clickSel: '[data-options-action="Report Abuse"]' }, { evalJs: 'document.querySelector(".ac-report-abuse [data-element-id=\\"0x10000102\\"]").dispatchEvent(new MouseEvent("click",{bubbles:true}))' }], refs: [], layouts: ['0x21000018'] },
+  // webac#25 / #27 (2026-11-07): a side pack holding items, its contents in the grid (the pack column shows each
+  // pack's fullness bar), and the toolbar with a used kit on a shortcut (its uses bar). The character needs that
+  // state: `npx tsx tools/ac1999-playthrough.ts --era <era> --account <the capture account> --admin --only pack-bars`
+  // leaves a filled Sack and a used Crude Healing Kit on a shortcut. Without it the capture says so in the log and
+  // shows the plain inventory / HUD (both sides alike, so no false diff).
+  { name: 'inventory-sidepack', actions: [{ clickId: 'tb-inv' }, { evalJs: SHOW_FILLED_SIDE_PACK_JS }], cleanupJs: SHOW_MAIN_PACK_JS, refs: ['inventory-panel.jpg'], layouts: ['0x21000011'], notes: 'side pack open: fullness bars in the pack column, its contents in the grid' },
+  { name: 'toolbar-used-kit', actions: [{ evalJs: ASSERT_USED_KIT_SHORTCUT_JS }], refs: ['rawg_01.jpg'], layouts: ['0x21000016'], notes: 'no panels: the toolbar with a used kit on a shortcut slot (uses bar)' },
   { name: 'map', actions: [{ clickId: 'tb-map' }], refs: ['map-panel.jpg'], layouts: ['0x21000017'] },
   { name: 'map-house', actions: [{ clickId: 'tb-map' }, { clickSel: '[data-map-tab="House"]' }], refs: ['map-panel.jpg'], layouts: ['0x21000025'] },
 ];
@@ -677,6 +698,19 @@ async function run(): Promise<void> {
   };
 
   const manifest: Array<Capture & { file: string }> = [];
+
+  // Time-dependent text, pinned so two captures taken hours apart (the live gate's cached base) draw the same:
+  // the World panel's Date/Time lines read the game clock (gmMapUI::Update re-sets them every frame), so they
+  // get a fixed clock (CAPTURE_CALENDAR_TICKS), set through the same property on every build that has the map's
+  // clock (GameUI.setCalendarSource, 2026-10-03). The live gate's first fast run (2026-11-07) failed EoR's map
+  // on that line alone. Scenes pin their own sky time above; chat timestamps are an option that is off.
+  const pinnedClock = await page.evaluate((ticks) => {
+    const ui = (window as unknown as { __ac?: { gameUI?: Record<string, unknown> } }).__ac?.gameUI;
+    if (!ui || typeof ui.calendarClock !== 'function') return false;
+    ui.calendarClock = () => ticks;
+    return true;
+  }, CAPTURE_CALENDAR_TICKS);
+  console.log(`[capture] game clock for the map's Date/Time lines ${pinnedClock ? `pinned at ${CAPTURE_CALENDAR_TICKS}` : 'not pinnable (no calendar clock yet)'}`);
 
   // Optional per-panel filter: `npx tsx tools/capture-ui-screens.ts inventory map`
   // captures only the named panels (the workflow loop re-captures one panel

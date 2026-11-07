@@ -15,6 +15,8 @@ verification/screens/
 .provision-lanes
 verification/screen-regression/
 verification/screen-regression-*/
+# tools/live-gate.sh run logs, step reports and screenshots (the stamp itself lives in .git/acjs-gate/)
+verification/live-gate/
 
 # Retail A/B (tools/capture-retail-ab.ts): retail.png, sheet.png, meta.json and report.md are committed evidence
 verification/retail-ab/*/ours.png

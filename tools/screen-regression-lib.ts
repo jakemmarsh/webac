@@ -228,10 +228,26 @@ export function noiseEntry(v: number | NoiseEntry | undefined): NoiseEntry | und
   return typeof v === 'number' ? { ratio: v } : v;
 }
 
+/**
+ * Captures that show a moment of something in progress, so the two sides can't be pinned to the same frame:
+ * floors no calibration lowers (calibration runs both sides back to back, the gate doesn't).
+ *
+ * preworld/loading is grabbed while the DATs load: the PatchField meters' fill and the "N% of …K" line are
+ * the load's progress at that instant, and the meter art cycles 15 frames a second (main.ts animateMeters).
+ * The live gate's first full run (2026-11-07) failed all three screen lanes on it alone: 12% on the base
+ * (its own cold Vite) against 17% on HEAD (the gate's warm one), 361-875 px, largest region 320-526 px. The
+ * floor allows the two meters (325x46 each) and their text to differ; a broken splash (its 800x600 art,
+ * the layout, the copyright, the Cancel button) still changes far more.
+ */
+export const IN_PROGRESS_FLOORS: Record<string, { ratio: number; cluster: number }> = {
+  'preworld/loading': { ratio: 0.03, cluster: 16000 },
+};
+
 export function thresholdFor(name: string, kind: CaptureKind, noise: NoiseFloor = {}): number {
   const seen = noiseEntry(noise[name])?.ratio;
   const base = DEFAULT_THRESHOLDS[kind];
-  return seen === undefined || seen <= base ? base : seen * 1.5 + 0.0005;
+  const t = seen === undefined || seen <= base ? base : seen * 1.5 + 0.0005;
+  return Math.max(t, IN_PROGRESS_FLOORS[name]?.ratio ?? 0);
 }
 
 /**
@@ -243,7 +259,7 @@ export function thresholdFor(name: string, kind: CaptureKind, noise: NoiseFloor 
  */
 export function clusterThresholdFor(name: string, kind: CaptureKind, noise: NoiseFloor = {}): number {
   const e = noiseEntry(noise[name]);
-  const base = DEFAULT_CLUSTER_FLOORS[kind];
+  const base = Math.max(DEFAULT_CLUSTER_FLOORS[kind], IN_PROGRESS_FLOORS[name]?.cluster ?? 0);
   if (!e) return base;
   if (e.cluster === undefined) return Infinity;
   return e.cluster <= base ? base : Math.ceil(e.cluster * 1.5 + 64);

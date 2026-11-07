@@ -16,6 +16,7 @@
 #   … --no-build                                  # skip the local build (CI already pushed)
 #   … --urgent                                    # deploy the bridge even with 2+ old bridges draining
 #   … --skip-gate                                 # deploy a commit that hasn't passed ci-local.sh (loud)
+#   … --skip-live "<reason>"                      # deploy a commit that hasn't passed live-gate.sh (loud)
 #
 # Draining cap: the host refuses a BRIDGE deploy while 2 or more retired bridges are still
 # draining their sessions (it prints how many, with their session counts), unless --urgent.
@@ -23,14 +24,16 @@
 # 6 h on a 2 GB host, and there were ~15 deploys on 2026-10-17.
 #
 # The gate: the commit must have passed tools/ci-local.sh (its pass stamp; CI is out, so
-# that is the gate). The refusal prints the exact command; --skip-gate overrides it.
+# that is the gate). The refusal prints the exact command; --skip-gate overrides it. It must also
+# have passed tools/live-gate.sh (the play-through in every era + the screen regression; its live
+# stamp); --skip-live "<reason>" overrides that. Every override is logged in docs/deploy-overrides.md.
 set -euo pipefail
 export AWS_PROFILE="${AWS_PROFILE:-webac}" AWS_REGION="${AWS_REGION:-us-east-1}"
 STACK="${WEBAC_STACK:-webac}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
-usage() { echo "usage: deploy-aws.sh [--ref <commit> | --pin <commit> | --unpin] [--only web|bridge] [--force] [--no-build] [--urgent] [--skip-gate]" >&2; exit 2; }
-REF="" PIN="" UNPIN=0 ONLY="" FORCE=0 BUILD=1 URGENT=0 SKIP_GATE=0
+usage() { echo 'usage: deploy-aws.sh [--ref <commit> | --pin <commit> | --unpin] [--only web|bridge] [--force] [--no-build] [--urgent] [--skip-gate] [--skip-live "<reason>"]' >&2; exit 2; }
+REF="" PIN="" UNPIN=0 ONLY="" FORCE=0 BUILD=1 URGENT=0 SKIP_GATE=0 SKIP_LIVE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --ref) [ $# -ge 2 ] || usage; REF="$2"; shift 2 ;;
@@ -41,6 +44,7 @@ while [ $# -gt 0 ]; do
     --no-build) BUILD=0; shift ;;
     --urgent) URGENT=1; shift ;;
     --skip-gate) SKIP_GATE=1; shift ;;
+    --skip-live) [ $# -ge 2 ] && [ -n "$2" ] || usage; SKIP_LIVE="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -60,13 +64,17 @@ echo "deploying ${SHA:0:12} ($want)"
 
 # shellcheck source=tools/lib/deploy-gate.sh
 . "$REPO/tools/lib/deploy-gate.sh"
-gate_check "$REPO" "$SHA" "$SKIP_GATE" || exit 1
+GATES_OK=1
+gate_check "$REPO" "$SHA" "$SKIP_GATE" || GATES_OK=0
+live_check "$REPO" "$SHA" "$SKIP_LIVE" || GATES_OK=0
+[ "$GATES_OK" = 1 ] || exit 1
 fi
 
 if [ "$BUILD" = 1 ] && [ "$LIVE" = 0 ]; then
   build=(bash "$REPO/tools/build-push-images.sh" "$SHA")
   [ -n "$ONLY" ] && build+=(--only "$ONLY")
   [ "$SKIP_GATE" = 1 ] && build+=(--skip-gate)
+  [ -n "$SKIP_LIVE" ] && build+=(--skip-live "$SKIP_LIVE")
   "${build[@]}"
 fi
 

@@ -188,7 +188,7 @@ import { NametagAssessQueue, NametagOverlay, chooseNametags, nametagAllegiance, 
 import { exposeDebugGlobal, readDebugGlobal, debugBag, debugGlobalsEnabled } from './utils/debugGlobals.js';
 import { resolveUrlLogin, resolveUrlWorld, withoutUrlWorld } from './launcher/urlLogin.js';
 import { urlOverridesEnabled } from './config/urlOverrides.js';
-import { accountBootLoginText, bridgeHttpOrigin, bridgeUrlWithServer, loadWorldDirectory, loginFailureText, type World } from './launcher/worldDirectory.js';
+import { accountBootLoginText, bridgeHttpOrigin, bridgeUrlWithServer, loadWorldDirectory, loginFailureText, perIpCharacterLimit, type World } from './launcher/worldDirectory.js';
 import { charselWorldName, eraSwitchFor, eraSwitchLogin, launcherEraTarget, launcherLogin, resumableEraSwitch, type LauncherEnter, type LauncherLogin } from './launcher/launcherLogin.js';
 import { EOR_ERA_ID, eraProfile, type DatRole, type EraProfile } from './era/EraProfiles.js';
 import { eraClientRules, unsupportedFeatures, correctedOptionsWord, type EraFeature, type EraClientRules } from './era/EraFeatures.js';
@@ -253,6 +253,7 @@ import { stepPlayerMovement, stepMoveToMotion, type MovementServices, type Movem
 import { addCreatureObstacles } from './world/CreatureCollision.js';
 import { jumpLaunchVelocity } from './player/JumpLaunch.js';
 import { bounceVelocity, initialSlopeContact, resolveSlopeContact, type Vec3 as SlideVec3 } from './player/SteepSlide.js';
+import { landingGroundVelocity, type GroundVelocity } from './player/LandingCoast.js';
 import { WORLD_SELECT_EVENT, isWorldSelectPress, releaseChatFocus, selectionAfterFind } from './controllers/WorldSelectPress.js';
 import { escapeAction } from './controllers/EscapeAction.js';
 import { maybeStopCompletely as maybeStopCompletelyImpl, stopCompletely as stopCompletelyImpl, type StopCompletelyDeps } from './controllers/StopCompletely.js';
@@ -358,7 +359,8 @@ import { sweepHeightfield, nearestContact } from './world/MissilePhysics.js';
 import { applyPublicPropertyDataIdUpdate } from './network/applyPublicPropertyDataId.js';
 import { ServerObjectManager, isSequenceNewer, isServerActionNewer1999, applyPublicUpdatePropertyInt, applyPublicUpdatePropertyIntToHudTarget, TRANSLUCENCY_ORIGINAL_KEY } from './world/ServerObjectManager.js';
 import { type AppearanceData, buildAppearanceOverrides, transplantPartChildren } from './models/AppearanceOverrides.js';
-import { attachHeldChild, buildWieldedItemMesh, heldCopiesUnder, heldCopyGuidAt, stripHeldCopies, itemVisualDescOf, serverObjectPlacement, wieldedMeshesBuiltWithMiss, WIELDED_PLACEMENT_KEY } from './models/WieldedItemVisual.js';
+import { attachHeldChild, buildWieldedItemMesh, heldCopiesUnder, heldCopyGuidAt, stripHeldCopies, itemVisualDescOf, serverObjectPlacement, wieldedMeshesBuiltWithMiss, WIELDED_FRAME_KEY, WIELDED_PLACEMENT_KEY } from './models/WieldedItemVisual.js';
+import { heldPoseOf, type HeldPose } from './models/HeldPose.js';
 import { SelectionLighting, SearchReason, lightingLevelsForMode, applyPlayerModelLighting, type LightingCopies } from './world/SelectionLighting.js';
 import { worldHoverTooltipText } from './ui/WorldHoverTooltip.js';
 import { worldHoverHint1999 } from './ui/HudTooltips.js';
@@ -384,7 +386,7 @@ import {
   addTextToScroll, addServerTextLine, attackerNotificationLine, showDefenderNotification, evasionAttackerLine, evasionDefenderLine,
   victimOrKillerLine, playerKilledLine, transientStringLine, channelIndexLines, channelListLines,
   tradeClosedLine, allegianceLoginLine, confirmationRequestText} from './ui/ServerMessageText.js';
-import { deliverWeenieError, ATTEMPT_FAILED_NAME_TEMPLATED } from './ui/WeenieErrorNotices.js';
+import { deliverWeenieError, ATTEMPT_FAILED_NAME_TEMPLATED, abortRepeatAttackOnFailure } from './ui/WeenieErrorNotices.js';
 import { SocialRefusalMemo } from './ui/SocialRefusalLines1999.js';
 import { connectionLostText, characterErrorNotice, connectionFailureNotice, linkDeadCause, linkSampleIsDead, NET_ERROR_STRING_TABLE, REQUEST_TIMEOUT_S, type ConnectionNotice } from './ui/ConnectionNotices.js';
 import { accountRefusalRoute, characterErrorRoute, disconnectedQuitAction, staleSessionWaitText, type DisconnectedCause } from './session/RefusalRoute.js';
@@ -2549,7 +2551,8 @@ async function main() {
       return {
         blockData: {
           isReady: (bx: number, by: number) => sd.closure.isLandblockReady((bx << 8) | by),
-          request: (bx: number, by: number) => sd.closure.ensureLandblock((bx << 8) | by),
+          // BUG.scenery-pop-in-order — a block the object ring already reached is critical.
+          request: (bx: number, by: number, urgent?: boolean) => sd.closure.ensureLandblock((bx << 8) | by, urgent ? FetchPriority.Critical : FetchPriority.Prefetch),
         },
         trackMisses: <T,>(step: () => T) => {
           const { result, scope } = sd.store.scoped(step);
@@ -3244,7 +3247,7 @@ async function main() {
     syncObjectLights(itemMesh, setupModelRenderer.loadSetupModel(setupId)?.lights,
       serverObjectManager?.getObject(wieldedGuid)?.physicsState ?? visual.physicsState ?? 0);
     heldCopyScripts?.start(itemMesh, setupId);
-    console.log(`[Wield] Attached ${equipped.name} (setup 0x${setupId.toString(16)}) to part_${loc.partId} (location=${parentLocation}, placement=${itemMesh.userData[WIELDED_PLACEMENT_KEY]}${placement === undefined ? ' from CreateObject' : ' from ParentEvent'})`);
+    console.log(`[Wield] Attached ${equipped.name} (setup 0x${setupId.toString(16)}) to part_${loc.partId} (location=${parentLocation}, placement=${itemMesh.userData[WIELDED_PLACEMENT_KEY]}${placement === undefined ? ' from CreateObject' : ' from ParentEvent'}, frame=${itemMesh.userData[WIELDED_FRAME_KEY] ?? 'identity'})`);
   }
 
   /**
@@ -3511,7 +3514,7 @@ async function main() {
     // BUG.server-object-setup-lights — the held item's own Setup lights.
     syncObjectLights(itemMesh, setupModelRenderer.loadSetupModel(item.setupId)?.lights, item.physicsState);
     heldCopyScripts?.start(itemMesh, item.setupId);
-    console.log(`[Wield] Attached ${item.name} to ${creature.name} part_${loc.partId} (location=${parentLocation}, placement=${itemMesh.userData[WIELDED_PLACEMENT_KEY]}${placement === undefined ? ' from CreateObject' : ' from ParentEvent'})`);
+    console.log(`[Wield] Attached ${item.name} to ${creature.name} part_${loc.partId} (location=${parentLocation}, placement=${itemMesh.userData[WIELDED_PLACEMENT_KEY]}${placement === undefined ? ' from CreateObject' : ' from ParentEvent'}, frame=${itemMesh.userData[WIELDED_FRAME_KEY] ?? 'identity'})`);
   }
 
   /**
@@ -3904,6 +3907,10 @@ async function main() {
   let jumpVelocityY = 0;       // current vertical velocity (m/s)
   let jumpVelocityX = 0;       // horizontal momentum preserved during jump
   let jumpVelocityZ = 0;
+  // BUG.remote-running-jump-snapback — the velocity left on the body after a
+  // landing (retail HitGround keeps it; calc_friction takes it away on the
+  // walkable: player/LandingCoast.ts). Null = none.
+  let groundVelocity: GroundVelocity | null = null;
   // RECON.transition-stepup-stepdown-port.a — in contact with an unwalkable
   // terrain face: sliding down it under gravity (player/SteepSlide.ts).
   let slopeContact = initialSlopeContact();
@@ -6101,6 +6108,7 @@ async function main() {
     jumpVelocityY = 0;
     jumpVelocityX = 0;
     jumpVelocityZ = 0;
+    groundVelocity = null;
     slopeContact = initialSlopeContact();
     prevGroundedFeetY = null;
     // BUG.6 — remember a pre-game teleport so the player's own CreateObject
@@ -6363,6 +6371,7 @@ async function main() {
           jumpVelocityX = velocityX ?? 0;
           jumpVelocityZ = velocityY ?? 0;
           jumpVelocityY = velocityZ ?? 0;
+          groundVelocity = null;
         } else {
           // Cancel client-side vertical/jump momentum — the server has no
           // real physics velocity for this object, i.e. it's grounded.
@@ -6372,6 +6381,7 @@ async function main() {
           jumpVelocityY = 0;
           jumpVelocityX = 0;
           jumpVelocityZ = 0;
+          groundVelocity = null;
         }
         slopeContact = initialSlopeContact(); // the next frame re-reads the contact plane
         prevGroundedFeetY = null; // GAP.7 — re-seed walk-off tracking post-snap
@@ -6559,6 +6569,7 @@ async function main() {
     jumpVelocityY = 0;
     jumpVelocityX = 0;
     jumpVelocityZ = 0;
+    groundVelocity = null;
     slopeContact = initialSlopeContact();
     prevGroundedFeetY = null;
     // UI: panels, overlays (a session back at AuthConnected must not ship
@@ -8758,6 +8769,8 @@ async function main() {
     showEnteringWorld: () => gameUI.showEnteringWorldDialog(),
     confirm: (text, onAnswer) => { gameUI.showConfirmationDialog(text, onAnswer); return () => gameUI.hideConfirmationDialog(); },
     report: (kind) => preworldReporter?.enterHeld(kind),
+    // BUG.dreamweave-per-ip-enter — a world whose one-character-per-address rule every webAC player shares.
+    charactersPerAddress: () => perIpCharacterLimit(launcherWorld),
   });
   // BUG.gdle-transient-login-failed — GDLE / the AC1999 server answer a correct login with
   // "Client logon failed" now and then (their account query failed, e.g. busy saving the
@@ -13025,7 +13038,9 @@ async function main() {
         );
         console.warn(`[AC] InventoryServerSaveFailed: item=0x${data.itemGuid.toString(16)} error=${data.errorType.toString(16)} attempt=${JSON.stringify(attempt.text)} sink="${errText}"`);
         // SWEEP1999.messages INV-3 — the 1999 client's 0xa0 case prints only the verb line above.
-        const shown = ATTEMPT_FAILED_NAME_TEMPLATED.has(data.errorType) || !eraRules.inventoryFailedRunsFailureEvent
+        const runsFailureEvent = !ATTEMPT_FAILED_NAME_TEMPLATED.has(data.errorType) && eraRules.inventoryFailedRunsFailureEvent;
+        if (runsFailureEvent) abortRepeatAttackOnFailure(data.errorType, attackRequest); // BUG.ac1999-server-no-mtable-data
+        const shown = !runsFailureEvent
           ? null : refusalQuietly(() => deliverWeenieError(gameUI, data.errorType, errText, eraRules.failureEventText));
         // TELEMETRY.refusal-events — 0x00A0 from every server family (the AC1999 server's NotifyInventoryFailedEvent too);
         // a code-0 failure (a refused vendor buy / sell) is reported with the attempt line, or none.
@@ -13655,6 +13670,8 @@ async function main() {
         // chat line, no arm → nothing. ActionCancelled (0x36) is an arm
         // ("Action cancelled!", spew) — ACE's ManaStone.cs:98 sends it.
         if (data.errorType !== WeenieError.None) {
+          // BUG.ac1999-server-no-mtable-data — HandleFailureEvent's first step: 0x23 / 0x36 / 0x3e / 0x43 / 0x3f7 end a repeat attack.
+          abortRepeatAttackOnFailure(data.errorType, attackRequest);
           const shown = refusalQuietly(() => deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType), eraRules.failureEventText));
           refusalReporter?.serverCode('use_done', data.errorType, weenieErrorText(data.errorType), shown.sink);
         }
@@ -13878,6 +13895,9 @@ async function main() {
         // (ui/SocialRefusalLines1999.ts), named after the target the request went to.
         // BUG.ac1999-silent-refusals — likewise an out-of-range cast, a healing kit, a wand or a key the server
         // refused with no text (ui/SilentRefusalLines1999.ts): end of retail's line for the code.
+        // BUG.ac1999-server-no-mtable-data — HandleFailureEvent's first step (both clients): a repeat attack ends on
+        // 0x23 / 0x36 / 0x3e / 0x43 / 0x3f7. 0x43 (the AC1999 server's healing kit in a combat stance) prints nothing.
+        abortRepeatAttackOnFailure(data.errorType, attackRequest);
         const departure = socialRefusalMemo?.lineFor(data.errorType, performance.now(), (g) => serverObjectManager?.getObject(g)?.name) ?? null;
         const silentLine = departure ? null : eraRules.silentRefusalLines?.get(data.errorType) ?? null;
         const shown = refusalQuietly(() => deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType), eraRules.failureEventText, departure?.arm ?? silentLine));
@@ -13991,6 +14011,7 @@ async function main() {
         // (" is now the leader of this fellowship."), the PK "fails to
         // affect you" family is type 7, "_ is already at full health!" /
         // "_ is already one of your followers" are 0x1a spew.
+        abortRepeatAttackOnFailure(data.errorType, attackRequest); // BUG.ac1999-server-no-mtable-data (the same switch)
         const shown = refusalQuietly(() => deliverWeenieError(gameUI, data.errorType, text));
         // The code's template ('_' for the value: a name never goes out).
         refusalReporter?.serverCode('weenie_error_str', data.errorType, weenieErrorWithStringText(data.errorType) || null, shown.sink);
@@ -15634,6 +15655,11 @@ async function main() {
         console.log(`[AC] Sent AddShortCut: idx=${index} obj=0x${objectGuid.toString(16)}`);
       },
       /** The object each of the era's item-shortcut slots holds (0 = empty; 18, or the 1999 tray's 9). */
+      /** The pose the player's held copy of `guid` draws (HeldPose: holding frame + each part's placement frame), or null when none hangs. */
+      heldPose: (guid: number): HeldPose | null => {
+        const copy = playerModel ? heldCopiesUnder(playerModel, guid >>> 0)[0] : undefined;
+        return copy ? heldPoseOf(copy) : null;
+      },
       toolbarShortcuts: (): number[] => Array.from({ length: itemShortcutRestorer.slotCountInUse }, (_, i) => itemShortcutRestorer.objectAt(i)),
       /** Remove a shortcut bar slot. Per GameActionRemoveShortcut.cs: index u32. */
       removeShortcut: (index: number) => {
@@ -18341,6 +18367,7 @@ async function main() {
           return {
             name: v.name, guid: v.vendorGuid >>> 0, currency: v.altCurrencyName ?? 'Pyreals',
             items: v.buyItems.filter((i) => i.guid).map((i) => ({ guid: i.guid! >>> 0, name: i.name, price: i.price, ...(i.stackSize && i.stackSize > 1 ? { stack: i.stackSize } : {}), ...((i.itemType ?? 0) & ItemType.Service ? { service: true } : {}) })),
+            ...(v.profile ? { buys: { itemTypes: v.profile.itemTypes >>> 0, minValue: v.profile.minValue, maxValue: v.profile.maxValue } } : {}),
           };
         },
         // The vendor bar's Buy / Sell buttons send their whole list in one message (onBuyList / onSellList).
@@ -20500,6 +20527,8 @@ async function main() {
       const frameStartSliding = slopeContact.velocity !== null;
       // The heading before this frame's turn: the MoveToState is stamped with it (MovementSync.moveToStateYaw).
       const inputTimeYaw = cameraController.playerYaw;
+      // The landing coast's share of this frame's move (not the sequence's steps: the draw lag skips it).
+      let frameCoastX = 0, frameCoastZ = 0;
 
       for (const stepDt of physSteps) {
         // Save camera position before update to compute movement delta
@@ -20520,11 +20549,14 @@ async function main() {
             inDungeon: playerInDungeon, airborne: isPlayerAirborne,
             jumpVelocityX, jumpVelocityZ,
             slideVelocity: isPlayerAirborne ? null : slopeContact.velocity,
+            groundVelocity: isPlayerAirborne || slopeContact.velocity ? null : groundVelocity,
           },
           camPos.x - prevCamX, camPos.z - prevCamZ, stepDt, movementServices,
         );
         playerWorldX = step.x;
         playerWorldZ = step.z;
+        if (step.groundVelocity !== undefined) groundVelocity = step.groundVelocity;
+        if (step.coastMoved) { frameCoastX += step.coastMoved.x; frameCoastZ += step.coastMoved.z; }
         if (step.slideVelocity) {
           slopeContact.velocity = step.slideVelocity;
           slopeContact.stationaryFrames = step.slideMoved ? 0 : slopeContact.stationaryFrames + 1;
@@ -20675,6 +20707,7 @@ async function main() {
           jumpVelocityY = 0;
           jumpVelocityX = 0;
           jumpVelocityZ = 0;
+          groundVelocity = null;
           jumpTelemetry.launchHeight = 0;
           jumpTelemetry.peakY = 0;
           jumpTelemetry.airtime = 0;
@@ -20701,6 +20734,14 @@ async function main() {
             return { x: w.x, y: 0, z: w.z };
           },
         );
+        // BUG.remote-running-jump-snapback — the slide's velocity is the body's:
+        // HitGround keeps it on the walkable (friction then stops it; a stuck
+        // stop has none: handle_all_collisions zeroed it), LeaveGround replaces it.
+        if (slope.event === 'hit' && slopeContact.velocity && !slope.state.stuck) {
+          groundVelocity = landingGroundVelocity(slopeContact.velocity.x, slopeContact.velocity.z);
+        } else if (slope.event === 'leave') {
+          groundVelocity = null;
+        }
         slopeContact = slope.state;
         if (slope.event === 'leave') animController?.leaveGround();
         else if (slope.event === 'hit') animController?.onLanded();
@@ -20727,6 +20768,7 @@ async function main() {
         // A frame that integrated nothing (a dropped or gate-held frame) carries no velocity.
         jumpVelocityX = physDt > 0 ? (playerWorldX - prePhysicsPlayerX) / physDt : 0;
         jumpVelocityZ = physDt > 0 ? (playerWorldZ - prePhysicsPlayerZ) / physDt : 0;
+        groundVelocity = null;
         jumpTelemetry.launchHeight = 0;
         jumpTelemetry.peakY = 0;
         jumpTelemetry.airtime = 0;
@@ -20795,6 +20837,8 @@ async function main() {
           const launch = jumpLaunchVelocity(cameraController, jumpVelocityY);
           jumpVelocityX = launch.world.x;
           jumpVelocityZ = launch.world.z;
+          // LeaveGround's set_local_velocity replaces whatever velocity was left.
+          groundVelocity = null;
           playerWorldY = 0;
           airborneBaseY = groundY; // GAP.7 — jump launches from current ground
           isPlayerAirborne = true;
@@ -20908,6 +20952,11 @@ async function main() {
               stuck: false,
             }
             : initialSlopeContact();
+          // BUG.remote-running-jump-snapback — HitGround keeps the horizontal
+          // velocity (CMotionInterp::HitGround @ 00528ac0 sets none); friction
+          // takes it away over the next ~second (LandingCoast.ts). Onto a face
+          // it cannot stand on, the slide carries it instead.
+          groundVelocity = steep ? null : landingGroundVelocity(jumpVelocityX, jumpVelocityZ);
           playerWorldY = 0;
           jumpVelocityY = 0;
           jumpVelocityX = 0;
@@ -20947,7 +20996,7 @@ async function main() {
         epoch: seqPlayer?.nodeEpoch,
         sequenceDriven: !!seqPlayer && !frameStartAirborne && !isPlayerAirborne && !frameStartSliding
           && slopeContact.velocity === null && playerMoveToDrive === null,
-        before: { x: prePhysicsPlayerX, y: playerFeetY, z: prePhysicsPlayerZ },
+        before: { x: prePhysicsPlayerX + frameCoastX, y: playerFeetY, z: prePhysicsPlayerZ + frameCoastZ },
         after: { x: playerWorldX, y: characterFeetY, z: playerWorldZ },
         dt: physDt,
       });
@@ -21358,7 +21407,10 @@ async function main() {
       }
       {
         const { blockX: pbx, blockY: pby } = TerrainManager.worldToBlock(playerWorldX, playerWorldZ);
-        landblockObjects.pump(pbx, pby);
+        // BUG.scenery-pop-in-order — the load order leans toward where the
+        // character faces (OutdoorMovement's forward: −sin yaw, −cos yaw).
+        const yaw = cameraController.playerYaw;
+        landblockObjects.pump(pbx, pby, { x: playerWorldX, z: playerWorldZ, dirX: -Math.sin(yaw), dirZ: -Math.cos(yaw) });
       }
 
       // Dungeon cell streaming — load/unload cells based on proximity

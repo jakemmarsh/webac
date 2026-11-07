@@ -29,12 +29,25 @@
  * hand lets the next retry in. Only a spent budget ends the enter, with
  * retail's dialog and the line for whatever this browser saw.
  *
+ * A world that lets one character in per network address (World.perIpLimits
+ * .characters; DreamWeave, BUG.dreamweave-per-ip-enter, 2026-11-07): every
+ * webAC player shares the bridge's address, so a 0x0D there is nearly always
+ * another webAC player's character, and retail's "one of your characters"
+ * sent players looking for a character they never had in. There, unless the
+ * enter is a resume after a drop (our own character, logging out), the line
+ * under Entering World and the final dialog say another webAC player is in
+ * the world (perIpInWorldStatus / perIpInWorldText). A tab of this browser in
+ * the world still wins: its offer or line is the more exact answer. The
+ * retries, their budget and the resume path are unchanged. A browser-UX
+ * exception (CLAUDE.md, "Consistent refusals").
+ *
  * Live check 2026-11-03: the first version showed the other-account line as
  * an OK dialog and stopped the retries; a tab whose own crashed character was
  * the real holder sat at character select 3+ minutes, blamed on an unrelated
  * tab, where the retries would have entered in ~14 s.
  */
 
+import { perIpInWorldStatus, perIpInWorldText } from '../launcher/worldDirectory.js';
 import type { WorldHolder } from './AccountTabGuard.js';
 import type { CharacterInWorldVerdict } from './SessionLifecycle.js';
 
@@ -124,6 +137,11 @@ export interface InWorldEnterWaitDeps {
   /** Yes / No; returns a close for the dialog. */
   confirm(text: string, onAnswer: (yes: boolean) => void): () => void;
   report?(kind: InWorldHolderAction['kind']): void;
+  /**
+   * The world's characters-in-the-world-per-address rule that every webAC
+   * player shares (worldDirectory perIpCharacterLimit; 0 or absent = none).
+   */
+  charactersPerAddress?(): number;
 }
 
 /**
@@ -135,6 +153,8 @@ export interface InWorldEnterWaitDeps {
 export class InWorldEnterWait {
   private serial = -1;
   private holder: WorldHolder | null = null;
+  /** The enter under way was a resume after a drop at its first refusal: the holder is our own character. */
+  private resumed = false;
   private cancelRetry: (() => void) | null = null;
   private closeOffer: (() => void) | null = null;
 
@@ -153,6 +173,7 @@ export class InWorldEnterWait {
     if (this.serial !== this.deps.enterSerial()) {
       this.serial = this.deps.enterSerial();
       this.holder = null;
+      this.resumed = this.deps.resuming();
     }
     if (verdict === 'dialog') {
       this.clearTimers();
@@ -160,7 +181,7 @@ export class InWorldEnterWait {
     }
     const delay = this.deps.retryDelay();
     const first = this.deps.refusalCount() === 1 && !this.deps.waitingOnHolder();
-    if (first) this.deps.setStatus(IN_WORLD_WAIT_STATUS);
+    if (first) this.deps.setStatus(this.sharedLimit() > 0 ? perIpInWorldStatus(this.sharedLimit()) : IN_WORLD_WAIT_STATUS);
     if (first && !this.deps.resuming()) this.ask();
     this.retryIn(delay);
     return verdict;
@@ -174,8 +195,19 @@ export class InWorldEnterWait {
   /** The final dialog's text: retail's notice, or retail's text and the line for the tab seen in the world. */
   finalText(noticeText: string, retailText: string): string {
     const holder = this.seenHolder;
-    if (!holder) return noticeText;
+    if (!holder) {
+      // A per-address world: the holder no tab of this browser explains is another webAC player.
+      const shared = this.sharedLimit();
+      return shared > 0 ? perIpInWorldText(shared) : noticeText;
+    }
     return holder.sameAccount ? sameAccountFinalText(retailText, holder) : otherAccountText(retailText, holder);
+  }
+
+  /** The shared per-address character rule for the enter under way (0: none, or a resume of our own character). */
+  private sharedLimit(): number {
+    if (this.serial === this.deps.enterSerial() && this.resumed) return 0;
+    const n = this.deps.charactersPerAddress?.() ?? 0;
+    return Number.isInteger(n) && n > 0 ? n : 0;
   }
 
   private ask(): void {

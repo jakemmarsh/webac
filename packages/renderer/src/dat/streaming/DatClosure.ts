@@ -85,6 +85,8 @@ export class DatClosure {
   private readonly closed = new Set<FileKey>();
   private readonly readyBlocks = new Set<number>();
   private readonly blockLoads = new Map<number, Promise<void>>();
+  /** The best priority each in-flight block load was asked for (a better one promotes it). */
+  private readonly blockLoadPriority = new Map<number, FetchPriority>();
 
   constructor(private readonly store: ClosureStore, private readonly opts: DatClosureOptions = {}) {
     // The LRU dropped files: "resident" verdicts may be stale. The next ensure
@@ -146,12 +148,22 @@ export class DatClosure {
     const lb = blockOf(landblock);
     if (this.readyBlocks.has(lb)) return Promise.resolve();
     let p = this.blockLoads.get(lb);
+    if (p && priority < (this.blockLoadPriority.get(lb) ?? FetchPriority.Background)) {
+      // BUG.scenery-pop-in-order — the block is wanted sooner (it entered the
+      // object ring, or a gate needs it): promote the in-flight bundle, area
+      // pack and closure leaves (each store request promotes its object).
+      this.blockLoadPriority.set(lb, priority);
+      void Promise.all([this.store.ensureBundle(lb, priority), this.store.ensureArea?.(lb, priority)])
+        .then(() => this.ensure([fileKey('cell', landId(lb)), fileKey('cell', infoId(lb))], priority))
+        .catch(() => { /* the first load reports */ });
+    }
     if (!p) {
+      this.blockLoadPriority.set(lb, priority);
       p = (async () => {
         await Promise.all([this.store.ensureBundle(lb, priority), this.store.ensureArea?.(lb, priority)]);
         await this.ensure([fileKey('cell', landId(lb)), fileKey('cell', infoId(lb))], priority);
         this.readyBlocks.add(lb);
-      })().finally(() => this.blockLoads.delete(lb));
+      })().finally(() => { this.blockLoads.delete(lb); this.blockLoadPriority.delete(lb); });
       this.blockLoads.set(lb, p);
     }
     return p;

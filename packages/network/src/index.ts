@@ -183,7 +183,7 @@ export type {
 
 // Client connection (browser-side)
 export { ClientConnection, parseAgentCall, parsePairingReply, parseRelayLinkNotice, parseRoutinesGrant, probeBridgeHealth, netErrorPayloadOffset, readServerNetError } from './ClientConnection.js';
-export { BRIDGE_CLOSE_IP_CAP, BRIDGE_CLOSE_WORLD_FULL, BRIDGE_CLOSE_NEW_ACCOUNT_CAP, BRIDGE_CLOSE_NEW_ACCOUNT_UNAVAILABLE, BridgeRefusalError, bridgeRefusalFromClose, bridgeRefusalOf, type BridgeRefusal } from './BridgeRefusal.js';
+export { BRIDGE_CLOSE_IP_CAP, BRIDGE_CLOSE_WORLD_FULL, BRIDGE_CLOSE_NEW_ACCOUNT_CAP, BRIDGE_CLOSE_NEW_ACCOUNT_UNAVAILABLE, BridgeRefusalError, bridgeRefusalFromClose, bridgeRefusalOf, bridgeRefusalPerAddress, BRIDGE_SERVER_IP_CAP_REASON, type BridgeRefusal } from './BridgeRefusal.js';
 export type { ConnectionEventType, ConnectionEvent, ConnectionListener, DisconnectCause, BridgeHealth, HealthSocketLike, RoutinesGrant, PairingReply, RelayLinkNotice, AgentCallFrame, ServerNetError } from './ClientConnection.js';
 export { hostClientConnection, NET_SNAPSHOT_INTERVAL_MS } from './NetWorker.js';
 export { SocketHandover, handoverUrl, HANDOVER_TICKET_REQUEST, HANDOVER_RELEASE, HANDOVER_TICKET_TIMEOUT_MS, HANDOVER_ADOPT_TIMEOUT_MS, HANDOVER_BIND_TIMEOUT_MS } from './SocketHandover.js';

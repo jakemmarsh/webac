@@ -38,7 +38,7 @@ import { GameMessageGroup } from './GameMessageGroup.js';
 import { NetAuthType } from './NetAuthType.js';
 import { type LoginProfile, EOR_LOGIN_PROFILE, isValidClientVersion, loginWireCredentials } from './LoginProfile.js';
 import { AuthFlags } from './AuthFlags.js';
-import { type BridgeRefusal, BridgeRefusalError, bridgeRefusalFromClose } from './BridgeRefusal.js';
+import { type BridgeRefusal, BridgeRefusalError, bridgeRefusalFromClose, bridgeRefusalPerAddress } from './BridgeRefusal.js';
 import { CharacterError, characterErrorMessage } from '@ac/shared';
 import {
   BinaryWriter, BinaryReader, deserializeMessage,
@@ -262,6 +262,11 @@ export interface ConnectionEvent {
    */
   bridgeRefusal?: BridgeRefusal;
   /**
+   * On bridgeRefusal 'server_ip_cap': how many sessions the server lets in
+   * per address, when the bridge said (DreamWeave 1, AC1999 2).
+   */
+  bridgeRefusalPerAddress?: number;
+  /**
    * BUG.resume-hung-socket — on type==='error' with ID_NetError_CantSocket: the
    * socket never failed on its own but was still CONNECTING after
    * WS_OPEN_TIMEOUT_MS (WsOpenTimeout.ts), so the client gave up on it: no
@@ -396,7 +401,8 @@ export function probeBridgeHealth(
       clearTimeout(timeout);
       if (settled) return;
       settled = true;
-      const refusal = bridgeRefusalFromClose((ev as { code?: number } | null)?.code);
+      const e = ev as { code?: number; reason?: string } | null;
+      const refusal = bridgeRefusalFromClose(e?.code, e?.reason);
       reject(refusal ? new BridgeRefusalError(refusal) : new Error('Bridge not reachable'));
     };
   });
@@ -969,8 +975,8 @@ export class ClientConnection {
     };
 
     socket.onclose = (ev: CloseEvent) => {
-      const refusal = bridgeRefusalFromClose(ev?.code);
-      if (refusal && this.ws === socket) { this.handleBridgeRefusal(socket, refusal); return; }
+      const refusal = bridgeRefusalFromClose(ev?.code, ev?.reason);
+      if (refusal && this.ws === socket) { this.handleBridgeRefusal(socket, refusal, bridgeRefusalPerAddress(ev?.code, ev?.reason)); return; }
       this.handleSocketEnded(socket, 'socket_closed', ev?.code);
     };
 
@@ -1097,7 +1103,7 @@ export class ClientConnection {
    * 'disconnected' (nothing to resume, no ServerDied) and no reconnect; the
    * login stops and the page shows why.
    */
-  private handleBridgeRefusal(socket: WebSocket, refusal: BridgeRefusal): void {
+  private handleBridgeRefusal(socket: WebSocket, refusal: BridgeRefusal, perAddress: number | null = null): void {
     this.stopOpenTimeout();
     this.sessionEndedFor = socket;
     this.ws = null;
@@ -1106,7 +1112,10 @@ export class ClientConnection {
     if (this.loginRejectRetryTimer) { clearTimeout(this.loginRejectRetryTimer); this.loginRejectRetryTimer = null; }
     if (this.keepaliveTimer) { clearInterval(this.keepaliveTimer); this.keepaliveTimer = null; }
     console.warn(`[AC:NET] The bridge refused this connection: ${refusal}`);
-    this.emit({ type: 'error', error: `Bridge refused the connection (${refusal})`, bridgeRefusal: refusal });
+    this.emit({
+      type: 'error', error: `Bridge refused the connection (${refusal})`, bridgeRefusal: refusal,
+      ...(perAddress !== null ? { bridgeRefusalPerAddress: perAddress } : {}),
+    });
   }
 
   /** The server ended (or abandoned) the session: close our socket and report it once. */

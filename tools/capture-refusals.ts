@@ -181,6 +181,8 @@ async function charSelect(): Promise<void> {
   for (const r of ['ip_cap', 'world_full', 'new_account_cap', 'new_account_unavailable']) {
     await dialog(`bridge-${r}`, `Bridge refusal ${r}`, `return ${CN}.bridgeRefusalNotice('${r}').text`);
   }
+  await dialog('bridge-server_ip_cap-1', 'Egress world per-address session cap (DreamWeave: 1)', `return ${CN}.bridgeRefusalNotice('server_ip_cap', 1).text`);
+  await dialog('char-error-in-world-per-ip', '0x0D on a one-character-per-address world (DreamWeave), budget spent', `return ${WD}.perIpInWorldText(1)`);
   await dialog('era-unavailable', 'Era DATs unreachable on a cross-era enter', `return ${mod('era/EraBoot.ts')}.eraUnavailableText('Snowreap')`);
   await dialog('world-offline', 'ENTER on an offline world', `return ${WD}.worldEnterBlock({name:'Frostfell',online:false,compat:'ok',era:'eor',kind:'listed'})`);
   await dialog('world-incompatible', 'ENTER on a world the bridge marks incompatible', `return ${WD}.worldEnterBlock({name:'Darktide',compat:'incompatible',compatReason:'This server blocks connections from hosting providers.',kind:'listed'})`);

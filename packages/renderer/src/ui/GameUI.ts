@@ -526,6 +526,7 @@ import { appearanceHeritageRules, appearanceUpdateRandomize, APPEARANCE_ROWS, AP
 import type { PaperdollDropTarget } from '../inventory/PaperdollDragObject.js';
 import { datMissEpoch, noDatMissSince, onDatMissResolved } from '@ac/dat-parser/streaming/DatMiss.js';
 import { PanelPressGuard } from './PanelPressGuard.js';
+import { captureScroll, restoreScroll, type ScrollSnapshot } from './ScrollKeep.js';
 
 /* ------------------------------------------------------------------ */
 /*  Skill name lookup (from ACE Skill enum)                            */
@@ -5159,6 +5160,8 @@ export class GameUI {
     // Move the host's current children into an inner scrolling wrapper so the
     // track sits still (absolute) while content scrolls.
     const inner = document.createElement('div');
+    // The viewport a panel rebuild carries the scroll of (ui/ScrollKeep.ts), named under its host.
+    inner.dataset.scrollKey = 'panel-scroll';
     Object.assign(inner.style, {
       position: 'absolute', left: '0', top: '0', right: '16px', bottom: '0',
       overflowY: 'auto', overflowX: 'hidden',
@@ -6909,6 +6912,14 @@ export class GameUI {
     // screen; every legitimate caller (showCharacterSelect,
     // showConnectingScreen, setWorldName) sets or checks that first.
     if (this.uiManager.currentScreen !== 'character-select') return;
+    // webac#27 sweep — a redraw (a row click, a ServerName, a re-sent list)
+    // keeps the character list's scroll, as retail's in-place list did.
+    const kept = captureScroll(this.screenContainer);
+    this.renderCharacterSelectFresh();
+    restoreScroll(this.screenContainer, kept);
+  }
+
+  private renderCharacterSelectFresh(): void {
     this.screenContainer.style.display = 'block';
     this.hudContainer.style.display = 'none';
 
@@ -7082,6 +7093,7 @@ export class GameUI {
     });
 
     const scrollEl = document.createElement('div');
+    scrollEl.dataset.scrollKey = 'charsel-list'; // kept across a redraw (renderCharacterSelect)
     Object.assign(scrollEl.style, {
       position: 'absolute', left: `${scrollX}px`, top: `${scrollY}px`,
       width: `${scrollW}px`, height: `${scrollH}px`,
@@ -16582,8 +16594,22 @@ export class GameUI {
     this.refreshInventorySelection();
   }
 
+  /**
+   * webac#27 — the panel is rebuilt on every inventory change (a move, a
+   * pickup, a stack size), and the new grid started at the top. Retail
+   * re-lists the shown pack in place and keeps its scroll, clamped
+   * (ItemList_SetParentContainer @ 004e49d0; 1999 @ 0x0053b330: ui/ScrollKeep.ts),
+   * so the grid (keyed by the shown pack) and the pack column keep theirs.
+   * Showing another pack starts at the top (its key differs: ScrollToHome).
+   */
   private renderInventoryPanel(): void {
     if (this.pressGuard.defer(this.inventoryPanel, () => this.renderInventoryPanel())) return;
+    const kept = captureScroll(this.inventoryPanel);
+    this.renderInventoryPanelFresh();
+    restoreScroll(this.inventoryPanel, kept);
+  }
+
+  private renderInventoryPanelFresh(): void {
     // Clean up old panel
     if (this.inventoryPanelHandle) {
       this.inventoryPanelHandle.close();
@@ -17272,6 +17298,7 @@ export class GameUI {
       const packListH = Math.max(36, 252 + invGrowDH);
       const packListFrame = document.createElement('div');
       packListFrame.dataset.datPackList = '1';
+      packListFrame.dataset.scrollKey = 'inv-packs';
       Object.assign(packListFrame.style, {
         position: 'absolute', left: '6px', top: '73px', width: '36px', height: `${packListH}px`,
         overflow: 'hidden', pointerEvents: 'none',
@@ -17350,6 +17377,8 @@ export class GameUI {
       const gridListH = Math.max(32, 96 + invGrowDH);
       const gridViewport = document.createElement('div');
       gridViewport.className = 'layout-scroll-content';
+      // webac#27 — keyed by the shown pack: a rebuild keeps the scroll, another pack starts at the top.
+      gridViewport.dataset.scrollKey = `inv-grid:${packGuid >>> 0}`;
       Object.assign(gridViewport.style, {
         position: 'absolute', left: '15px', top: '20px', width: '192px', height: `${gridListH}px`,
         overflowY: 'auto', overflowX: 'hidden', pointerEvents: 'auto',
@@ -20657,8 +20686,18 @@ export class GameUI {
     this.setDesiredComps(new Map());
   }
 
+  /**
+   * webac#27 sweep — a learned spell, a component count, a filter pick or a
+   * research click rebuilds the page; retail's spellbook / components lists
+   * re-list in place (UIElement_ListBox::Flush @ 0046e0a0 leaves the offset;
+   * SetScrollableXY @ 004740c0 clamps), so the scroll stays on the same tab.
+   */
   private renderMagicPanel(): void {
     if (this.pressGuard.defer(this.magicPanel, () => this.renderMagicPanel())) return;
+    this.rebuildKeepingScroll(() => this.magicPanel, () => this.renderMagicPanelFresh(), () => this.magicPanelTab);
+  }
+
+  private renderMagicPanelFresh(): void {
     if (this.magicPanelHandle) {
       this.magicPanelHandle.close();
       this.magicPanelHandle = null;
@@ -20841,6 +20880,7 @@ export class GameUI {
 
     // ── Spell list area: from layout 0x21000032 element 0x10000295 at (0,0) 280x224 ──
     const spellList = document.createElement('div');
+    spellList.dataset.scrollKey = 'spellbook-list'; // kept across a rebuild (renderMagicPanel)
     Object.assign(spellList.style, {
       // VISUAL.138 — DAT list geometry (0x21000032 el 0x10000295): (0,0)
       // 280x224, scrollbar column at x=280. (Was 264x206 to make room for
@@ -21210,6 +21250,7 @@ export class GameUI {
     // ── COMPONENTS grid: 8 columns of 32 px icons, scrolled by the bar beside it ──
     const grid = box(L.grid);
     grid.className = 'ac-research-components';
+    grid.dataset.scrollKey = 'research-components'; // kept across a rebuild (renderMagicPanel)
     Object.assign(grid.style, { display: 'flex', flexWrap: 'wrap', alignContent: 'flex-start', overflowY: 'auto', overflowX: 'hidden' });
     for (const c of cells) {
       const cell = iconCell(c.wcid);
@@ -27348,8 +27389,40 @@ export class GameUI {
   }
 
   /** Render the social panel. */
+  /**
+   * webac#27 sweep — a fellow's stats, a vassal click, a friend coming online
+   * rebuild the panel; retail updates the list rows in place (UpdateFellowStats,
+   * the allegiance tree's SetText), so its scroll stays. Kept on the same tab
+   * (ui/ScrollKeep.ts); a tab switch starts at the top.
+   */
   private renderSocialPanel(): void {
     if (this.pressGuard.defer(this.socialPanel, () => this.renderSocialPanel())) return;
+    this.rebuildKeepingScroll(() => this.socialPanel, () => this.renderSocialPanelFresh(), () => this.socialTab);
+  }
+
+  /**
+   * Rebuild a panel and carry its keyed viewports' scroll offsets over when
+   * the context (tab, shown object) is the one that was showing before
+   * (ui/ScrollKeep.ts). The context before the rebuild is the one this
+   * panel last rendered, so a tab switch (the field set before the call)
+   * starts at the top.
+   */
+  private rebuildKeepingScroll(root: () => HTMLElement | null | undefined, rebuild: () => void, context: () => string): void {
+    const el = root();
+    const prevCtx = el ? this.scrollKeepContext.get(el) : undefined;
+    const kept: ScrollSnapshot = el && el.isConnected ? captureScroll(el) : new Map();
+    rebuild();
+    const next = root();
+    if (!next) return;
+    const ctx = context();
+    this.scrollKeepContext.set(next, ctx);
+    if (prevCtx === ctx) restoreScroll(next, kept);
+  }
+
+  /** The context each kept-scroll panel root was last rendered in (rebuildKeepingScroll). */
+  private readonly scrollKeepContext = new WeakMap<HTMLElement, string>();
+
+  private renderSocialPanelFresh(): void {
     if (this.socialPanelHandle) {
       this.socialPanelHandle.close();
       this.socialPanelHandle = null;
@@ -30836,6 +30909,9 @@ export class GameUI {
     // approximated the field with a CSS border + the 0x06001274 arrow.
     const row = this.buildOptionsListRow(20);
     row.dataset.optionRow = 'menu';
+    // The label the plate draws (AC-font canvas, so not in the text DOM): the play-through's
+    // option-defaults step and tests read what the player sees here.
+    row.dataset.optionValue = current;
     this.registerPageOptionRow(row, optionKey); // CORE.17.h.c
     row.appendChild(this.buildOptionsTextCell(label, 6, 2, 130, 14, 'right'));
     const interactive = !!(options && onSelect);
@@ -34268,8 +34344,17 @@ export class GameUI {
     panes: { contracts: 0x100005d4, journal: 0x10000563, page_list: 0x10000564 },
   } as const;
 
+  /**
+   * webac#27 sweep — a sort click, a quest update or a journal edit rebuilds
+   * the panel; retail's contract / page lists re-list in place and keep their
+   * scroll (clamped), so it stays on the same tab (ui/ScrollKeep.ts).
+   */
   private renderContractPanel(): void {
     if (this.pressGuard.defer(this.contractPanel, () => this.renderContractPanel())) return;
+    this.rebuildKeepingScroll(() => this.contractPanel, () => this.renderContractPanelFresh(), () => this.contractTab);
+  }
+
+  private renderContractPanelFresh(): void {
     if (this.contractPanelHandle) {
       this.contractPanelHandle.close();
       this.contractPanelHandle = null;

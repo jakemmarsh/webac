@@ -169,9 +169,12 @@ d="sha256:$(cat "${'$'}ctx"/services/ws-tcp-bridge/src/* | shasum -a 256 | cut -
 for t in "${'$'}{tags[@]}"; do echo "${'$'}t ${'$'}d" >> "${'$'}FAKE_DIR/registry.txt"; done
 [ -z "${'$'}meta" ] || printf '{"containerimage.digest":"%s"}' "${'$'}d" > "${'$'}meta"
 `;
-  const run = (sha: string) => spawnSync('bash', [join(dir, 'tools/build-push-images.sh'), sha, '--only', 'bridge', '--skip-gate'], {
+  const run = (sha: string, gates: string[] = ['--skip-gate', '--skip-live', 'image-flow test']) => spawnSync('bash', [join(dir, 'tools/build-push-images.sh'), sha, '--only', 'bridge', ...gates], {
     encoding: 'utf8',
-    env: { ...process.env, GITHUB_ACTIONS: '', PATH: `${bin}:${process.env.PATH}`, FAKE_DIR: bin, WEBAC_REGISTRY: 'reg.example' },
+    env: {
+      ...process.env, GITHUB_ACTIONS: '', ACJS_GATE_LOGGED: '', PATH: `${bin}:${process.env.PATH}`, FAKE_DIR: bin, WEBAC_REGISTRY: 'reg.example',
+      ACJS_DEPLOY_OVERRIDE_LOG: join(bin, 'overrides.md'),
+    },
   });
   const calls = () => readFakeLog(CALLS(), 'utf8');
   const tagsOf = (sha: string) => readFakeLog(REG(), 'utf8').split('\n').find((l) => l.startsWith(`${sha} `))?.split(' ')[1];
@@ -228,6 +231,19 @@ for t in "${'$'}{tags[@]}"; do echo "${'$'}t ${'$'}d" >> "${'$'}FAKE_DIR/registr
     expect(reverted.stdout).toContain('[images] bridge: building');
     expect(tagsOf(c.revert)).toBe(tagsOf(c.base));
     expect(reverted.stdout).toContain(`built output identical to the image already tagged ${c.base.slice(0, 12)}`);
+  });
+
+  it('refuses a commit without the live-gate stamp, names both overrides, and logs each override once', () => {
+    writeFileSync(CALLS(), '');
+    const r = run(c.base, ['--skip-gate']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('has not passed the live gate');
+    expect(r.stderr).toContain('--skip-live "<reason>"');
+    expect(calls()).toBe(''); // refused before any registry or docker call
+    expect(spawnSync('bash', [join(dir, 'tools/build-push-images.sh'), c.base, '--skip-live'], { encoding: 'utf8' }).status).toBe(2);
+    const log = readFakeLog(join(bin, 'overrides.md'), 'utf8');
+    expect(log).toMatch(/\| build-push-images\.sh \| [0-9a-f]{12} \| --skip-live \| image-flow test \|/);
+    expect(log).toMatch(/\| build-push-images\.sh \| [0-9a-f]{12} \| --skip-gate \|/);
   });
 
   it('refuses to retag when the chosen source image\'s inputs differ from the commit\'s', () => {
@@ -287,9 +303,11 @@ describe('tools/lib/deploy-gate.sh: the local gate stamp', () => {
   });
 
   it('--skip-gate passes with a loud warning; CI passes on its own test job', () => {
-    const skipped = gate(`gate_check "${dir}" ${sha} 1`);
+    const log = join(dir, 'overrides.md');
+    const skipped = gate(`gate_check "${dir}" ${sha} 1`, { ACJS_DEPLOY_OVERRIDE_LOG: log, ACJS_GATE_LOGGED: '' });
     expect(skipped.status).toBe(0);
     expect(skipped.stderr).toContain('WARNING: --skip-gate');
+    expect(readFakeLog(log, 'utf8')).toContain(`| ${sha.slice(0, 12)} | --skip-gate |`);
     expect(gate(`gate_check "${dir}" ${sha} 0`, { GITHUB_ACTIONS: 'true' }).status).toBe(0);
   });
 

@@ -7,6 +7,9 @@
  * that casts or hits hard), open its corpse, walk away mid-loot, loot the rest; read a scroll, eat, use a
  * healing kit; magic mode with a held caster, a cast at a creature and at yourself; give an NPC an item;
  * @help, @loc, @version and the era's Yes / No command answered No; log out to character select and back.
+ * The week's player-reported regressions run as steps too (tools/lib/playthrough-regressions.ts, 2026-11-07):
+ * option-defaults (right after entering the world), walk-short (the live gate's smoke walk), pack-scroll-sort, pack-bars, toolbar-relog, shield-relog,
+ * running-jump-coast and create-character-click (before the chat commands).
  * After every step it checks the client: no inventory request left pending, the busy cursor count at 0, no
  * "one item at a time" or other unexpected refusal, no console error, the player alive (a death ends the run).
  *
@@ -20,7 +23,8 @@
  * --data-root <checkout with reference/ and world-db-raw/>; --profile <fixed Chrome profile dir, kept>;
  * --headed; --swiftshader (default: headless on the real GPU); --admin (off by default; needs an admin test account:
  * after entering the world it types @spellcomps 74 5 and @spawnwcidinv 2472 into the chat box and trains the schools
- * the magic steps need with skill credits).
+ * the magic steps need with skill credits; the regression steps spawn what they need with the era's spawn command);
+ * --list (print the era's step ids and titles, run nothing).
  *
  * Output: verification/ac1999-playthrough/<timestamp>-<era>/report.md (each step ok / skipped (why) /
  * FAIL (details)), results.json, run.log and the screenshots. Exit 1 on any FAIL or an aborted run.
@@ -33,6 +37,7 @@ import { dirname, join } from 'node:path';
 import { chromium, type Page } from 'playwright';
 import { DEFAULT_VIEWPORT, GPU_ARGS, REMOTE_CHROMIUM, REPO, SWIFTSHADER_ARGS, createCharacterIfNeeded, waitForWorld } from './lib/game-session.ts';
 import { createRunProfile } from './lib/temp-profile.ts';
+import { regressionSteps, withRegressionSteps } from './lib/playthrough-regressions.ts';
 import {
   type ClientProbe, type MagicFacts, type Place, type PlaythroughDriver, type Signals, type VendorStockRow, loadGiveTables, loadVendorSpots, emptySignals, exitCode, freshState, loadCreatureFacts,
   parsePlaythroughArgs, playthroughSteps, playthroughUrl, renderReport, runPlaythrough, selectSteps,
@@ -104,6 +109,13 @@ const withTimeout = <T>(p: Promise<T>, ms: number, what: string): Promise<T> => 
 
 async function main(): Promise<number> {
   const args = parsePlaythroughArgs(process.argv.slice(2));
+  const plan = withRegressionSteps(playthroughSteps(args.era, { admin: args.admin }), regressionSteps(args.era, { admin: args.admin }));
+  if (args.list) {
+    console.log(`${args.era.label} (${args.era.key}): ${plan.length} steps; --only takes the ids (enter-world${args.admin ? ' and admin-prep' : ''} always run)`);
+    for (const s of plan) console.log(`  ${s.id.padEnd(26)} ${s.title}`);
+    return 0;
+  }
+  const steps = selectSteps(plan, args.only);
   const started = new Date();
   const out = args.out ?? join(REPO, 'verification', 'ac1999-playthrough', `${started.toISOString().replace(/[:.]/g, '-').replace(/-\d{3}Z$/, 'Z')}-${args.era.key}`);
   mkdirSync(out, { recursive: true });
@@ -137,8 +149,12 @@ async function main(): Promise<number> {
   await page.addInitScript({ content: SPEW_TAP_JS });
 
   let sig: Signals = emptySignals();
+  // Every console line, for steps that read the client's own log (shield-relog: "[Wield] Attached … placement=P from …, frame=F").
+  const consoleLines: string[] = [];
   page.on('console', (m) => {
     const t = m.text();
+    consoleLines.push(t);
+    if (consoleLines.length > 8000) consoleLines.splice(0, consoleLines.length - 6000);
     if (t.startsWith('[AC:Chat] ')) sig.chat.push(t.slice(10));
     else if (t.startsWith('[PT:Spew] ')) sig.spew.push(t.slice(10));
     else if (m.type() === 'error') { const where = m.location()?.url; sig.consoleErrors.push(`${t}${where ? ` (${where})` : ''}`); }
@@ -203,9 +219,22 @@ async function main(): Promise<number> {
     },
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     now: () => Date.now(),
+    evaluate: <T>(js: string) => withTimeout(page.evaluate(js) as Promise<T>, 60_000, 'evaluate'),
+    async click(at) { await page.mouse.click(at.x, at.y); },
+    async drag(from, to) {
+      // As a player drags: press, a first small move (past the browser's drag threshold), the move over, release.
+      await page.mouse.move(from.x, from.y);
+      await page.mouse.down();
+      await page.mouse.move(from.x + 6, from.y + 6, { steps: 3 });
+      await page.mouse.move(to.x, to.y, { steps: 12 });
+      await page.waitForTimeout(150);
+      await page.mouse.up();
+    },
+    async key(code, down) { if (down) await page.keyboard.down(code); else await page.keyboard.up(code); },
+    consoleLines: () => consoleLines,
+    freshProfile: !args.profile,
   };
 
-  const steps = selectSteps(playthroughSteps(args.era, { admin: args.admin }), args.only);
   const state = freshState();
   let res;
   try {
@@ -216,7 +245,7 @@ async function main(): Promise<number> {
     if (p?.screen === 'world') { await driver.call('logout').catch(() => undefined); await driver.sleep(4000); }
   }
   const finished = new Date();
-  writeFileSync(join(out, 'report.md'), renderReport(res, { era: args.era, url, account: args.account, character: state.character, started, finished }));
+  writeFileSync(join(out, 'report.md'), renderReport(res, { era: args.era, url, account: args.account, character: state.character, started, finished, planned: plan }));
   writeFileSync(join(out, 'results.json'), `${JSON.stringify({ era: args.era.key, account: args.account, character: state.character, aborted: res.aborted, steps: res.records.map((r) => ({ ...r, signals: undefined })) }, null, 2)}\n`);
   const code = exitCode(res);
   log(`${code ? 'FAIL' : 'PASS'}: ${res.records.filter((r) => r.status === 'ok').length} ok, ${res.records.filter((r) => r.status === 'skipped').length} skipped, ${res.records.filter((r) => r.status === 'fail').length} failed${res.aborted ? `; aborted: ${res.aborted}` : ''}. Report: ${join(out, 'report.md')}`);

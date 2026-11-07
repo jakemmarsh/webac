@@ -8,12 +8,25 @@
 # suite (~5 min in the cloud container) killed sessions (2026-09-12).
 # This exists because a tools/ type error sat on main for ~1 h on
 # 2026-09-24 while Actions minutes were exhausted and CI ran nothing.
+#
+# Push guard (2026-11-07, after a red main went out on a misread gate
+# result): a push to main whose commits touch packages/ or services/ needs a
+# tools/ci-local.sh PASS stamp for the tip, or for a stamped commit with the
+# same packages/ and services/ trees (a progress.md or docs commit on top
+# keeps the pass; tools/lib/deploy-gate.sh gate_stamped_tree). File checks
+# and a few git rev-parses: well under a second. Docs / tools-only pushes
+# ([skip-tests] commits) are never checked, nor are pushes to other branches.
+# ACJS_ALLOW_UNSTAMPED_PUSH=1 pushes anyway, with a warning.
 set -euo pipefail
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/deploy-gate.sh
+. "$HOOK_DIR/../lib/deploy-gate.sh"
 cd "$(git rev-parse --show-toplevel)"
 
 ZERO=0000000000000000000000000000000000000000
 NEEDS=0
-while read -r _lref lsha _rref rsha; do
+UNSTAMPED=()
+while read -r _lref lsha rref rsha; do
   [[ "$lsha" == "$ZERO" ]] && continue
   if [[ "$rsha" == "$ZERO" ]] || ! git cat-file -e "$rsha" 2>/dev/null; then
     BASE="$(git merge-base "$lsha" origin/main 2>/dev/null || echo "")"
@@ -34,11 +47,32 @@ while read -r _lref lsha _rref rsha; do
     git diff -U0 "$BASE" "$lsha" | grep -E '^(\+\+\+ |\+(<<<<<<<|>>>>>>>)( |$))' | grep -B1 -E '^\+(<<<<<<<|>>>>>>>)' | grep -v '^--$' >&2 || true
     exit 1
   fi
-  if ! CHANGED="$(git diff --name-only "$BASE" "$lsha")"; then NEEDS=1; continue; fi
+  if ! CHANGED="$(git diff --name-only "$BASE" "$lsha")"; then
+    NEEDS=1
+    [[ "$rref" == refs/heads/main ]] && ! gate_stamped_tree "$PWD" "$lsha" </dev/null && UNSTAMPED+=("$lsha")
+    continue
+  fi
   if grep -qE '\.(ts|tsx|mts|cts)$|(^|/)tsconfig[^/]*\.json$|(^|/)package(-lock)?\.json$' <<<"$CHANGED"; then
     NEEDS=1
   fi
+  if [[ "$rref" == refs/heads/main ]] && grep -qE '^(packages|services)/' <<<"$CHANGED" \
+    && ! gate_stamped_tree "$PWD" "$lsha" </dev/null; then
+    UNSTAMPED+=("$lsha")
+  fi
 done
+
+if [[ ${#UNSTAMPED[@]} -gt 0 ]]; then
+  tip="${UNSTAMPED[0]:0:12}"
+  if [[ "${ACJS_ALLOW_UNSTAMPED_PUSH:-}" == 1 ]]; then
+    echo "WARNING: ACJS_ALLOW_UNSTAMPED_PUSH=1: pushing $tip to main with packages/ or services/ changes and no tools/ci-local.sh pass. Say so in the session's report." >&2
+  else
+    echo "BLOCKED: this push changes packages/ or services/ on main, and $tip has no tools/ci-local.sh PASS stamp" >&2
+    echo "         (nor does a commit with the same packages/ and services/ trees). Gate the tip first:" >&2
+    echo "           bash tools/ci-local.sh            (or --ci-shape right after your own npm test)" >&2
+    echo "         Override, loudly: ACJS_ALLOW_UNSTAMPED_PUSH=1 git push …" >&2
+    exit 1
+  fi
+fi
 
 [[ $NEEDS -eq 0 ]] && exit 0
 if ! npx tsc -b; then

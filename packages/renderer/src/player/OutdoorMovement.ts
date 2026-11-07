@@ -26,6 +26,7 @@
 import * as THREE from 'three';
 import { LandWaterType, TerrainCollision } from '@ac/shared';
 import { bounceVelocity, slideStep, type Vec3 } from './SteepSlide.js';
+import { bounceGroundVelocity, coastQuantum, type GroundVelocity } from './LandingCoast.js';
 
 /** A collision world that slides a horizontal move along its walls (DungeonCollision). */
 export interface MovementCollider {
@@ -156,6 +157,13 @@ export interface MovementStepState {
    * Null / absent = on a walkable.
    */
   slideVelocity?: Vec3 | null;
+  /**
+   * BUG.remote-running-jump-snapback — the velocity still on the body on a
+   * walkable after a landing (player/LandingCoast.ts): it moves the body on
+   * top of the input motion, in the same transition, and friction takes it
+   * away. Null / absent = none.
+   */
+  groundVelocity?: GroundVelocity | null;
 }
 
 export interface MovementStepResult {
@@ -167,6 +175,10 @@ export interface MovementStepResult {
   slideVelocity?: Vec3;
   /** The slide substep's transition moved the body (validate_transition's _redo); false = stationary. */
   slideMoved?: boolean;
+  /** The ground velocity after the substep (only when state.groundVelocity was set); null = stopped. */
+  groundVelocity?: GroundVelocity | null;
+  /** The ground velocity's share of the requested move this substep (before collision). */
+  coastMoved?: { x: number; z: number };
 }
 
 /** Creatures are only registered as obstacles within this range of the player, m. */
@@ -681,6 +693,28 @@ export function stepPlayerMovement(
 
   if (state.slideVelocity && !state.inDungeon) return stepSlide(state, state.slideVelocity, stepDt, services);
 
+  // BUG.remote-running-jump-snapback — UpdatePhysicsInternal's velocity
+  // (calc_friction on the walkable) joins the animation's offset in the
+  // frame UpdateObjectInternal transitions as one move.
+  let coast: ReturnType<typeof coastQuantum> | null = null;
+  if (state.groundVelocity) {
+    coast = coastQuantum(state.groundVelocity, stepDt);
+    moveDeltaX += coast.dx;
+    moveDeltaZ += coast.dz;
+    if (state.inDungeon && services.dungeonCollision) services.dungeonCollision.collisionNormal = null;
+    else if (!state.inDungeon) services.outdoorCollision.collisionNormal = null;
+  }
+  const r = stepGrounded(state, moveDeltaX, moveDeltaZ, services);
+  if (coast) {
+    // handle_all_collisions: a wall the move ran into bounces the velocity.
+    const wall = state.inDungeon ? services.dungeonCollision?.collisionNormal : services.outdoorCollision.collisionNormal;
+    r.groundVelocity = coast.velocity && wall ? bounceGroundVelocity(coast.velocity, wall) : coast.velocity;
+    r.coastMoved = { x: coast.dx, z: coast.dz };
+  }
+  return r;
+}
+
+function stepGrounded(state: MovementStepState, moveDeltaX: number, moveDeltaZ: number, services: MovementServices): MovementStepResult {
   let x = state.x;
   let z = state.z;
   let revertCamera = false;

@@ -40,6 +40,19 @@ export function placementFrameOf(
 }
 
 /**
+ * The placement frame id SetPlacementFrame actually uses for `placementKey`:
+ * the key when the Setup has it, else 0 (Default) when it has that, else
+ * null (identity). The 1999 shields have no Shield (6) frame: 6 resolves to 0.
+ */
+export function resolvedPlacementFrameId(
+  setup: Pick<SetupModel, 'placementFrames'>,
+  placementKey: number = PLACEMENT_RESTING,
+): number | null {
+  if (setup.placementFrames.has(placementKey)) return placementKey;
+  return setup.placementFrames.has(0) ? 0 : null;
+}
+
+/**
  * Extract part placements from a SetupModel for rendering, at the Resting
  * placement unless a key is given (BUG.parent-event-placement-dropped —
  * a missing key falls back to Default, see placementFrameOf).

@@ -68,9 +68,10 @@ export interface World {
    */
   compatWarning?: string | null;
   /**
-   * The server's per-address caps (accounts created, sessions at once), which
-   * every webAC player shares through the bridge's one address; they change
-   * what its login refusals mean (loginFailureText). null/absent: none known.
+   * The server's per-address caps (accounts created, sessions at once,
+   * characters in the world at once), which every webAC player shares
+   * through the bridge's one address; they change what its refusals mean
+   * (loginFailureText; perIpInWorldText for an enter). null/absent: none known.
    */
   perIpLimits?: PerIpLimits | null;
 }
@@ -79,6 +80,8 @@ export interface World {
 export interface PerIpLimits {
   accounts: number;
   sessions: number;
+  /** Characters in the world at once per address (DreamWeave: 1). Absent = no such rule. */
+  characters?: number;
 }
 
 /** A /servers row's (or a stashed world's) perIpLimits, or null when absent or malformed. */
@@ -88,8 +91,15 @@ export function perIpLimitsFrom(v: unknown): PerIpLimits | null {
   const n = (x: unknown): number | null => (typeof x === 'number' && Number.isInteger(x) && x >= 0 ? x : null);
   const accounts = n(r.accounts);
   const sessions = n(r.sessions);
-  if (accounts === null || sessions === null || (accounts === 0 && sessions === 0)) return null;
-  return { accounts, sessions };
+  // Optional (a bridge that predates it sends none); a malformed value counts as no rule.
+  const characters = r.characters === undefined ? 0 : n(r.characters) ?? 0;
+  if (accounts === null || sessions === null || (accounts === 0 && sessions === 0 && characters === 0)) return null;
+  return characters > 0 ? { accounts, sessions, characters } : { accounts, sessions };
+}
+
+/** The world's characters-in-the-world-per-address rule (0 = none): the CharacterError 0x0D reading. */
+export function perIpCharacterLimit(world: { readonly perIpLimits?: PerIpLimits | null } | null | undefined): number {
+  return world?.perIpLimits?.characters ?? 0;
 }
 
 export interface WorldDirectory {
@@ -389,6 +399,26 @@ export function perIpServerFullText(limits: PerIpLimits): string {
   const n = limits.sessions;
   const who = n === 1 ? 'One webAC player is' : `${capitalized(countWord(n))} webAC players are`;
   return `${who} already on this server; it allows ${countWord(n)} per network address, and every webAC player shares ours. Try again later.`;
+}
+
+/**
+ * The final dialog of an enter refused with "character still in the world"
+ * (CharacterError 0x0D) on a world that lets `characters` characters in per
+ * address (DreamWeave: 1): the holder is another webAC player, since every
+ * webAC player shares the bridge's address. Replaces retail's "One of your
+ * characters is still in the world", which sent players looking for a
+ * character they never had in (session/InWorldHolder.ts).
+ */
+export function perIpInWorldText(characters: number): string {
+  const who = characters === 1 ? 'Another webAC player is' : `${capitalized(countWord(characters))} other webAC players are`;
+  return `${who} in this world right now. This server lets ${countWord(characters)} character${characters === 1 ? '' : 's'} in per network address, `
+    + 'and every webAC player shares ours.\n\nTry again later, or pick another world.';
+}
+
+/** The line under Entering World while that refusal is retried. */
+export function perIpInWorldStatus(characters: number): string {
+  return `This server lets ${countWord(characters)} character${characters === 1 ? '' : 's'} in per network address, and every webAC player shares ours: `
+    + `waiting for ${characters === 1 ? 'the webAC player' : 'a webAC player'} in the world to leave…`;
 }
 
 /**

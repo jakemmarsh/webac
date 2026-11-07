@@ -78,6 +78,39 @@ export function deliverWeenieError(
   return { sink: 'chat', type, text };
 }
 
+/**
+ * BUG.ac1999-server-no-mtable-data — the codes whose HandleFailureEvent arm first ends a repeating attack.
+ * Before any text, both clients' switch checks for five codes whether an automatic attack is running and,
+ * if so, aborts it (CancelAttack goes out, the repeat stops, a combat bar hides):
+ *   - end of retail, ClientCommunicationSystem::HandleFailureEvent @ 00571990, the branch @ 005719de: 0x23, 0x36,
+ *     0x3e, then 0x43 / 0x3f7 jump to it → RepeatAttackInProgress @ 0056a860 → AbortAutomaticAttack @ 0056ae90;
+ *   - 1999, UI_HandleFailureEvent @ 0x004ccd10 (the branch @ 0x004ccd4a): 0x23, 0x36, 0x3e, 0x43, 0x3f7 → 0x004f8e50
+ *     (repeat on and an attack running) → 0x004f94b0 → CancelAttack @ 0x004f9530.
+ * 0x43 WERROR_NO_MTABLE_DATA (a motion the server could not play) prints nothing in either client; this
+ * abort is all it does. The other four keep their text (0x23 "Unable to move to object!", 0x36 "Action
+ * cancelled!", 0x3e / 0x3f7 "You are too fatigued to attack!" in 1999).
+ */
+export const FAILURE_ABORTS_REPEAT_ATTACK: ReadonlySet<number> = new Set([0x23, 0x36, 0x3e, 0x43, 0x3f7]);
+
+/** The two ClientCombatSystem calls HandleFailureEvent's abort branch makes (AttackRequestController). */
+export interface RepeatAttackControl {
+  repeatAttackInProgress(): boolean;
+  abortAutomaticAttack(): void;
+}
+
+/**
+ * HandleFailureEvent's leading branch: for a FAILURE_ABORTS_REPEAT_ATTACK code with a repeat attack in
+ * progress, abort it. Runs for every way a code reaches the switch (WeenieError 0x28A / the AC1999 0x1C,
+ * WeenieErrorWithString 0x28B, a non-zero UseDone 0x1C7, the 0xA0 codes that run the switch). Returns
+ * whether it aborted.
+ */
+export function abortRepeatAttackOnFailure(code: number, combat: RepeatAttackControl | null | undefined): boolean {
+  if (!combat || !FAILURE_ABORTS_REPEAT_ATTACK.has(code)) return false;
+  if (!combat.repeatAttackInProgress()) return false;
+  combat.abortAutomaticAttack();
+  return true;
+}
+
 // BUG.duplicate-local-sounds — weenieErrorChimes (FAITHFUL.415/.416/.425) is
 // gone: ClientCommunicationSystem::HandleFailureEvent @ 00571990 prints the
 // text and plays nothing; no retail code path plays UI_GeneralError

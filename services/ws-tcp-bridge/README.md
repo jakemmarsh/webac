@@ -109,7 +109,7 @@ frozen page shows as a large `browserQuietMs` on a socket that never timed out.
 | `BRIDGE_ALLOW_ANY_UDP_SOURCE` | off | Accept reply datagrams from any source (default: only the target's IP on base/base+1) |
 | `BRIDGE_SPP` | off | Pinned mode: the target trusts this bridge and reads each player's real address from a [Simple Proxy Protocol](https://developers.cloudflare.com/spectrum/reference/simple-proxy-protocol-header/) header on every datagram. Needs a server running the proposed ACE `TrustedProxyAddresses` (ACEmulator/ACE#4508, not merged; stock ACE has no support). Turn on only together with the server (docs/operators.md) |
 | `BRIDGE_SPP_SERVERS` | unset | Multi mode: comma-separated server ids that trust this bridge (as `BRIDGE_SPP`); era probes skip them |
-| `BRIDGE_EGRESS_SERVERS` | unset (off) | Per-session egress addresses (below): comma list of `<server id>:<sessionsPerAddress>[:<newAccountsPerRealIp>[:<accountsPerAddress>]]`, e.g. `ac1999:2:2:2` (pinned mode: `pinned:…`). `accountsPerAddress` (the world's lifetime account creations per source address) defaults to `newAccountsPerRealIp`. Unset = off: no egress code runs and the AWS SDK is never loaded. A malformed entry stops the bridge from starting |
+| `BRIDGE_EGRESS_SERVERS` | unset (off) | Per-session egress addresses (below): comma list of `<server id>:<sessionsPerAddress>[:<newAccountsPerRealIp>[:<accountsPerAddress>]]`, e.g. `ac1999:2:2:2,1f069f0d-1b2a-421b-a723-297486a82cd7:1` (AC1999, and DreamWeave's one session per address; pinned mode: `pinned:…`). `accountsPerAddress` (the world's lifetime account creations per source address) defaults to `newAccountsPerRealIp`. Unset = off: no egress code runs and the AWS SDK is never loaded. A malformed entry stops the bridge from starting |
 | `BRIDGE_EGRESS_PROVIDER` | aws | `aws`: an Elastic IP per slot (secondary private IPv4) while it carries sessions. `static`: the slots are used as they are (tests, dev with loopback aliases, a host whose addresses are already public) |
 | `BRIDGE_EGRESS_SLOTS` | aws: discovered | Comma list of local IPv4s to bind sessions to. `aws` default: every secondary private IPv4 on every ENI of the instance (IMDSv2), never an ENI's primary address. Required for `static` |
 | `BRIDGE_EGRESS_DIR` | `/var/lib/webac/egress` | State shared by every bridge process on the host (both sides of a blue/green drain): lock files, the hash salt, the account sets. Must be writable by the bridge's user (uid 1000 in the image) |
@@ -246,11 +246,12 @@ that window counts against the world's per-address cap with the ghost. With
 
 Refusals close the WebSocket with codes the client maps to plain messages
 (`packages/network/src/BridgeRefusal.ts`): the per-real-IP session cap is the
-bridge's `ip_cap` (4429), no free slot or an AWS failure (address quota,
+bridge's `ip_cap` code (4429) with the reason `server_ip_cap:<sessionsPerAddress>`
+(a page that predates the reason reads it as the bridge's own cap), no free slot or an AWS failure (address quota,
 throttling) is `world_full` (4503), the new-account limit is
 `new_account_cap` (4403), and no address that may still create accounts is
 `new_account_unavailable` (4504). An egress world's `/servers` row drops its
-shared-cap warning and `perIpLimits`.
+shared-cap warning and `perIpLimits` (docs/per-ip-worlds.md).
 
 State lives in `BRIDGE_EGRESS_DIR`, shared by both bridge processes of a
 blue/green deploy: a lock file per live session (exclusive create, refreshed

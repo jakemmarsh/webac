@@ -47,7 +47,7 @@ Pick one:
    by real address. See the bridge [README](../services/ws-tcp-bridge/README.md)
    for every option.
 
-## If your world limits accounts per IP (AC1999 servers)
+## If your world limits accounts per IP (AC1999 servers, DreamWeave)
 
 The AC1999 server can cap both the accounts created from one address and the
 sessions online at once from one address (`max_accounts_per_ip` and
@@ -94,6 +94,19 @@ The launcher marks a world with these caps ("Existing accounts only: webAC
 can't create new ones here yet.") and explains its refusals in these terms
 (`perIpLimits` in `services/ws-tcp-bridge/src/serverCompat.ts`). We remove the
 mark once the world exempts the bridge.
+
+**Other servers with a per-address rule.** Any world can have one, not only
+AC1999. DreamWeave (a modified ACE) lets one character into the world per
+address. Through the shared bridge address, that means one browser player at a
+time: the next player's enter is refused with "One of your characters is still
+in the world" even though they never had a character in. The launcher marks the
+world ("Only one webAC player can be in this world at a time.") and tells such
+a player that another webAC player is in the world. To let browser players in
+together, exempt the bridge's address from the rule, or have your server trust
+the bridge's real-address header (below). The hosted bridge can also give each
+session its own address (per-session egress, as for AC1999 and DreamWeave),
+which puts the rule back on each player. Our list of worlds with these rules is in
+[per-ip-worlds.md](per-ip-worlds.md). Tell us about yours in an issue.
 
 ## If your world blocks VPNs or proxies
 

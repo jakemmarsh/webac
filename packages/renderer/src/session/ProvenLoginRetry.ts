@@ -73,7 +73,7 @@ export interface FirstTimeRetryWorld {
   readonly emu: string | null;
   readonly registration: string | null;
   readonly registrationUrl: string | null;
-  readonly perIpLimits?: { readonly accounts: number; readonly sessions: number } | null;
+  readonly perIpLimits?: { readonly accounts: number; readonly sessions: number; readonly characters?: number } | null;
 }
 
 /** Emulators whose "Client logon failed" can be their own account query failing (GDLE Network.cpp AuthenticateUserQuery::PerformQuery). */

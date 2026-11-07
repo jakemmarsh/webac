@@ -6,6 +6,7 @@ import {
   type DegradeLod, type DegradeChain, INVALID_DID, isBillboardMode, billboardRotation,
   MAX_CELL_2D_DEGRADE_DISTANCE, landCellCenter,
 } from '../models/DegradeLod.js';
+import { datMissEpoch, noDatMissSince, onDatMissResolved } from '@ac/dat-parser/streaming/DatMiss.js';
 
 /**
  * PERF.1 — cross-landblock instancing pool for landscape scenery and
@@ -64,6 +65,14 @@ export class SceneryInstancePool {
   private landCells: boolean;
   private viewer: THREE.Vector3 | null = null;
   private lastViewer = new THREE.Vector3(NaN, NaN, NaN);
+  /**
+   * BUG.scenery-pop-in-order — families with a degrade level whose GfxObj
+   * missed (streamed DATs) when its meshes were first needed; re-committed
+   * once missed files land (onDatMissResolved), so those instances draw.
+   */
+  private unresolvedLevels = new Set<Family>();
+  private retryUnresolved = false;
+  private unsubscribeArrival: (() => void) | null = null;
 
   constructor(
     instancer: SceneryInstancer,
@@ -179,6 +188,7 @@ export class SceneryInstancePool {
       if (family.count > 0) continue;
       for (const mesh of this.allMeshes(family)) { this.onMeshRemoved(mesh); mesh.dispose(); }
       this.families.delete(id);
+      this.unresolvedLevels.delete(family);
       retired++;
     }
     return retired;
@@ -223,6 +233,12 @@ export class SceneryInstancePool {
    */
   updateLod(viewerPos: THREE.Vector3): void {
     if (!this.lod) return;
+    if (this.retryUnresolved) {
+      this.retryUnresolved = false;
+      const retry = [...this.unresolvedLevels];
+      this.unresolvedLevels.clear();
+      for (const family of retry) if (this.families.get(family.gfxObjId) === family) this.commit(family);
+    }
     if (!this.viewer) this.viewer = new THREE.Vector3();
     this.viewer.copy(viewerPos);
     const moved = !this.lastViewer.equals(viewerPos);
@@ -505,7 +521,19 @@ export class SceneryInstancePool {
         return lod.levelMeshes[level]!;
       }
     }
+    const epoch = datMissEpoch();
     const templates = this.instancer.templatesFor(gfxObjId);
+    if ((!templates || templates.length === 0) && !noDatMissSince(epoch)) {
+      // BUG.scenery-pop-in-order — the level GfxObj (or a file it needs) is
+      // not resident yet (an evicted leaf, a swept template rebuilt later).
+      // Caching null here hid every instance at this level for as long as
+      // the family lived: the object drew only once the player was close
+      // enough for another level, a pop-in right next to them. Retry when
+      // the files land.
+      this.unresolvedLevels.add(family);
+      this.unsubscribeArrival ??= onDatMissResolved(() => { this.retryUnresolved = true; });
+      return null;
+    }
     let meshes: THREE.InstancedMesh[] | null = null;
     if (templates && templates.length > 0) {
       meshes = templates.map(t => {

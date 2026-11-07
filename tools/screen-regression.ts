@@ -25,6 +25,18 @@
  *   --compare-only  skip both captures and diff the base/ and head/ already on
  *             disk (e.g. after re-running one side's capture-ui-screens.ts by
  *             hand when its page load timed out).
+ *   --base-cache <dir>  keep the base side's captures per (base sha, era variant,
+ *             capture) under <dir> and reuse them while the base is unchanged:
+ *             a run whose captures are all cached starts no base worktree or
+ *             Vite (tools/lib/screen-base-cache.ts). Needs capture-name
+ *             filters to reuse (no filters = every capture: taken and stored).
+ *             An unexpected change judged against a cached base is re-judged
+ *             against a fresh base capture of just those captures before it
+ *             fails, so a stale cache entry never fails a run.
+ *   --base-cache-mode reuse|refresh  refresh always captures the base and
+ *             stores it (the live gate's full tier seeds the cache this way).
+ *   --head-port <port>  capture HEAD from a Vite already serving this checkout
+ *             on that port (the live gate's own) instead of starting one.
  *   --calibrate  base = HEAD (same code both sides); records each capture's
  *             observed noise {ratio, largest cluster, date, renderer} in
  *             verification/screen-regression-noise.json (committed;
@@ -43,7 +55,10 @@
  * bridge (default ws://localhost:9090), and the output and noise floors are
  * kept per era (verification/screen-regression-<era>/,
  * screen-regression-noise.<era>.json), so a classic run never touches the
- * end-of-retail baseline. tools/screen-regression-eras.sh runs every era.
+ * end-of-retail baseline. tools/screen-regression-eras.sh runs every era,
+ * AC1999 included (ACJS_ERA=ac1999-retail, its bridge on :9312, an account of
+ * 8 characters at most). ACJS_EXTRA_QUERY appends page parameters to both
+ * sides' URL (e.g. datSet=…&eraDatSet=… to capture the production files).
  *
  * Account: testacjs by default. Set ACJS_ACCOUNT (+ ACJS_PASSWORD, default =
  * the account name) to capture on another account, e.g. ACJS_ACCOUNT=testacjs2
@@ -63,6 +78,9 @@ import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
+import {
+  PREWORLD_ONLY_FILTER, cacheDirFor, materializeBase, planBaseCapture, readCacheState, storeBaseCapture, touchAndPrune, variantKey,
+} from './lib/screen-base-cache.js';
 import {
   acquireRunLock,
   BROKEN_CAPTURE_RATIO, clusterThresholdFor, diffPair, formatReport, judge, kindFor, mergeNoise, thresholdFor,
@@ -92,7 +110,11 @@ const GPU = args.includes('--gpu');
 const NOISE_FILE = join(ROOT, 'verification',
   `screen-regression-noise${ERA ? `.${ERA}` : ''}${GPU ? '.gpu' : ''}.json`);
 const expect = (flag('--expect') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-const filters = args.filter((a, i) => !a.startsWith('--') && !['--base', '--expect'].includes(args[i - 1]));
+const VALUE_FLAGS = ['--base', '--expect', '--base-cache', '--base-cache-mode', '--head-port'];
+const filters = args.filter((a, i) => !a.startsWith('--') && !VALUE_FLAGS.includes(args[i - 1]));
+const BASE_CACHE = flag('--base-cache');
+const BASE_CACHE_MODE: 'reuse' | 'refresh' = flag('--base-cache-mode') === 'refresh' ? 'refresh' : 'reuse';
+const HEAD_PORT = flag('--head-port') ? Number(flag('--head-port')) : null;
 
 const git = (...a: string[]) => execFileSync('git', a, { cwd: ROOT, encoding: 'utf8' }).trim();
 
@@ -141,13 +163,14 @@ function stop(p: ChildProcess | undefined): void {
   if (p?.pid) { try { process.kill(-p.pid, 'SIGTERM'); } catch { /* gone */ } }
 }
 
-function capture(port: number, outDir: string): void {
+function capture(port: number, outDir: string, names: readonly string[] = filters): void {
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
   const url = `http://localhost:${port}/?ace&bridge=${BRIDGE}&account=${ACCOUNT}&password=${PASSWORD}&cb=regress`
-    + (ERA ? `&era=${encodeURIComponent(ERA)}` : '');
+    + (ERA ? `&era=${encodeURIComponent(ERA)}` : '')
+    + (process.env.ACJS_EXTRA_QUERY ? `&${process.env.ACJS_EXTRA_QUERY.replace(/^[?&]/, '')}` : '');
   console.log(`[regress] capturing :${port} → ${relative(ROOT, outDir)}`);
-  execFileSync('npx', ['tsx', join(ROOT, 'tools', 'capture-ui-screens.ts'), '--out', outDir, '--no-world', ...(UI_ONLY ? ['--panels'] : []), ...filters], {
+  execFileSync('npx', ['tsx', join(ROOT, 'tools', 'capture-ui-screens.ts'), '--out', outDir, '--no-world', ...(UI_ONLY ? ['--panels'] : []), ...names], {
     cwd: ROOT, stdio: 'inherit', env: { ...process.env, AC_URL: url, ...(GPU ? { AC_GPU: '1' } : {}) },
   });
 }
@@ -199,8 +222,27 @@ async function main(): Promise<void> {
   }
   console.log(`[regress] base ${baseSha.slice(0, 8)} vs head ${headSha.slice(0, 8)} (working tree)`);
 
-  if (!COMPARE_ONLY) await captureBoth(baseSha);
-  compareAndReport(baseSha, headSha, noise);
+  if (COMPARE_ONLY) process.exit(compareAndReport(baseSha, headSha, noise).length ? 1 : 0);
+  const cache = BASE_CACHE && !CALIBRATE ? baseCache(baseSha) : null;
+  const fromCache = await captureBoth(baseSha, cache);
+  let unexpected = compareAndReport(baseSha, headSha, noise);
+  if (unexpected.length && cache && fromCache) {
+    // A cached base can be hours old: before failing, re-take the base side of just what changed and judge again.
+    const panels = [...new Set(unexpected.filter((n) => !n.startsWith('preworld/') && !n.startsWith('scenes/')))];
+    console.log(`[regress] ${unexpected.length} change(s) against the cached base (${unexpected.join(', ')}): re-capturing the base side of ${panels.length ? panels.join(', ') : 'the pre-world flow'} and judging again`);
+    await captureBaseSide(baseSha, panels.length ? panels : [PREWORLD_ONLY_FILTER], cache);
+    unexpected = compareAndReport(baseSha, headSha, noise);
+  }
+  process.exit(unexpected.length ? 1 : 0);
+}
+
+interface BaseCache { dir: string; root: string }
+function baseCache(baseSha: string): BaseCache {
+  const root = BASE_CACHE!;
+  const variant = variantKey({ era: ERA, gpu: GPU, account: ACCOUNT, extraQuery: process.env.ACJS_EXTRA_QUERY ?? '', ui: UI_ONLY });
+  const dropped = touchAndPrune(root, baseSha);
+  if (dropped.length) console.log(`[regress] base cache: pruned ${dropped.length} older base(s)`);
+  return { root, dir: cacheDirFor(root, baseSha, variant) };
 }
 
 /** Whether the base commit's package-lock.json differs from HEAD's working tree. */
@@ -213,8 +255,8 @@ function baseLockDiffers(baseSha: string): boolean {
   return base.trim() !== head.trim();
 }
 
-async function captureBoth(baseSha: string): Promise<void> {
-  // Base build: a detached worktree sharing this checkout's deps and DATs.
+/** A detached worktree of the base commit sharing this checkout's DATs (and deps, unless its lockfile differs). */
+function baseWorktree(baseSha: string): string {
   const wt = join(tmpdir(), `acjs-regress-${baseSha.slice(0, 8)}-${process.pid}`);
   git('worktree', 'add', '--detach', '-f', wt, baseSha);
   const link = (rel: string) => {
@@ -234,30 +276,76 @@ async function captureBoth(baseSha: string): Promise<void> {
       for (const p of readdirSync(join(ROOT, pkgDir))) link(join(pkgDir, p, 'node_modules'));
     }
   }
+  return wt;
+}
 
-  let baseVite: ChildProcess | undefined;
-  let headVite: ChildProcess | undefined;
+/** Run `fn` with a Vite on the base commit; the worktree and Vite are gone afterwards (unless --keep). */
+async function withBaseVite(baseSha: string, fn: (port: number) => void): Promise<void> {
+  const wt = baseWorktree(baseSha);
+  let vite: ChildProcess | undefined;
   const cleanup = () => {
-    stop(baseVite); stop(headVite);
+    stop(vite);
     if (!KEEP) { try { git('worktree', 'remove', '--force', wt); } catch { rmSync(wt, { recursive: true, force: true }); } }
   };
-  process.on('SIGINT', () => { cleanup(); process.exit(130); });
-  process.on('SIGTERM', () => { cleanup(); process.exit(143); });
+  const sigint = () => { cleanup(); process.exit(130); };
+  const sigterm = () => { cleanup(); process.exit(143); };
+  process.on('SIGINT', sigint); process.on('SIGTERM', sigterm);
   try {
-    const basePort = await freePort();
-    const headPort = await freePort();
-    baseVite = startVite(wt, basePort);
-    headVite = startVite(ROOT, headPort);
-    await waitOwnVite(baseVite, basePort);
-    await waitOwnVite(headVite, headPort);
-    capture(basePort, join(OUT, 'base'));
-    capture(headPort, join(OUT, 'head'));
+    const port = await freePort();
+    vite = startVite(wt, port);
+    await waitOwnVite(vite, port);
+    fn(port);
   } finally {
     cleanup();
+    process.off('SIGINT', sigint); process.off('SIGTERM', sigterm);
   }
 }
 
-function compareAndReport(baseSha: string, headSha: string, noise: NoiseFloor): void {
+/** Capture the base side (`names` as the panel filters) into OUT/base; with a cache, store it and rebuild OUT/base from the cache. */
+async function captureBaseSide(baseSha: string, names: readonly string[], cache: BaseCache | null): Promise<void> {
+  await withBaseVite(baseSha, (port) => capture(port, join(OUT, 'base'), names));
+  if (cache) {
+    storeBaseCapture(cache.dir, join(OUT, 'base'), names);
+    if (filters.length) materializeBase(cache.dir, join(OUT, 'base'), filters);
+  }
+}
+
+/** Both sides. Returns whether any base capture the judgment uses came from the cache. */
+async function captureBoth(baseSha: string, cache: BaseCache | null): Promise<boolean> {
+  let fromCache = false;
+  if (cache) {
+    const plan = planBaseCapture(filters.length ? filters : null, readCacheState(cache.dir), BASE_CACHE_MODE);
+    if (!plan.capture) {
+      materializeBase(cache.dir, join(OUT, 'base'), filters);
+      console.log(`[regress] base ${baseSha.slice(0, 8)}: every capture from the cache (${cache.dir}); no base worktree or Vite`);
+      fromCache = true;
+    } else {
+      // Only part of the base is taken now when the plan narrowed the filters; the rest is the cache's.
+      fromCache = BASE_CACHE_MODE === 'reuse' && filters.length > 0 && plan.filters.join(',') !== filters.join(',');
+      console.log(`[regress] base ${baseSha.slice(0, 8)}: capturing ${plan.filters.length ? plan.filters.join(', ') : 'everything'} (${BASE_CACHE_MODE === 'refresh' ? 'refresh' : 'not cached yet'})${fromCache ? '; the rest from the cache' : ''}`);
+      await captureBaseSide(baseSha, plan.filters, cache);
+    }
+  } else {
+    await captureBaseSide(baseSha, filters, null);
+  }
+  // HEAD: the given Vite (the live gate's), else our own.
+  if (HEAD_PORT) {
+    await waitHttp(`http://localhost:${HEAD_PORT}/`);
+    capture(HEAD_PORT, join(OUT, 'head'));
+  } else {
+    let headVite: ChildProcess | undefined;
+    try {
+      const headPort = await freePort();
+      headVite = startVite(ROOT, headPort);
+      await waitOwnVite(headVite, headPort);
+      capture(headPort, join(OUT, 'head'));
+    } finally { stop(headVite); }
+  }
+  return fromCache;
+}
+
+/** Diff base/ and head/, write the report; returns the unexpected changes' names. */
+function compareAndReport(baseSha: string, headSha: string, noise: NoiseFloor): string[] {
   const base = listPngs(join(OUT, 'base'));
   const head = listPngs(join(OUT, 'head'));
   const diffDir = join(OUT, 'diff');
@@ -294,7 +382,7 @@ function compareAndReport(baseSha: string, headSha: string, noise: NoiseFloor): 
   const report = formatReport(verdict, baseSha.slice(0, 8), `${headSha.slice(0, 8)}+wt`);
   writeFileSync(join(OUT, 'report.md'), report);
   console.log(`\n${report}\n[regress] base/, head/, diff/ and report.md in ${relative(ROOT, OUT)}/`);
-  process.exit(verdict.unexpected.length ? 1 : 0);
+  return verdict.unexpected.map((d) => d.name);
 }
 
 main().catch((e) => { console.error(e); process.exit(2); });

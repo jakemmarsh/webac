@@ -16,6 +16,19 @@
  *     progress is always resumed before a new one starts, so at most one
  *     block is ever partially built.
  *
+ * BUG.scenery-pop-in-order — "nearest" is measured from the player's own
+ * position when the caller passes it (pump's `viewer`): the distance from
+ * the player to the block's nearest edge, plus up to HEADING_PENALTY_M for
+ * a block behind the direction of travel. The old key was the block-centre
+ * distance from the player's BLOCK, so the 16 blocks of the prefetch ring
+ * tied in fours and went lowest key first: walking east out of Holtburg the
+ * block behind (0xA7B4) was fetched first and the ones ahead 4th, 11th–16th,
+ * and on a slow link those arrived after the player had already reached
+ * them. Re-scored every pump, so the order follows the player as they move
+ * and turn. Retail has no order to copy (LScape::update_block @ 005063a0
+ * loads its whole grid synchronously from the local DAT); this order is the
+ * browser-UX one: what is near and ahead first.
+ *
  * The budget is per frame, so on a slow machine it was per much less time:
  * at 3–4 FPS (prod 2026-10-20, Intel UHD 630 at ~300 ms frames) 6 ms a frame
  * is ~20 ms of loading a second against ~360 ms at 60 FPS, and the streamed
@@ -36,6 +49,43 @@ export interface LandblockLoadSchedulerOptions {
   syncRadius?: number;
   /** Clock (ms). */
   now?: () => number;
+}
+
+/** The player's position (world metres, three.js x/z: block = floor(v / 192)) and direction of travel / facing. */
+export interface LoadViewer {
+  x: number;
+  z: number;
+  /** Unit direction (x, z); zero = no heading (pure distance). */
+  dirX: number;
+  dirZ: number;
+}
+
+/** Landblock edge, metres. */
+const BLOCK_M = 192;
+/**
+ * A block straight behind the viewer scores this many metres farther than
+ * one straight ahead at the same distance (scaled by (1 − cos θ) / 2): two
+ * thirds of a block, so a block the player stands next to always beats one
+ * a whole block away, whatever the heading.
+ */
+export const HEADING_PENALTY_M = 128;
+
+/**
+ * BUG.scenery-pop-in-order — a block's load priority score (lower = sooner):
+ * the viewer's distance to the block's nearest point, plus the heading
+ * penalty from the direction to the block's centre.
+ */
+export function blockLoadScore(bx: number, by: number, v: LoadViewer): number {
+  const x0 = bx * BLOCK_M, z0 = by * BLOCK_M;
+  const ex = v.x < x0 ? x0 - v.x : v.x > x0 + BLOCK_M ? v.x - (x0 + BLOCK_M) : 0;
+  const ez = v.z < z0 ? z0 - v.z : v.z > z0 + BLOCK_M ? v.z - (z0 + BLOCK_M) : 0;
+  const dist = Math.sqrt(ex * ex + ez * ez);
+  const cx = x0 + BLOCK_M / 2 - v.x, cz = z0 + BLOCK_M / 2 - v.z;
+  const cl = Math.sqrt(cx * cx + cz * cz);
+  const dl = Math.sqrt(v.dirX * v.dirX + v.dirZ * v.dirZ);
+  if (cl < 1e-6 || dl < 1e-6) return dist;
+  const cos = (cx * v.dirX + cz * v.dirZ) / (cl * dl);
+  return dist + HEADING_PENALTY_M * (1 - cos) / 2;
 }
 
 export interface PumpStats {
@@ -114,6 +164,16 @@ export class LandblockLoadScheduler {
     this.pending.delete(key);
   }
 
+  /** The viewer the last pump scored blocks from (null: block-centre distance from the player's block). */
+  private viewer: LoadViewer | null = null;
+
+  /** Queued blocks in the order the next pumps would start them (tests / probes). */
+  queueOrder(px: number, py: number, viewer: LoadViewer | null = this.viewer): Array<[number, number]> {
+    const jobs = [...this.pending.values()];
+    jobs.sort((a, b) => this.score(a, px, py, viewer) - this.score(b, px, py, viewer) || blockKey(a.bx, a.by) - blockKey(b.bx, b.by));
+    return jobs.map(j => [j.bx, j.by]);
+  }
+
   /** Run every queued job to completion (nearest-first from (cx, cy)). */
   flush(cx: number, cy: number): void {
     if (this.current) { this.drain(this.current.job); this.current = null; }
@@ -132,8 +192,13 @@ export class LandblockLoadScheduler {
     return Math.max(this.budgetMs, Math.min(MAX_SLOW_BUDGET_MS, iv * SLOW_FRAME_SHARE));
   }
 
-  /** One frame's worth of loading around the player's block (px, py). */
-  pump(px: number, py: number): PumpStats {
+  /**
+   * One frame's worth of loading around the player's block (px, py).
+   * `viewer` — the player's exact position and heading, which order the
+   * budgeted loads (blockLoadScore); omitted → the block-centre distance.
+   */
+  pump(px: number, py: number, viewer?: LoadViewer | null): PumpStats {
+    if (viewer !== undefined) this.viewer = viewer;
     const t0 = this.now();
     if (this.lastPumpAt !== null) {
       const dt = Math.min(MAX_INTERVAL_MS, t0 - this.lastPumpAt);
@@ -199,12 +264,16 @@ export class LandblockLoadScheduler {
     return n + 1;
   }
 
-  /** The waiting block nearest (Euclidean, in blocks) to (px, py); ties → lowest key, for determinism. */
+  private score(job: Job, px: number, py: number, viewer: LoadViewer | null): number {
+    return viewer ? blockLoadScore(job.bx, job.by, viewer) : (job.bx - px) ** 2 + (job.by - py) ** 2;
+  }
+
+  /** The waiting block that scores lowest (blockLoadScore from the viewer, else the block-centre distance from (px, py)); ties → lowest key, for determinism. */
   private nearest(px: number, py: number): number | null {
     let best: number | null = null;
     let bestD = Infinity;
     for (const [key, job] of this.pending) {
-      const d = (job.bx - px) ** 2 + (job.by - py) ** 2;
+      const d = this.score(job, px, py, this.viewer);
       if (d < bestD || (d === bestD && best !== null && key < best)) {
         best = key;
         bestD = d;

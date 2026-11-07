@@ -14,7 +14,8 @@
  */
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AgentItem, AgentObject, AgentResult, AgentSelf, AgentSpell } from '../../packages/renderer/src/agent/types.ts';
+import type { AgentItem, AgentObject, AgentResult, AgentSelf, AgentSpell, AgentVendor } from '../../packages/renderer/src/agent/types.ts';
+import { VENDOR_ACCEPTABILITY, vendorInqAcceptability } from '../../packages/renderer/src/ui/VendorSellDrag.ts';
 import { INVENTORY_KINDS, compassPoint } from '../../packages/renderer/src/agent/format.ts';
 import { REFUSAL_TEXT, isNoticeCode, isSpewNotice } from '../../packages/renderer/src/telemetry/RefusalReporter.ts';
 import { AC1999_TOWN_ROWS } from '../../packages/renderer/src/agent/towns1999.ts';
@@ -100,6 +101,18 @@ export interface PlaythroughDriver {
   magicFacts(spellIds: number[]): Promise<MagicFacts>;
   /** Screenshot of the page; the file's path relative to the report dir, or null when none could be taken. */
   screenshot(name: string): Promise<string | null>;
+  /** Evaluate a JavaScript expression (source text) in the page and return its JSON value. */
+  evaluate<T = unknown>(js: string): Promise<T>;
+  /** The real mouse: a left click at a viewport point (CSS px). */
+  click(at: { x: number; y: number }): Promise<void>;
+  /** The real mouse: press at `from`, move there in steps, release at `to` (Chromium runs the page's HTML5 drag and drop). */
+  drag(from: { x: number; y: number }, to: { x: number; y: number }): Promise<void>;
+  /** The real keyboard: a key (KeyboardEvent.code, e.g. KeyW, Space) down or up. */
+  key(code: string, down: boolean): Promise<void>;
+  /** Every console line the page logged since the run began, oldest first (the last few thousand). */
+  consoleLines(): string[];
+  /** The run's browser profile was made for it (no --profile), so browser storage started empty. */
+  readonly freshProfile: boolean;
   sleep(ms: number): Promise<void>;
   now(): number;
 }
@@ -239,6 +252,8 @@ export interface PlaythroughArgs {
    * steps' schools trained with skill credits). Off by default: it needs an admin test account.
    */
   admin: boolean;
+  /** --list: print the era's step ids and titles, run nothing. */
+  list: boolean;
 }
 
 export function parsePlaythroughArgs(argv: string[], env: NodeJS.ProcessEnv = process.env, random: () => number = Math.random): PlaythroughArgs {
@@ -268,6 +283,7 @@ export function parsePlaythroughArgs(argv: string[], env: NodeJS.ProcessEnv = pr
     dataRoot: get('data-root') ?? null,
     profile: get('profile') ?? null,
     admin: argv.includes('--admin'),
+    list: argv.includes('--list'),
   };
 }
 
@@ -492,7 +508,7 @@ export function exitCode(res: RunResult): number {
 
 const mdCell = (s: string): string => s.replace(/\|/g, '\\|').replace(/\n/g, ' ');
 
-export function renderReport(res: RunResult, meta: { era: EraPlan; url: string; account: string; character: string | null; started: Date; finished: Date }): string {
+export function renderReport(res: RunResult, meta: { era: EraPlan; url: string; account: string; character: string | null; started: Date; finished: Date; planned?: Array<Pick<Step, 'id' | 'title'>> }): string {
   const n = (s: StepStatus): number => res.records.filter((r) => r.status === s).length;
   const lines: string[] = [
     `# First-hour play-through: ${meta.era.label}`,
@@ -505,9 +521,11 @@ export function renderReport(res: RunResult, meta: { era: EraPlan; url: string; 
     '| # | step | result | time |',
     '|---|---|---|---|',
     ...res.records.map((r, i) => `| ${i + 1} | ${mdCell(r.title)} (\`${r.id}\`) | ${mdCell(statusLabel(r))} | ${(r.ms / 1000).toFixed(1)} s |`),
-    '',
-    '## Steps',
   ];
+  // The era's steps this run left out (--only, or an abort): listed so a report never hides a step by omission.
+  const notRun = (meta.planned ?? []).filter((p) => !res.records.some((r) => r.id === p.id));
+  if (notRun.length) lines.push('', `Not run this time (${res.aborted ? 'the run was aborted' : '--only'}): ${notRun.map((p) => `\`${p.id}\``).join(', ')}`);
+  lines.push('', '## Steps');
   for (const r of res.records) {
     lines.push('', `### ${r.title} (\`${r.id}\`): ${r.status === 'fail' ? 'FAIL' : r.status}`, '', r.detail || '(no detail)');
     if (r.problems.length) lines.push('', 'Health problems:', ...r.problems.map((p) => `- ${p}`));
@@ -946,16 +964,36 @@ export const vendorBuyStep: Step = {
     const me = await self(ctx);
     const pick = cheapestAffordable(parseVendorListing(opened.message), me?.pyreals);
     if (!pick) return skip(`${v.name} sells nothing ${me?.pyreals ?? 0} pyreals pay for`, { screenshots });
-    const before = new Set((await driver.call<AgentItem[]>('inventory')).map((i) => i.guid));
+    const before = await driver.call<AgentItem[]>('inventory');
     const bought = await driver.call<AgentResult>('buy', [pick.guid, 1, v.guid], 60_000);
     if (!bought.ok) return fail(`buying ${pick.name} (${pick.price}) from ${v.name}: ${msg(bought)}`, { screenshots });
-    const fresh = (await driver.call<AgentItem[]>('inventory')).filter((i) => !before.has(i.guid));
-    const got = fresh.find((i) => i.name.toLowerCase() === pick.name.toLowerCase()) ?? fresh[0];
-    if (!got) return fail(`the buy of ${pick.name} answered "${msg(bought)}" but nothing new is in the pack`, { screenshots });
+    // A new object, or (a stackable buy merged onto a stack the character held) that stack grown; the stack size can
+    // arrive a moment after the buy's answer, so look for up to 3 s.
+    let got: AgentItem | null = null;
+    for (let i = 0; i < 7 && !got; i++) {
+      if (i) await driver.sleep(500);
+      got = purchaseLanded(before, await driver.call<AgentItem[]>('inventory'), pick.name);
+    }
+    if (!got) return fail(`the buy of ${pick.name} answered "${msg(bought)}" but nothing new is in the pack and no stack of it grew`, { screenshots });
     ctx.state.bought = { guid: got.guid, name: got.name };
-    return ok(`at ${v.name}${walked}: bought ${got.name} #${got.guid.toString(16)} for ${pick.price}`, { screenshots });
+    const merged = before.some((b) => b.guid === got!.guid);
+    return ok(`at ${v.name}${walked}: bought ${got.name} #${got.guid.toString(16)} for ${pick.price}${merged ? ` (onto the stack held, now ${got.stack ?? '?'})` : ''}`, { screenshots });
   },
 };
+
+/**
+ * Where a purchase landed: a new object (the bought name first), else a held stack of that name that grew. The live
+ * gate's first fast run (ClassicACE, 2026-11-07): an Arrow bought "onto a stack of 1" made no new object, and the
+ * step failed though the purchase had landed.
+ */
+export function purchaseLanded(before: AgentItem[], after: AgentItem[], name: string): AgentItem | null {
+  const had = new Map(before.map((i) => [i.guid, i]));
+  const same = (i: AgentItem) => i.name.toLowerCase() === name.toLowerCase();
+  const fresh = after.filter((i) => !had.has(i.guid));
+  const n = fresh.find(same) ?? fresh[0];
+  if (n) return n;
+  return after.find((i) => same(i) && (i.stack ?? 1) > (had.get(i.guid)?.stack ?? 1)) ?? null;
+}
 
 /**
  * ACE's answer to a sell list holding an item the vendor won't take: an InventoryServerSaveFailed with WeenieError None
@@ -979,17 +1017,36 @@ export function saleEcho(era: EraPlan): ((r: RefusalSeen) => boolean) | undefine
   return (r) => r.source === 'server' && r.context === 'inventory_failed' && r.code === 'we:0x0037' && r.sink === 'none';
 }
 
+/**
+ * The items this vendor buys (VendorProfile::InqAcceptability against its merchandise mask and value range), in the
+ * given order. The live gate's first fast run (2026-11-07) offered an EoR Grocer Water and two Foci: all three
+ * refused, each refusal a client notice, and the step failed on them. No profile known: every item (the old way).
+ */
+export function sellableTo<T extends Pick<AgentItem, 'itemType' | 'value' | 'stack'>>(items: T[], buys: AgentVendor['buys'] | undefined, rule: 'eor' | 'ac1999'): T[] {
+  if (!buys) return items;
+  return items.filter((i) => vendorInqAcceptability({ itemType: i.itemType ?? 0, value: i.value ?? 0, stackSize: i.stack ?? 1 }, buys, rule) === VENDOR_ACCEPTABILITY.ok);
+}
+
 export const vendorSellStep: Step = {
   id: 'vendor-sell', title: 'Sell an item to the vendor', timeoutMs: 180_000,
   async run(ctx) {
     const { driver, state } = ctx;
     if (!state.vendor) return skip('no vendor window was opened');
+    // Its window first, so its profile (what it buys) is known.
+    await driver.call<AgentResult>('vendorAt', [state.vendor.guid, null], 120_000).catch(() => null);
+    const v = await driver.call<AgentVendor | null>('vendorData').catch(() => null);
+    const buys = v && v.guid === state.vendor.guid ? v.buys : undefined;
     const inv = await driver.call<AgentItem[]>('inventory');
-    const candidates = [
+    const pool = [
       ...(state.bought ? inv.filter((i) => i.guid === state.bought!.guid) : []),
       ...inv.filter((i) => i.where !== 'equipped' && INVENTORY_KINDS.sell(i) && i.guid !== state.bought?.guid),
-    ].slice(0, 3);
-    if (!candidates.length) return skip('nothing in the pack a vendor pays for');
+    ];
+    if (!pool.length) return skip('nothing in the pack a vendor pays for');
+    const candidates = sellableTo(pool, buys, ctx.era.key === 'ac1999-retail' ? 'ac1999' : 'eor').slice(0, 3);
+    if (!candidates.length) {
+      await driver.call('close', ['vendor']);
+      return skip(`${state.vendor.name} buys none of what the pack holds (its trade: item types 0x${(buys!.itemTypes >>> 0).toString(16)}; held: ${pool.slice(0, 4).map((c) => c.name).join(', ')})`);
+    }
     const tries: string[] = [];
     for (const it of candidates) {
       const r = await driver.call<AgentResult>('sell', [it.guid, null, state.vendor.guid], 60_000);
@@ -1446,10 +1503,37 @@ export const castAtSelfStep: Step = {
  * answers "Spawned N spell component types …") and a Wand (@spawnwcidinv 2472, the 1999 world's "02472 Wand"), which
  * answers nothing when it works: a new caster in the pack says so.
  */
-export const ADMIN_PREP_COMMANDS: ReadonlyArray<{ text: string; done: RegExp | 'new-caster'; why: string }> = [
-  { text: '@spellcomps 74 5', done: /^Spawned \d+ spell component types/i, why: 'spell components for the casts' },
-  { text: '@spawnwcidinv 2472', done: 'new-caster', why: 'a Wand to cast with' },
+export interface AdminPrepCommand {
+  text: string;
+  /** How it shows it worked: a chat line, a new caster in the pack, or any new item in the pack. */
+  done: RegExp | 'new-caster' | 'new-items';
+  why: string;
+  /**
+   * What "Unknown command" means on this server. AC1999 says it to a player account for every admin command, so it
+   * means "not an admin" (fail). ACE says it only for a command the server doesn't have (GameActionTalk
+   * CommandHandlerResponse.InvalidCommand; a player without the access level gets silence), so it means "this
+   * server has none": skip that command, saying so.
+   */
+  unknown: 'not-admin' | 'missing';
+}
+
+export const ADMIN_PREP_COMMANDS: ReadonlyArray<AdminPrepCommand> = [
+  { text: '@spellcomps 74 5', done: /^Spawned \d+ spell component types/i, why: 'spell components for the casts', unknown: 'not-admin' },
+  { text: '@spawnwcidinv 2472', done: 'new-caster', why: 'a Wand to cast with', unknown: 'not-admin' },
 ];
+
+/**
+ * ACE and ClassicACE (the live gate's first fast run, 2026-11-07: AC1999's @spellcomps answered "Unknown command:
+ * spellcomps" there): @comps (DeveloperCommands.HandleComps: one of each spell component, silently) and @ci 2472
+ * (AdminCommands.HandleCI; ACE-World's "02472 Wand").
+ */
+export const ACE_ADMIN_PREP_COMMANDS: ReadonlyArray<AdminPrepCommand> = [
+  { text: '@comps', done: 'new-items', why: 'spell components for the casts', unknown: 'missing' },
+  { text: '@ci 2472', done: 'new-caster', why: 'a Wand to cast with', unknown: 'missing' },
+];
+
+/** The era's admin prep commands. */
+export const adminPrepCommands = (era: EraPlan): ReadonlyArray<AdminPrepCommand> => (era.key === 'ac1999-retail' ? ADMIN_PREP_COMMANDS : ACE_ADMIN_PREP_COMMANDS);
 
 /** A server's no to an admin command from a player account. */
 const NOT_ADMIN = /unknown command|not a valid command|access|not authori[sz]ed|permission|privilege|couldn't find that to spawn|can't be spawned/i;
@@ -1477,10 +1561,11 @@ export const adminPrepStep: Step = {
   async run(ctx) {
     const { driver } = ctx;
     const said: string[] = [];
-    const casters = async (): Promise<AgentItem[]> => (await driver.call<AgentItem[]>('inventory')).filter((i) => ((i.itemType ?? 0) & 0x8000) !== 0);
-    for (const c of ADMIN_PREP_COMMANDS) {
+    const all = async (): Promise<AgentItem[]> => driver.call<AgentItem[]>('inventory');
+    const casters = async (): Promise<AgentItem[]> => (await all()).filter((i) => ((i.itemType ?? 0) & 0x8000) !== 0);
+    for (const c of adminPrepCommands(ctx.era)) {
       const before = driver.peek().chat.length;
-      const had = c.done === 'new-caster' ? new Set((await casters()).map((i) => i.guid)) : null;
+      const had = c.done === 'new-caster' ? new Set((await casters()).map((i) => i.guid)) : c.done === 'new-items' ? new Set((await all()).map((i) => i.guid)) : null;
       await driver.chat(c.text);
       let reply: string[] = [];
       let yes: string | null = null;
@@ -1490,6 +1575,9 @@ export const adminPrepStep: Step = {
         if (c.done === 'new-caster') {
           const got = (await casters()).find((x) => !had!.has(x.guid));
           if (got) yes = `${got.name} #${got.guid.toString(16)} in the pack`;
+        } else if (c.done === 'new-items') {
+          const got = (await all()).filter((x) => !had!.has(x.guid));
+          if (got.length) yes = `${got.length} new item(s) in the pack (${got.slice(0, 3).map((x) => x.name).join(', ')}${got.length > 3 ? ', …' : ''})`;
         } else {
           const done = c.done;
           const line = reply.find((l) => done.test(l));
@@ -1497,6 +1585,7 @@ export const adminPrepStep: Step = {
         }
       }
       const no = reply.find((l) => NOT_ADMIN.test(l));
+      if (no && c.unknown === 'missing' && UNKNOWN_COMMAND.test(no)) { said.push(`${c.text}: skipped, this server has no such command ("${no}")`); continue; }
       if (no) return fail(`${c.text} (${c.why}): "${no}": --admin needs an admin test account`, { allow: [/[\s\S]*/] });
       if (!yes) return fail(`${c.text} (${c.why}): nothing came of it within 6 s${reply.length ? ` ("${reply[0]}")` : ''} (--admin needs an admin test account)`, { allow: [/[\s\S]*/] });
       said.push(`${c.text}: ${yes}`);
@@ -1692,7 +1781,10 @@ export const logoutAndBackStep: Step = {
   },
 };
 
-/** The whole first hour, in a new player's order, for one era; `admin` adds the --admin prep after entering the world. */
+/**
+ * The whole first hour, in a new player's order, for one era; `admin` adds the --admin prep after entering the world.
+ * The tool adds the week's player-reported regression steps to it (playthrough-regressions.ts withRegressionSteps).
+ */
 export function playthroughSteps(era: EraPlan, opts: { admin?: boolean } = {}): Step[] {
   return [
     enterWorldStep,

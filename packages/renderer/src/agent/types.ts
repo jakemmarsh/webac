@@ -356,6 +356,11 @@ export interface AgentVendor {
   items: Array<{ guid: number; name: string; price: number; stack?: number; service?: boolean }>;
   /** "Pyreals", or the alternate currency the vendor trades in. */
   currency: string;
+  /**
+   * What the vendor buys: its VendorProfile (ApproachVendor's merchandise ItemType mask and unit-value range, -1 =
+   * no bound), the fields VendorSellUI::DragItemAcceptable's InqAcceptability reads. Absent before the profile came.
+   */
+  buys?: { itemTypes: number; minValue: number; maxValue: number };
 }
 
 export interface AgentTrade {

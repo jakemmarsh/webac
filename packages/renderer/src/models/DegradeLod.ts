@@ -5,7 +5,7 @@ import { GfxObj } from '@ac/dat-parser/file-types/GfxObj.js';
 import { GfxObjDegradeInfo, type GfxObjLOD } from '@ac/dat-parser/file-types/GfxObjDegradeInfo.js';
 import { LruMap } from '../utils/LruMap.js';
 import { inheritPartState } from './PartMaterialState.js';
-import { datMissEpoch, noDatMissSince } from '@ac/dat-parser/streaming/DatMiss.js';
+import { datMissEpoch, noDatMissSince, onDatMissResolved } from '@ac/dat-parser/streaming/DatMiss.js';
 
 /**
  * CORE.17.h.g.c.c — retail's per-part LOD ("degrade") system.
@@ -648,6 +648,11 @@ export class DegradeLod {
     return true;
   }
 
+  /** Parts whose current level's GfxObj missed (streamed DATs) — rebuilt on arrival. */
+  private readonly unresolved = new Set<PartEntry>();
+  private retryUnresolved = false;
+  private stopArrival: (() => void) | null = null;
+
   /** updateParts' per-call ancestor memo (parent → ANC_* bits). */
   private readonly ancestorMemo = new Map<THREE.Object3D, number>();
 
@@ -675,6 +680,16 @@ export class DegradeLod {
     // frames are always seen.
     const memo = this.ancestorMemo;
     memo.clear();
+    if (this.retryUnresolved) {
+      this.retryUnresolved = false;
+      const retry = [...this.unresolved];
+      this.unresolved.clear();
+      for (const entry of retry) {
+        if (!this.parts.has(entry)) continue;
+        const h = this.holderFor(entry, entry.level);
+        if (h) h.visible = true;
+      }
+    }
     for (const entry of this.parts) {
       const part = entry.part;
       // Prune parts whose object left the scene; honour the no-degrade mark
@@ -707,7 +722,7 @@ export class DegradeLod {
       // Detached (scene.remove / disposed): retire the entry — an object that
       // is re-added gets rebuilt through SetupModelRenderer and re-registers.
       // (A parentless part is its own root, never a Scene.)
-      if ((bits & ANC_IN_SCENE) === 0) { this.parts.delete(entry); continue; }
+      if ((bits & ANC_IN_SCENE) === 0) { this.parts.delete(entry); this.unresolved.delete(entry); continue; }
       let level = 0;
       let from: DistanceSource = 'part';
       if (!excluded) {
@@ -758,7 +773,16 @@ export class DegradeLod {
     } else {
       const id = entry.chain.levelIds[level];
       if (id !== INVALID_DID) {
+        const epoch = datMissEpoch();
         const built = entry.build(id);
+        if (!built && !noDatMissSince(epoch)) {
+          // BUG.scenery-pop-in-order — the level GfxObj is not resident yet
+          // (streamed DATs): don't cache "nothing" for the part's lifetime;
+          // build it again when the files land (updateParts).
+          this.unresolved.add(entry);
+          this.stopArrival ??= onDatMissResolved(() => { this.retryUnresolved = true; });
+          return null;
+        }
         if (built) {
           holder = built;
           holder.name = `lod_${level}`;

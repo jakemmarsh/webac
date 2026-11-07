@@ -451,14 +451,29 @@ export class CharacterAnimController {
     // SWEEP1006 jump links — LeaveGround's RemoveLinkAnimations: Falling
     // does not wait behind a swing or emote still playing.
     this.mm.removeLinkAnimations();
-    const fallingKey = MotionManager.compositeKey(this.mm.styleKey, MotionCommand.Falling & 0xFFFFF);
-    this.mm.setForwardMotion(fallingKey);
-    this.currentPrimaryMotion = MotionCommand.Falling;
-    // HitGround's apply_current_movement re-applies everything out of Falling.
-    this.resetTableState(MotionCommand.Falling);
+    const ts = this.tableState;
+    if (!ts) {
+      const fallingKey = MotionManager.compositeKey(this.mm.styleKey, MotionCommand.Falling & 0xFFFFF);
+      this.mm.setForwardMotion(fallingKey);
+      this.currentPrimaryMotion = MotionCommand.Falling;
+      return;
+    }
+    // apply_interpreted_movement @ 00528600 with contact_allows_move failing:
+    // DoInterpretedMotion(Falling) is an ordinary substate change
+    // (GetObjectSequence @ 00522860; onSubstate plays it through its link).
+    // The human Falling cycle's bitfield is 0, so clear_modifiers does not
+    // run and re_modify keeps a held turn / sidestep modifier; then only the
+    // held turn is done again (the Falling branch skips the sidestep;
+    // add_modifier refuses the duplicate, StopSequenceMotion + add: still one
+    // copy). HitGround's
+    // apply_current_movement re-applies the forward command out of Falling
+    // the same way (the next update), the modifiers riding through re_modify.
+    ts.doMotion(MotionCommand.Falling, 1);
+    if (this.applied.turn) ts.doMotion(this.applied.turn.motion, this.applied.turn.speed);
+    this.applied = { ...this.applied, fwd: { motion: MotionCommand.Falling, speed: 1 } };
   }
 
-  /** The motion state starts over at `substate` (a style change, a revive, Falling); the next update re-applies the input. */
+  /** The motion state starts over at `substate` (a style change, a revive); the next update re-applies the input. */
   private resetTableState(substate: number): void {
     if (!this.tableState) return;
     this.tableState.reset(substate);
