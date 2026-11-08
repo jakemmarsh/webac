@@ -229,6 +229,8 @@ export interface AgentObservation {
   target: AgentObject | null;
   /** Your selection is somewhere you no longer are (left behind by a portal): its name and id; `target` is then null. */
   targetLeftBehind?: string;
+  /** A bridge deploy waits for a calm moment to move the session (AgentApi.serverSwitchText); absent otherwise. */
+  serverSwitch?: string;
   nearby: AgentObject[];
   /** Total objects in range before the `max` cut. */
   nearbyTotal: number;

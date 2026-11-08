@@ -352,6 +352,8 @@ export interface PreworldEvent {
   handoverMs?: number;
   reason?: HandoverReason;
   path?: HandoverPath;
+  /** 'handover' only: a running macro held this long for the move (DrainHandover.noteYield); absent: none held. */
+  yieldedMs?: number;
   /**
    * UX.gdle-first-login-retry — 'login_retry' only: why the page retried
    * ('proven': these credentials got in earlier on the page; 'first_time': a
@@ -836,9 +838,10 @@ export class PreworldReporter {
    * A planned handover finished (session/DrainHandover.ts): 'handover' with its time, why and
    * how; `token` names a failed attempt's step and reason (absent when it worked).
    */
-  handover(f: { reason: HandoverReason; path: HandoverPath; ms: number; token?: string | null }): void {
+  handover(f: { reason: HandoverReason; path: HandoverPath; ms: number; token?: string | null; yieldedMs?: number }): void {
     this.report('handover', {
       handoverMs: Math.max(0, Math.round(f.ms)), reason: f.reason, path: f.path, token: safeToken(f.token ?? null),
+      ...(typeof f.yieldedMs === 'number' ? { yieldedMs: Math.max(0, Math.round(f.yieldedMs)) } : {}),
     });
   }
 
@@ -1105,7 +1108,7 @@ export class PreworldReporter {
 
   // ── Transport ────────────────────────────────────────────────────────
 
-  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'heritage' | 'handoverMs' | 'reason' | 'path' | 'retry' | 'why' | 'afterRefusal' | 'heldByTab' | 'holderQuery' | 'holders' | 'tabs' | 'holdersClosed'>>, withStream = false): void {
+  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'heritage' | 'handoverMs' | 'reason' | 'path' | 'yieldedMs' | 'retry' | 'why' | 'afterRefusal' | 'heldByTab' | 'holderQuery' | 'holders' | 'tabs' | 'holdersClosed'>>, withStream = false): void {
     // OBS.login-after-refusal — every refused attempt, sent or not. A case retry's refusal
     // (case_verbatim / case_lower, LoginCaseFallback) is the page trying the password's other
     // case, not the server refusing what the player typed, so it is not counted.
@@ -1141,7 +1144,7 @@ export class PreworldReporter {
       ...((withStream || screen === 'boot') && this.streams.size > 0 ? { stream: [...this.streams.values()].map((r) => ({ ...r })) } : {}),
       ...(f.net ? { net: f.net } : {}),
       ...(f.heritage !== undefined ? { heritage: f.heritage } : {}),
-      ...(outcome === 'handover' ? { handoverMs: f.handoverMs, reason: f.reason, path: f.path } : {}),
+      ...(outcome === 'handover' ? { handoverMs: f.handoverMs, reason: f.reason, path: f.path, ...(f.yieldedMs !== undefined ? { yieldedMs: f.yieldedMs } : {}) } : {}),
       ...(outcome === 'login_retry' && f.retry ? { retry: f.retry } : {}),
       ...((outcome === 'login_refused' || outcome === 'login_retry') && f.heldByTab === true ? { heldByTab: true as const } : {}),
       ...((outcome === 'login_refused' || outcome === 'login_retry') && f.holderQuery ? {

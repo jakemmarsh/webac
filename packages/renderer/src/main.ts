@@ -392,9 +392,9 @@ import { connectionLostText, characterErrorNotice, connectionFailureNotice, link
 import { accountRefusalRoute, characterErrorRoute, disconnectedQuitAction, staleSessionWaitText, type DisconnectedCause } from './session/RefusalRoute.js';
 import { characterRestoreRefusalText } from './session/CharacterRestore.js';
 import { CharacterError, runExpr } from '@ac/shared';
-import { DatLightBudget, deviceLightLimit, DEFAULT_FILLER_STEP } from './effects/DatLightBudget.js';
-import { createViewerLight, updateViewerLight, viewerLightActive } from './effects/ViewerLight.js';
-import { lightColourRule, setCellLighting } from './models/RetailLighting.js';
+import { ac1999LightCaps, DatLightBudget, lightPoolRanksFromOwner, deviceLightLimit, DEFAULT_FILLER_STEP } from './effects/DatLightBudget.js';
+import { createViewerLight, setViewerLightLevel, updateViewerLight, viewerLightActive } from './effects/ViewerLight.js';
+import { lightColourRule, pointLightRule, setCellLighting } from './models/RetailLighting.js';
 import type { MovementState, PlayerPosition } from './network/MovementSync.js';
 import { parsePlayerDescription } from './network/PlayerDescriptionParser.js';
 import { buildContractRows, applyContractTracker, applyContractTrackerTable, type TimedContractEntry } from './network/contractRows.js';
@@ -1643,6 +1643,8 @@ async function main() {
     // 1999's texture-resolution shifts {0, 1, 2, 4} (EraWorldRules.textureDetailMenu); null elsewhere.
     textureSamplerPrefs.setEnvironmentShifts(eraWorld.textureDetailMenu);
     lightColourRule.value = eraWorld.lightColour;
+    // …and its point-light falloff (1999: one software light @ 0x583330, BUG.ac1999-point-light-falloff).
+    pointLightRule.value = eraWorld.pointLight;
     const persisted = GameUI.readPersistedOptionsSettings(pageOptionsEra());
     // webac#23 — the landscape detail texture pass, only in an era whose client had it (1999's
     // Performance panel "Detail Texture: Landscape", default off); set before any terrain material.
@@ -6875,6 +6877,8 @@ async function main() {
   // brightness slider in 1999 (set before setClientRules applies it), the sky steps on the tick,
   // the selection blink's length.
   gameUI.onLandscapeMinAmbient = (level) => skybox.setLandscapeMinAmbient(level);
+  // 1999: the brightness slider also sets the viewer light (EraWorldRules.viewerLightPerBrightness).
+  gameUI.onViewerLightLevel = (level) => setViewerLightLevel(viewerLight, level);
   skybox.skyObjectsOnTick = eraRules.world.skyObjectsOnTick;
   selectionLighting.endCount = eraRules.world.selectionFlipEndCount;
   gameUI.setClientRules(eraRules);
@@ -18480,6 +18484,9 @@ async function main() {
         fallServer: () => (getString16Wire() === 'ace' ? 'ace' : 'gdle'),
         logout: () => gameUI.callbacks.onLogout?.(),
         accountRoutines: routineSync,
+        // A bridge deploy's handover: a running routine holds for it (RoutineEngine.serverSwitchStep; docs/bridge-handover.md).
+        serverSwitchPending: () => drainHandover.yieldWanted(),
+        serverSwitchYield: (on) => drainHandover.noteYield(on),
         characterList: () => gameUI.characterSelectList(),
         enterCharacter: (name) => gameUI.enterCharacterNamed(name),
         showGoal: (text) => { if (text) gameUI.addSystemMessage(`[Claude] Goal: ${text}`, chatColorFor(ChatMessageType.System), ChatMessageType.System); },
@@ -20316,6 +20323,33 @@ async function main() {
   setObjectLightSink(datLightBudget);
   indoorViewLights = (visit) => datLightBudget.forEachLight(visit);
   const datLightViewerPos = new THREE.Vector3();
+  // BUG.ac1999-point-light-falloff — the 1999 pool (EraWorldRules.lightPool): 0x43ffd0's caps, each
+  // light ranked by its owner's origin from the player's current cell's frame (0x43f7b0).
+  const ac1999LightPool = eraRules.world.lightPool === 'ac1999';
+  // Every era's insertion ranks a light by its owner's origin (0054d1b0 / 0x43f7b0).
+  datLightBudget.rankFromHolder = lightPoolRanksFromOwner(eraRules.world.lightPool);
+  const datLightCellOrigin = new THREE.Vector3();
+  let datLightCellOriginId = -1;
+  let datLightCellOriginFound = false;
+  let datLightCellOriginTriedAt = -Infinity;
+  /** The world origin of the env cell the player stands in (its group, less the z-fight lift), or null. */
+  function playerCellFrameOrigin(): THREE.Vector3 | null {
+    const cell = (movementSync?.lastSentFrame?.cellId ?? 0) >>> 0;
+    if ((cell & 0xffff) < 0x100) return null; // a land cell: no pool lights reach its draws
+    const now = performance.now();
+    // A scene search: on a cell change, and while the cell's group isn't built yet at most twice a second.
+    if (cell !== datLightCellOriginId || (!datLightCellOriginFound && now - datLightCellOriginTriedAt >= 500)) {
+      datLightCellOriginId = cell;
+      datLightCellOriginTriedAt = now;
+      const group = sceneManager.scene.getObjectByProperty('name', `envcell_${cell.toString(16).padStart(8, '0')}`);
+      datLightCellOriginFound = !!group;
+      if (group) {
+        group.getWorldPosition(datLightCellOrigin);
+        datLightCellOrigin.y -= 0.05; // EnvCellRenderer.createCellMesh's z-fight lift
+      }
+    }
+    return datLightCellOriginFound ? datLightCellOrigin : null;
+  }
 
   // The browser stops rAF for a hidden, minimized or covered window; the worker's beat keeps the game
   // simulating (no drawing) so movement, physics and the agent's tasks carry on (scene/BackgroundTicker.ts).
@@ -21592,9 +21626,9 @@ async function main() {
     // (max_static_lights / max_dynamic_lights — 40 / 7 at deg_mul 0) and
     // enable exactly the lights the lists keep.
     datLightBudget.update(
-      playerModel ? playerModel.position : datLightViewerPos,
+      (ac1999LightPool ? playerCellFrameOrigin() : null) ?? (playerModel ? playerModel.position : datLightViewerPos),
       undefined,
-      degradeLod.controller.derived,
+      ac1999LightPool ? ac1999LightCaps(degradeLod.controller.degMul) : degradeLod.controller.derived,
     );
 
     // PERF.4 — under the portal-space cover: texture uploads, compileAsync

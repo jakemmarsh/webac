@@ -88,3 +88,28 @@ export function updateViewerLight(
     light.position.copy(viewerPos);
   }
 }
+
+/** The viewer light's DAT-style level: intensity and falloff (metres). */
+export interface ViewerLightLevel {
+  intensity: number;
+  falloff: number;
+}
+
+/**
+ * BUG.ac1999-point-light-falloff — the era's viewer light for the brightness slider's b (0..1,
+ * EraWorldRules.sliderBrightness). `perBrightness` null (end of retail, the classic eras): the
+ * fixed SmartBox.ViewerLightIntensity / Falloff, 2.25 / 10. 1999 (9): SmartBox_SetBrightness
+ * @ 0x40df93 stores b·4.5 + b·4.5 and SmartBox_set_viewer @ 0x40e2ad copies it into the light's
+ * intensity AND falloff, so 4.5 / 4.5 m at the default b = 0.5.
+ */
+export function viewerLightLevel(perBrightness: number | null, b: number): ViewerLightLevel {
+  if (perBrightness === null) return { intensity: VIEWER_LIGHT_INTENSITY, falloff: VIEWER_LIGHT_FALLOFF };
+  const v = perBrightness * b;
+  return { intensity: v, falloff: v };
+}
+
+/** Apply a level to the viewer light (three's `distance` carries falloff × rangeAdjust, as every point light). */
+export function setViewerLightLevel(light: THREE.PointLight, level: ViewerLightLevel): void {
+  light.intensity = level.intensity;
+  light.distance = retailLightRange(level.falloff);
+}

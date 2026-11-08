@@ -10,7 +10,9 @@
  *   drove it, why it ended and how long it ran (state changes only, capped
  *   per page);
  * - automation_summary: what one world session did (the bar, the windows
- *   opened, runs, run time, imports, what GoArrow answered).
+ *   opened, runs, run time, imports, what GoArrow answered);
+ * - nav_idle: a run with navigation on stood still (a closed reason, indoors
+ *   or not, the route's point count; BUG.vtank-nav-stands-still).
  *
  * Each accepted event becomes one JSON log line, `client_automation`, with
  * the page's `trace`, era and server, so usage counts by world.
@@ -23,7 +25,7 @@
 import { TRACE_PATTERN, lateField } from './clientPreworld.js';
 import { eidField } from './eventIds.js';
 
-export const AUTOMATION_OUTCOMES = ['automation_offered', 'routine_started', 'routine_stopped', 'routine_error', 'automation_summary'] as const;
+export const AUTOMATION_OUTCOMES = ['automation_offered', 'routine_started', 'routine_stopped', 'routine_error', 'automation_summary', 'nav_idle'] as const;
 export type AutomationOutcome = typeof AUTOMATION_OUTCOMES[number];
 /** The plugin windows (renderer AutomationReporter PLUGIN_WINDOWS). */
 export const PLUGIN_WINDOWS = [
@@ -38,6 +40,8 @@ export const ROUTINE_ERROR_PLACES = ['rule', 'loot', 'macro'] as const;
 export const IMPORT_OUTCOMES = ['ok', 'partial', 'failed'] as const;
 export const IMPORT_KINDS = ['met', 'nav', 'utl', 'usd', 'af', 'other'] as const;
 export const AUTOMATION_EXITS = ['closed_tab', 'logout', 'disconnected'] as const;
+/** Why a run's navigation stood still (renderer AutomationReporter NAV_IDLE_REASONS). */
+export const NAV_IDLE_REASONS = ['no_route', 'empty_route', 'route_done', 'module_off', 'far', 'no_path', 'held', 'fighting', 'looting', 'buffing', 'other'] as const;
 /** What GoArrow answered the player, counted per session (@ac/shared GOARROW_REPLIES; the test pins them equal). */
 export const GOARROW_REPLIES = [
   'help', 'arrow_on', 'arrow_off', 'no_map', 'to_set', 'to_waited', 'to_unknown', 'route_set', 'reset', 'lock',
@@ -63,6 +67,9 @@ export interface ClientRoutineStopped extends Ids {
   outcome: 'routine_stopped'; kind: Kind | null; driver: Driver | null; reason: typeof ROUTINE_STOP_REASONS[number] | null; runMs: number | null; errors: number | null;
 }
 export interface ClientRoutineError extends Ids { outcome: 'routine_error'; kind: Kind | null; driver: Driver | null; where: typeof ROUTINE_ERROR_PLACES[number] | null }
+export interface ClientNavIdle extends Ids {
+  outcome: 'nav_idle'; kind: Kind | null; driver: Driver | null; reason: typeof NAV_IDLE_REASONS[number] | null; indoors: boolean | null; points: number | null;
+}
 export interface ClientAutomationSummary extends Ids {
   outcome: 'automation_summary';
   exit: typeof AUTOMATION_EXITS[number] | null;
@@ -83,7 +90,7 @@ export interface ClientAutomationSummary extends Ids {
   importKinds: Array<typeof IMPORT_KINDS[number]> | null;
   goarrow: Record<typeof GOARROW_REPLIES[number], number> | null;
 }
-export type ClientAutomationEvent = ClientAutomationOffered | ClientRoutineStarted | ClientRoutineStopped | ClientRoutineError | ClientAutomationSummary;
+export type ClientAutomationEvent = ClientAutomationOffered | ClientRoutineStarted | ClientRoutineStopped | ClientRoutineError | ClientAutomationSummary | ClientNavIdle;
 
 function pick<T extends string>(v: unknown, allowed: readonly T[]): T | null {
   return allowed.find(a => a === v) ?? null;
@@ -145,6 +152,11 @@ export function sanitizeClientAutomation(body: unknown): ClientAutomationEvent |
       };
     case 'routine_error':
       return { outcome, ...ids, kind: pick(b.kind, ROUTINE_KINDS), driver: pick(b.driver, ROUTINE_DRIVERS), where: pick(b.where, ROUTINE_ERROR_PLACES) };
+    case 'nav_idle':
+      return {
+        outcome, ...ids, kind: pick(b.kind, ROUTINE_KINDS), driver: pick(b.driver, ROUTINE_DRIVERS),
+        reason: pick(b.reason, NAV_IDLE_REASONS), indoors: bool(b.indoors), points: uint(b.points, 10_000),
+      };
     case 'automation_summary':
       return {
         outcome, ...ids,

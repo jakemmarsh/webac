@@ -12,6 +12,11 @@
  *   AC_URL='http://localhost:<vite>/?ace&agent&bridge=x&account=…&password=…' \
  *   PROBE_TARGET='127.0.0.1 9000 9001' [BRIDGE_ERA=…] npx tsx tools/probe-drain-handover.ts [--gpu]
  *
+ * PROBE_MACRO=1 starts a plain macro (fight what's in 20 m, peace when idle) before the drain, through the agent
+ * API's routineStart: the macro's yield (RoutineEngine.serverSwitchStep) is what lets a fighting character find the
+ * safe moment. Stand near monsters (e.g. @create a few drudges) to see it wait for the lull; the page's handover line
+ * then says "the macro held N s for it", and the RESULT line adds macro_yielded=… from the macro's recent History.
+ *
  * bridge=x in AC_URL is rewritten to the front door. Logs: $OUT (default /tmp).
  */
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -67,6 +72,18 @@ async function main(): Promise<void> {
     if (!(await waitForWorld(page, { timeoutMs: 240_000 }))) throw new Error('never entered the world');
     console.log('in world through bridge A; starting bridge B');
     await page.waitForTimeout(5000);
+    if (process.env.PROBE_MACRO === '1') {
+      const started = await page.evaluate(() => {
+        const ag = (window as unknown as { __acAgent?: { routineStart?: (p: unknown) => { message: string } } }).__acAgent;
+        return ag?.routineStart?.({
+          name: 'Probe macro', modules: { vitals: true, combat: true, looting: false, navigation: false, buffs: false, inventory: false },
+          initialState: 'Default', states: [{ name: 'Default', rules: [] }], loot: [], buffSets: [], routes: [],
+          macro: true, settings: { AttackDistance: 20, EnableLooting: false, EnableBuffing: false, IdlePeaceMode: true },
+        })?.message ?? 'no agent API (add &agent to AC_URL)';
+      });
+      console.log(`macro: ${started}`);
+      await page.waitForTimeout(5000);
+    }
     b = bridge(B_PORT, 'B');
     if (!(await until(() => b!.lines.some((l) => l.includes('bridge_listening')), 20_000))) throw new Error('bridge B did not start');
     frontTarget = B_PORT;
@@ -80,7 +97,13 @@ async function main(): Promise<void> {
     const still = await inWorld(page).catch(() => false);
     const adoptedLine = b.lines.find((l) => l.includes('handover_adopted')) ?? '';
     console.log(`adopted line: ${adoptedLine.slice(0, 220)}`);
-    console.log(`RESULT handover_adopted=${adopted} after_sigterm_ms=${ms} session_broke=${broke} still_in_world=${still}`);
+    const yielded = process.env.PROBE_MACRO === '1'
+      ? await page.evaluate(() => {
+        const ag = (window as unknown as { __acAgent?: { routineStatus?: () => { last: string[] } } }).__acAgent;
+        return (ag?.routineStatus?.().last ?? []).filter((l) => /server switch/.test(l)).join(' | ') || 'none';
+      }).catch(() => 'unknown')
+      : null;
+    console.log(`RESULT handover_adopted=${adopted} after_sigterm_ms=${ms} session_broke=${broke} still_in_world=${still}${yielded !== null ? ` macro_yielded="${yielded}"` : ''}`);
     process.exitCode = adopted && !broke && still ? 0 : 1;
   } finally {
     await browser.close();

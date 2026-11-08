@@ -243,6 +243,31 @@ export function isRetailStaticLightDecay(decay: number): boolean {
 export const RETAIL_STATIC_RANGE_SCALE = RETAIL_STATIC_LIGHT_FACTOR / RETAIL_LIGHT_RANGE_ADJUST;
 
 /**
+ * How a point light falls off in the era's client (EraWorldRules.pointLight,
+ * BUG.ac1999-point-light-falloff).
+ *
+ * - `'d3d'` (end of retail and the classic eras, which run its exe): static DAT lights on env-cell
+ *   vertices through `calc_point_light` @ 0059c8b0 (`retailStaticPointLight`), every other point
+ *   light through the D3D hardware light (`retailHardwarePointLight`: N·L / d inside falloff × 1.5).
+ * - `'software1999'` (AC1999): every point light, static or dynamic, on every lit vertex (env
+ *   cells and the objects in them alike) through the one software function @ 0x583330
+ *   (`ac1999PointLight`). The 1999 client never uses D3D lights for the world (its draws pass
+ *   D3DDP_DONOTLIGHT; BUG.ac1999-grey-lighting), so there is no hardware term and no
+ *   falloff × 1.5 / × 1.3 range scale. The polygon lighter @ 0x583090 runs in mode 2 (.data
+ *   0x61c4f4 = 2): ambient (0x5831e0), then the static list (0x583140 → 0x583430 → 0x583330 per
+ *   vertex) and the dynamic list (0x583190, the viewer light among them); 0x5834a0 then clamps
+ *   the sum to [0, 1.0] (.data 0x61c520), with no per-light cap.
+ */
+export type PointLightRule = 'd3d' | 'software1999';
+
+/** The era's point-light rule, set once at boot (main.ts from EraWorldRules.pointLight). */
+export const pointLightRule: { value: PointLightRule } = { value: 'd3d' };
+
+/** 0x583330's wrap constants (immediates in the function): f = (0.5·d + N·D) × 0.6666667. */
+export const AC1999_POINT_WRAP_BIAS = 0.5;
+export const AC1999_POINT_WRAP_SCALE = 0.6666667;
+
+/**
  * The four lighting sets retail drew with, keyed by WHAT is drawn — the
  * `Render::useSunlightSet` state is a property of the draw pass, and every
  * draw pass is decided by the geometry class (CORE.17.q.b):
@@ -416,6 +441,34 @@ export function retailStaticPointLight(
   ];
 }
 
+/**
+ * BUG.ac1999-point-light-falloff — the 1999 client's point light @ 0x583330 for one light at one
+ * vertex (light + 0x48 = intensity, + 0x4c = falloff, both the DAT LightInfo's verbatim: the
+ * light record is copied field for field by 0x43f7b0; the viewer light's are SmartBox's
+ * 0x62ffb8 / 0x62ffbc). `side` is the caller's ±1 (0x583090's argument: −1 for a polygon's back
+ * copy), multiplying N·D:
+ *
+ *     D = light − vertex;  d = |D|
+ *     if d < falloff:
+ *       f = (0.5·d + side·N·D) × 0.6666667          (= d · (cos θ + 0.5) / 1.5)
+ *       if f > 0:  I += intensity · f / (d² ≤ 1 ? d : d²·d)
+ *
+ * So intensity × (cos θ + 0.5) / 1.5 × (d > 1 ? 1/d² : 1): end of retail's calc_point_light wrap
+ * and inverse square, without its (1 − d / range) window, with range = falloff (not × 1.3) and no
+ * cap at the light's colour. Returns the scalar added to vertex + 0x44 (no colour: 'intensityOnly').
+ */
+export function ac1999PointLight(
+  vertex: Rgb, normal: Rgb, lightPos: Rgb, intensity: number, falloff: number, side = 1,
+): number {
+  const dx = lightPos[0] - vertex[0], dy = lightPos[1] - vertex[1], dz = lightPos[2] - vertex[2];
+  const d2 = dx * dx + dy * dy + dz * dz;
+  const d = Math.sqrt(d2);
+  if (!(d < falloff) || d <= 0) return 0;
+  const f = (d * AC1999_POINT_WRAP_BIAS + side * (normal[0] * dx + normal[1] * dy + normal[2] * dz)) * AC1999_POINT_WRAP_SCALE;
+  if (!(f > 0)) return 0;
+  return intensity * (d2 <= 1 ? f / d : f / (d2 * d));
+}
+
 // ── GLSL patch ────────────────────────────────────────────────────────────
 
 /** Landscape materials compile with this define and skip point lights. */
@@ -424,6 +477,8 @@ export const LANDSCAPE_DEFINE = 'AC_LANDSCAPE';
 export const ENVCELL_DEFINE = 'AC_ENVCELL';
 /** Objects inside env cells compile with this define: no sun, the pool lights through the hardware path. */
 export const CELLOBJECT_DEFINE = 'AC_CELLOBJECT';
+/** Every point light through the 1999 software light @ 0x583330 (pointLightRule 'software1999'). */
+export const POINT_1999_DEFINE = 'AC_POINT_1999';
 /**
  * VISUAL.night-sky-vs-retail — GameSky's sky objects compile with this define.
  * `D3DPolyRender::RenderMeshSubset` @ 0059ca10 forces `SetFFLighting(true)`
@@ -468,6 +523,16 @@ const KIND_DEFINE: Record<RetailLightingKind, string> = {
   cellobject: `#define ${CELLOBJECT_DEFINE}\n`,
   sky: `#define ${SKY_DEFINE}\n`,
 };
+
+const POINT_RULE_DEFINE: Record<PointLightRule, string> = {
+  d3d: '',
+  software1999: `#define ${POINT_1999_DEFINE}\n`,
+};
+
+/** The program-cache-key suffix of a point-light rule ('' for end of retail's, so its keys are unchanged). */
+export function pointLightCacheKey(points: PointLightRule = pointLightRule.value): string {
+  return points === 'd3d' ? '' : `|acPoint:${points}`;
+}
 
 /** GLSL: true for the kinds `PView::DrawCells` draws under `useSunlightSet(0)`. */
 export const GLSL_IN_CELL = `( defined( ${ENVCELL_DEFINE} ) || defined( ${CELLOBJECT_DEFINE} ) )`;
@@ -531,6 +596,15 @@ uniform vec3 ambientLightColor;
 		float d = max( length( lv ), 1e-4 );
 		// D3DLIGHT9.Range / calc_point_light: nothing beyond the range — a hard cutoff.
 		if ( d >= light.distance ) return vec3( 0.0 );
+		#ifdef ${POINT_1999_DEFINE}
+		// 1999 @ 0x583330, every point light (static or dynamic, cells and objects): range = falloff,
+		// f = ( 0.5 d + N.D ) * 0.6666667, intensity * f / ( d*d <= 1 ? d : d*d*d ). light.color is
+		// white * intensity under the 1999 'intensityOnly' colour rule.
+		if ( d >= light.distance / ${glslFloat(RETAIL_LIGHT_RANGE_ADJUST)} ) return vec3( 0.0 );
+		float f99 = ( ${glslFloat(AC1999_POINT_WRAP_BIAS)} * d + dot( n, lv ) ) * ${glslFloat(AC1999_POINT_WRAP_SCALE)};
+		if ( f99 <= 0.0 ) return vec3( 0.0 );
+		return light.color * ( d * d <= 1.0 ? f99 / d : f99 / ( d * d * d ) );
+		#else
 		#ifdef ${ENVCELL_DEFINE}
 		if ( light.decay < 0.0 ) {
 			// D3DPolyRender::SetStaticLightingVertexColors -> calc_point_light @ 0059c8b0
@@ -545,6 +619,7 @@ uniform vec3 ambientLightColor;
 		#endif
 		// PrimD3DRender::config_hardware_light: Diffuse * max( 0, N.L ) * 1 / ( 0 + 1 * d + 0 * d * d )
 		return light.color * saturate( dot( n, lv ) / d ) / d;
+		#endif
 	}
 #endif
 `;
@@ -635,12 +710,12 @@ export const RETAIL_LIGHT_LINE = 'vec3 acLight = clamp( AC_VERTEX_LIGHT + totalE
  * vertex into the varying. Throws if the three.js (r186) anchors are gone — a silent
  * fall-through would leave the fragment reading an unset varying (black).
  */
-export function patchLambertVertex(vertexShader: string, kind: RetailLightingKind = 'object'): string {
+export function patchLambertVertex(vertexShader: string, kind: RetailLightingKind = 'object', points: PointLightRule = pointLightRule.value): string {
   if (!vertexShader.includes(VERTEX_COMMON_INCLUDE) || !vertexShader.includes(VERTEX_NORMAL_INCLUDE)
     || !vertexShader.includes(VERTEX_PROJECT_INCLUDE) || !vertexShader.includes(VERTEX_VIEWPOS_DECL)) {
     throw new Error('RetailLighting: not a MeshLambertMaterial vertex shader (missing common/defaultnormal/project/vViewPosition anchors)');
   }
-  return KIND_DEFINE[kind] + vertexShader
+  return KIND_DEFINE[kind] + POINT_RULE_DEFINE[points] + vertexShader
     .replace(VERTEX_COMMON_INCLUDE, `${VERTEX_COMMON_INCLUDE}\n${GLSL_VERTEX_PARS}`)
     .replace(VERTEX_PROJECT_INCLUDE, `${VERTEX_PROJECT_INCLUDE}${GLSL_VERTEX_SUM}`);
 }
@@ -724,12 +799,14 @@ export function applyRetailLighting<T extends THREE.Material>(material: T, kind:
     ? detailTexturing.landscapeUniformsFor() : null;
   const skyDiffuse = kind === 'sky' ? skyDiffuseUniform(material) : null;
   const partSphere = kind === 'cellobject' ? installPartSphere(material) : null;
+  // The era's point-light rule (set at boot, before the first material) is fixed per material.
+  const points = pointLightRule.value;
   material.onBeforeCompile = (shader) => {
     shader.uniforms.acAmbientScale = scale;
     if (partSphere) shader.uniforms[PART_SPHERE_UNIFORM] = partSphere;
     if (skyDiffuse) shader.uniforms[SKY_DIFFUSE_UNIFORM] = skyDiffuse;
     shader.uniforms[MIP_BIAS_UNIFORM] = mipBiasUniform;
-    shader.vertexShader = patchLambertVertex(shader.vertexShader, kind);
+    shader.vertexShader = patchLambertVertex(shader.vertexShader, kind, points);
     shader.fragmentShader = patchSamplerBias(patchLambertFragment(shader.fragmentShader, kind));
     if (detailUniforms) {
       shader.uniforms[DETAIL_MAP_UNIFORM] = detailUniforms.map;
@@ -748,7 +825,7 @@ export function applyRetailLighting<T extends THREE.Material>(material: T, kind:
       shader.fragmentShader = patchLandscapeDetailFragment(shader.fragmentShader);
     }
   };
-  const cacheKey = `${retailLightingCacheKey(kind)}|${SAMPLER_BIAS_CACHE_KEY}`
+  const cacheKey = `${retailLightingCacheKey(kind)}|${SAMPLER_BIAS_CACHE_KEY}${pointLightCacheKey(points)}`
     + (detail ? `|${DETAIL_CACHE_KEY}:${detail}` : '')
     + (landDetail ? `|${LAND_DETAIL_CACHE_KEY}` : '');
   material.customProgramCacheKey = () => cacheKey;

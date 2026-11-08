@@ -798,6 +798,18 @@ export class VTankWindow {
     p.settings = { ...(p.settings ?? {}), [key]: v };
     if (this.running()) this.source.setSetting(key, v);
     this.changed(redraw);
+    // Navigation switched on: say what it still needs, here where it was switched (BUG.vtank-nav-stands-still: a
+    // player's character "just stands there" after Enable Navigation, and nothing said why).
+    if (key === 'EnableNav' && v === true) {
+      const st = this.source.status();
+      const r = this.route();
+      const pts = r && r.mode !== 'follow' ? r.points.length : null;
+      const need = !this.running() ? 'Turn Run Macro on (Options tab) to start walking the route.'
+        : st.paused ? 'Run Macro is paused: turn it on again to walk the route.'
+        : !p.navRoute ? 'No route loaded: Add waypoints on the Route tab where you stand, or pick one under Auto-Navigation.'
+        : pts === 0 ? `Route "${r!.name}" has no waypoints: Add them on the Route tab where you stand.` : '';
+      if (need) { this.message = need; redraw(); }
+    }
   }
 
   render(body: HTMLElement, w: number, h: number, redraw: () => void): void {
@@ -1137,6 +1149,9 @@ export class VTankWindow {
     const bx = 380;
     const here2 = () => this.source.coords();
     const needHere = (f: (coords: string) => void) => { const h2 = here2(); if (!h2) { this.message = 'Your position is not known yet.'; redraw(); return; } f(h2); };
+    // VirindiTank records each point's height (Z, map units: metres / 240): in a dungeon it says which storey the point
+    // is on, so the walk to it doesn't take the floor above or below.
+    const hereZ = (): { z?: number } => { const hz = this.source.height?.() ?? null; return typeof hz === 'number' && Number.isFinite(hz) ? { z: hz / 240 } : {}; };
     area.appendChild(at(tag(kit.flatButton('Add', () => {
       // In Follow mode, Add sets the follow target to the selection (a player or a creature), as VirindiTank's does.
       if (r?.mode === 'follow') {
@@ -1146,30 +1161,30 @@ export class VTankWindow {
         this.changed(redraw);
         return;
       }
-      needHere((co) => this.addWaypoint({ coords: co, step: null }, redraw));
+      needHere((co) => this.addWaypoint({ coords: co, ...hereZ(), step: null }, redraw));
     }, 86), { vtank: 'add-point' }), bx, 18));
     area.appendChild(at(tag(kit.flatButton('Open Vendor', () => needHere((co) => {
       const s = this.source.selection();
       if (!s) { this.message = 'Select the vendor first.'; redraw(); return; }
-      this.addWaypoint({ coords: co, step: [{ kind: 'use-object', name: s.name }, { kind: 'sell-by-loot-rules', vendor: s.name }] }, redraw);
+      this.addWaypoint({ coords: co, ...hereZ(), step: [{ kind: 'use-object', name: s.name }, { kind: 'sell-by-loot-rules', vendor: s.name }] }, redraw);
     }), 86), { vtank: 'add-vendor' }), bx + 94, 18));
     area.appendChild(at(tag(kit.flatButton('Add Portal/NPC', () => needHere((co) => {
       const s = this.source.selection();
       if (!s) { this.message = 'Select the portal or NPC first.'; redraw(); return; }
       const cls = VT_OBJECT_CLASS[s.kind];
-      this.addWaypoint({ coords: co, step: [{ kind: 'use-object', name: s.name, ...(cls !== undefined ? { vt: { objectClass: cls } } : {}) }] }, redraw);
+      this.addWaypoint({ coords: co, ...hereZ(), step: [{ kind: 'use-object', name: s.name, ...(cls !== undefined ? { vt: { objectClass: cls } } : {}) }] }, redraw);
     }), 86), { vtank: 'add-portal' }), bx, 40));
     area.appendChild(at(tag(kit.flatButton('Add NPC Talk', () => needHere((co) => {
       const s = this.source.selection();
       if (!s || (s.kind !== 'npc' && s.kind !== 'vendor')) { this.message = 'Select the NPC first.'; redraw(); return; }
-      this.addWaypoint({ coords: co, step: [{ kind: 'talk-to', name: s.name, vt: { objectClass: 37 } }] }, redraw);
+      this.addWaypoint({ coords: co, ...hereZ(), step: [{ kind: 'talk-to', name: s.name, vt: { objectClass: 37 } }] }, redraw);
     }), 86), { vtank: 'add-npc-talk' }), bx + 94, 40));
-    area.appendChild(at(tag(kit.flatButton('Add Recall', () => needHere((co) => this.addWaypoint({ coords: co, step: [{ kind: 'cast', spell: this.recall, target: 'self' }] }, redraw)), 86), { vtank: 'add-recall' }), bx, 62));
+    area.appendChild(at(tag(kit.flatButton('Add Recall', () => needHere((co) => this.addWaypoint({ coords: co, ...hereZ(), step: [{ kind: 'cast', spell: this.recall, target: 'self' }] }, redraw)), 86), { vtank: 'add-recall' }), bx, 62));
     area.appendChild(at(tag(kit.dropdown(this.recall, (a) => kit.menu(a, VT_RECALLS.map((x) => ({ label: x, value: x })), (v) => { this.recall = v; redraw(); }), 210), { vtank: 'recall' }), bx + 94, 62));
-    area.appendChild(at(tag(kit.flatButton('Add Pause', () => needHere((co) => this.addWaypoint({ coords: co, step: [{ kind: 'wait', seconds: Math.max(0, Number(this.pauseSeconds) || 0) }] }, redraw)), 86), { vtank: 'add-pause' }), bx, 84));
+    area.appendChild(at(tag(kit.flatButton('Add Pause', () => needHere((co) => this.addWaypoint({ coords: co, ...hereZ(), step: [{ kind: 'wait', seconds: Math.max(0, Number(this.pauseSeconds) || 0) }] }, redraw)), 86), { vtank: 'add-pause' }), bx, 84));
     area.appendChild(at(tag(kit.input(this.pauseSeconds, 66, (v) => { this.pauseSeconds = v; }), { vtank: 'pause-seconds' }), bx + 94, 84));
     area.appendChild(at(kit.text('seconds', { color: c.text }), bx + 166, 86));
-    area.appendChild(at(tag(kit.flatButton('Add Chat', () => needHere((co) => this.addWaypoint({ coords: co, step: [{ kind: 'say', text: this.chatText }] }, redraw)), 86), { vtank: 'add-chat' }), bx, 106));
+    area.appendChild(at(tag(kit.flatButton('Add Chat', () => needHere((co) => this.addWaypoint({ coords: co, ...hereZ(), step: [{ kind: 'say', text: this.chatText }] }, redraw)), 86), { vtank: 'add-chat' }), bx, 106));
     area.appendChild(at(tag(kit.input(this.chatText, 120, (v) => { this.chatText = v; }), { vtank: 'chat-text' }), bx + 94, 106));
     void w;
   }
@@ -2269,7 +2284,9 @@ export class VTankWindow {
         if (!coords) return ['your position is not known yet'];
         const r = this.ensureRoute();
         // A checkpoint is a point the route holds at until the server has you there.
-        setRouteWaypoints(r, [...routeWaypoints(r), { coords, step: checkpoint ? [{ kind: 'checkpoint' }] : null }]);
+        // Where you stand carries your height (VTank's Z), as the Route tab's Add does; typed coordinates have none.
+        const hz = coords === tail ? null : this.source.height?.() ?? null;
+        setRouteWaypoints(r, [...routeWaypoints(r), { coords, ...(typeof hz === 'number' && Number.isFinite(hz) ? { z: hz / 240 } : {}), step: checkpoint ? [{ kind: 'checkpoint' }] : null }]);
         return saved(`${checkpoint ? 'checkpoint' : 'point'} ${r.points.length} added to "${r.name}"`);
       }
       case 'addnavjump': {
@@ -2284,7 +2301,8 @@ export class VTankWindow {
         if (!coords) return ['your position is not known yet'];
         const r = this.ensureRoute();
         const jump: RoutineAction = { kind: 'jump', heading: ((heading % 360) + 360) % 360, holdMs: hold, ...(/^true$/i.test(shift) ? { walk: true } : {}), ...(dir ? { forward: true } : {}) };
-        setRouteWaypoints(r, [...routeWaypoints(r), { coords, step: [jump] }]);
+        const hz = this.source.height?.() ?? null;
+        setRouteWaypoints(r, [...routeWaypoints(r), { coords, ...(typeof hz === 'number' && Number.isFinite(hz) ? { z: hz / 240 } : {}), step: [jump] }]);
         return saved(`jump ${r.points.length} added to "${r.name}"`);
       }
       case 'testmonster': {

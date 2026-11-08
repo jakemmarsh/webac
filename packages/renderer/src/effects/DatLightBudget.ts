@@ -94,6 +94,53 @@ export const RETAIL_STARTUP_LIGHT_CAPS: Readonly<LightCaps> = Object.freeze({ ma
  */
 export const RETAIL_MAX_LIGHT_CAPS: Readonly<LightCaps> = Object.freeze({ maxStaticLights: 60, maxDynamicLights: 10 });
 
+/**
+ * Whose light pool the era's client built (EraWorldRules.lightPool, BUG.ac1999-point-light-falloff).
+ *
+ * - `'eor'` (end of retail and the classic eras): the caps above, ranked from the player's position.
+ *   Each light is ranked by its OWNER's origin, not its own position: `insert_light` @ 0054d1b0
+ *   measures from `param_7` (the owner's Frame) and only then `Frame::combine`s the LightInfo
+ *   offset into the stored light.
+ * - `'ac1999'`: the 1999 client's `0x43f7b0` (add_static 0x43fa60 / add_dynamic 0x43fa90) is the
+ *   same sorted insertion as end of retail's `insert_light` (a new light goes after equal
+ *   distances; a full list drops the farthest, and a newcomer farther than all of a full list is
+ *   dropped, each light ranked by its owner's origin), with two differences:
+ *   - the caps are `0x43ffd0`'s 20 + 10·L static (both branches, `fmul −10.0; fsubr 20.0`,
+ *     truncated by `__ftol`) and 7 + 3·L / 7 + 2·L dynamic (L ≥ 0 / L < 0): 20 / 7 at L = 0
+ *     (.data 0x61c4ec / 0x61c4f0), 30 / 10 at L = 1 — where the default Automatic degrade
+ *     (PerformancePanel_Reset passes ECX = 1 to SmartBox_SetDetailToSpeed, 0x598cc1) settles on any
+ *     machine above 1.25 × max_framerate (0x43db00: +0.1 a frame). End of retail: 40 + 20·L.
+ *   - the reference point is `0x652d84` / `0x652d88`: the player's current CELL id and the cell's
+ *     own frame, written only by CellManager_ChangePosition (0x652d84 = cell + 0x48, the frame from
+ *     cell + 0x4c); 1999 has no per-frame player_pos writer (end of retail's SmartBox sets
+ *     Render::player_pos to the player every frame).
+ *   Per object, 1999 enables every pooled light that passes 0x43fb30 — the same reach test as end of
+ *   retail's minimize_object_lighting (|light − centre|² − (falloff + radius)² < 0.0002, the part's
+ *   sphere from 0x43fbc0; non-point lights always) — with no 8-slot cap (the lighter loops the whole
+ *   list, 0x583140 / 0x583190).
+ */
+export type LightPoolRule = 'eor' | 'ac1999';
+
+/** Whether the era's pool ranks a light by its owner's origin: every client does (0054d1b0 / 0x43f7b0). */
+export function lightPoolRanksFromOwner(rule: LightPoolRule): boolean {
+  return rule === 'eor' || rule === 'ac1999';
+}
+
+/** 1999 `.data 0x61c4ec / 0x61c4f0` — the caps before the first degrade update (L = 0). */
+export const AC1999_STARTUP_LIGHT_CAPS: Readonly<LightCaps> = Object.freeze({ maxStaticLights: 20, maxDynamicLights: 7 });
+
+/** 1999 `0x43ffd0` at L = 1 (the light storage is 30 static / 10 dynamic records, Render_Init 0x43d5e0). */
+export const AC1999_MAX_LIGHT_CAPS: Readonly<LightCaps> = Object.freeze({ maxStaticLights: 30, maxDynamicLights: 10 });
+
+/** 1999 `Render_SetDegradeLevelInternal` @ 0x43ffd0's light caps for the degrade level L (−1..1). */
+export function ac1999LightCaps(degMul: number): LightCaps {
+  const p = Math.max(-1, Math.min(1, degMul));
+  return {
+    maxStaticLights: Math.trunc(20 + 10 * p),
+    maxDynamicLights: Math.trunc(p >= 0 ? 7 + 3 * p : 7 + 2 * p),
+  };
+}
+
 /** `Render::curLightUsage[8]` — hardware slots re-picked per object draw (documented, not modelled). */
 export const RETAIL_OBJECT_LIGHT_SLOTS = 8;
 
@@ -197,6 +244,13 @@ export class DatLightBudget {
   private _pooled = 0;
   /** Probe hook: when set, replaces the caps passed to update() (A/B captures). */
   capsOverride: LightCaps | null = null;
+  /**
+   * Rank each light by its owner's origin (the placed object / the carrier's object) instead of the
+   * light's own position: both clients' insertion (end of retail `insert_light` @ 0054d1b0 /
+   * 1999 0x43f7b0) measures from the frame it is handed, the owner's (`lightPoolRanksFromOwner`).
+   * A light hung straight off the root has no owner and keeps its own position.
+   */
+  rankFromHolder = false;
 
   constructor(private readonly root: THREE.Object3D, options: DatLightBudgetOptions = {}) {
     this.deviceMaxLights = options.deviceMaxLights ?? Infinity;
@@ -311,7 +365,9 @@ export class DatLightBudget {
         e.light.visible = false;
         return;
       }
-      if (e.dynamic) e.light.getWorldPosition(e.pos);
+      // Static gathered lights keep the position cached at gather; a dynamic light moves, and a
+      // tracked object light (static or not) follows its carrier, so both are re-read.
+      if (e.dynamic || mustBeAttached) this.rankPosition(e.light, e.pos);
       e.dist2 = e.pos.distanceToSquared(originPos);
       (e.dynamic ? dynamics : statics).push(e);
     };
@@ -383,9 +439,15 @@ export class DatLightBudget {
       // An object light built before this budget became the sink is adopted.
       if (ud.datLightTracked) { this.track(o); return; }
       const e: LightEntry = { light: o, dynamic: !!ud.datLightDynamic, pos: new THREE.Vector3(), dist2: 0 };
-      o.getWorldPosition(e.pos);
+      this.rankPosition(o, e.pos);
       this.entries.push(e);
     });
+  }
+
+  /** Where a light is ranked from: its own world position, or its owner's origin under rankFromHolder. */
+  private rankPosition(light: THREE.Object3D, out: THREE.Vector3): void {
+    const owner = light.parent;
+    (this.rankFromHolder && owner && owner !== this.root ? owner : light).getWorldPosition(out);
   }
 
   private applyFillers(enabled: number): void {

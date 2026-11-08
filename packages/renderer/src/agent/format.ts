@@ -327,6 +327,7 @@ export function formatObservation(obs: AgentObservation): string {
   if (obs.gearEmpty?.slots.length) out.push(`gear: ${emptySlotsText(obs.gearEmpty.slots)}${obs.gearEmpty.packFits.length ? `; in your pack that would cover one: ${obs.gearEmpty.packFits.slice(0, 4).join(', ')}` : ''} (ac_inventory / ac_gear show every gear slot)`);
   if (obs.casterGap) out.push(`gear: ${obs.casterGap}`);
   if (obs.windows?.length) out.push(`windows open: ${obs.windows.join(', ')}  (ac_close name=… or all, when done with them)`);
+  if (obs.serverSwitch) out.push(`SERVER SWITCH PENDING: ${obs.serverSwitch}`);
   out.push(`target: ${obs.target ? formatObject(obs.target) : obs.targetLeftBehind ? `none (your last target, ${obs.targetLeftBehind}, was left behind in another place: you went through a portal or far away since; pick a new one)` : 'none'}`);
   const attackers = obs.nearby.filter((o) => o.attackingYou && o.guid !== obs.target?.guid);
   if (attackers.length) out.push(`under attack by: ${attackers.map((o) => `${o.name} #${o.guid.toString(16)} ${o.dist.toFixed(1)}m (${o.attackingYou}× in 10 s)`).join(', ')}${obs.target ? ' (not your target)' : ''}`);

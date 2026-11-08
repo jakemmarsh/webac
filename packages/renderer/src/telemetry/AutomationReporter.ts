@@ -25,6 +25,11 @@
  *   clicked, the plugin windows opened (closed id list), runs by driver and
  *   stop reason, total run time, action errors and VirindiTank imports.
  *   Sent only when the session used something.
+ * - nav_idle: a run with navigation on whose character hasn't moved for
+ *   RoutineEngine's NAV_IDLE_MS, with a closed reason (no route, empty route,
+ *   no path, fighting …), indoors or not, and the route's point count. Once
+ *   per reason per run, at most MAX_NAV_IDLE_EVENTS per page
+ *   (BUG.vtank-nav-stands-still, 2026-11-07).
  *
  * Privacy (the pre-world reporter's rules): closed tokens, counts and
  * durations. No profile, rule, route or loot name, no file name, no chat:
@@ -39,7 +44,7 @@
 import { EXAMPLE_HUNT_PROFILE, GOARROW_REPLIES, type GoArrowReply, type RoutineProfile } from '@ac/shared';
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 
-export const AUTOMATION_OUTCOMES = ['automation_offered', 'routine_started', 'routine_stopped', 'routine_error', 'automation_summary'] as const;
+export const AUTOMATION_OUTCOMES = ['automation_offered', 'routine_started', 'routine_stopped', 'routine_error', 'automation_summary', 'nav_idle'] as const;
 export type AutomationOutcome = typeof AUTOMATION_OUTCOMES[number];
 
 /**
@@ -66,6 +71,16 @@ export type RoutineStopReason = typeof ROUTINE_STOP_REASONS[number];
 /** Where a run's action failed (RoutineEngine): a rule's actions, Loot this Container, the macro's own steps. */
 export const ROUTINE_ERROR_PLACES = ['rule', 'loot', 'macro'] as const;
 export type RoutineErrorPlace = typeof ROUTINE_ERROR_PLACES[number];
+/**
+ * BUG.vtank-nav-stands-still (2026-11-07) — why a run with navigation on has not moved for NAV_IDLE_MS (RoutineEngine's
+ * navWait): no route loaded, a route with no waypoints, a Once route finished, the Navigation module off, the next point
+ * past NavFarStopRange, no walk reaching the points, UtilityBelt's nav lock, or the macro busy fighting / looting /
+ * buffing (or with nothing to name: other).
+ */
+export const NAV_IDLE_REASONS = ['no_route', 'empty_route', 'route_done', 'module_off', 'far', 'no_path', 'held', 'fighting', 'looting', 'buffing', 'other'] as const;
+export type NavIdleReason = typeof NAV_IDLE_REASONS[number];
+/** nav_idle events a page sends at most (one per reason per run, besides). */
+export const MAX_NAV_IDLE_EVENTS = 6;
 /** A VirindiTank import: everything carried over, some of it switched off, or nothing read. */
 export const IMPORT_OUTCOMES = ['ok', 'partial', 'failed'] as const;
 export type ImportOutcome = typeof IMPORT_OUTCOMES[number];
@@ -85,7 +100,9 @@ export const MAX_ROUTINE_EVENTS = 12;
 export type RoutineLifecycleEvent =
   | { type: 'start'; profile: RoutineProfile; driver: RoutineDriver }
   | { type: 'stop'; reason: RoutineStopReason }
-  | { type: 'error'; where: RoutineErrorPlace };
+  | { type: 'error'; where: RoutineErrorPlace }
+  /** Navigation on and the character still for NAV_IDLE_MS: why, indoors (a dungeon or building), the loaded route's point count. */
+  | { type: 'nav_idle'; reason: NavIdleReason; indoors: boolean; points: number };
 
 interface Ids { era: string; server: string | null; trace: string; build: string }
 
@@ -117,6 +134,15 @@ export interface RoutineErrorEvent extends Ids {
   driver: RoutineDriver;
   where: RoutineErrorPlace;
 }
+export interface NavIdleEvent extends Ids {
+  outcome: 'nav_idle';
+  kind: RoutineKind;
+  driver: RoutineDriver;
+  reason: NavIdleReason;
+  indoors: boolean;
+  /** The loaded route's waypoints (0: none loaded or empty). */
+  points: number;
+}
 export interface AutomationSummaryEvent extends Ids {
   outcome: 'automation_summary';
   exit: AutomationExit;
@@ -146,7 +172,7 @@ export interface AutomationSummaryEvent extends Ids {
   goarrow: Record<GoArrowReply, number>;
 }
 
-export type AutomationEvent = AutomationOfferedEvent | RoutineStartedEvent | RoutineStoppedEvent | RoutineErrorEvent | AutomationSummaryEvent;
+export type AutomationEvent = AutomationOfferedEvent | RoutineStartedEvent | RoutineStoppedEvent | RoutineErrorEvent | AutomationSummaryEvent | NavIdleEvent;
 
 export interface AutomationReporterOptions {
   endpoint: string | null;
@@ -188,6 +214,7 @@ export class AutomationReporter {
   private readonly outbox: TelemetryOutbox;
   private sent = 0;
   private routineSent = 0;
+  private navIdleSent = 0;
 
   // ── The page: the bridge's answer ──
   private automation: boolean | null = null;
@@ -284,6 +311,12 @@ export class AutomationReporter {
     }
     const run = this.run;
     if (!run) return;
+    if (e.type === 'nav_idle') {
+      if (!(NAV_IDLE_REASONS as readonly string[]).includes(e.reason) || this.navIdleSent >= MAX_NAV_IDLE_EVENTS) return;
+      const points = Number.isInteger(e.points) && e.points >= 0 ? Math.min(e.points, 10_000) : 0;
+      if (this.post({ outcome: 'nav_idle', ...this.ids(), kind: run.kind, driver: run.driver, reason: e.reason, indoors: e.indoors === true, points })) this.navIdleSent++;
+      return;
+    }
     if (e.type === 'error') {
       if (!(ROUTINE_ERROR_PLACES as readonly string[]).includes(e.where)) return;
       run.errors++;

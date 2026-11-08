@@ -550,6 +550,13 @@ export interface AgentHost {
   characterList?(): Array<{ name: string; pendingDeletion: boolean }>;
   /** Enter the world as this character the select screen's own way (select its row, then Enter): null when started, else why not. */
   enterCharacter?(name: string): string | null;
+  /**
+   * A bridge deploy wants to move this session to the new deployment (session/DrainHandover.ts yieldWanted): a running
+   * routine holds for it (finishes its fight, starts nothing new, rests in peace) so the safe moment comes. Unset: never.
+   */
+  serverSwitchPending?(): boolean;
+  /** The running routine started (true) or stopped (false) holding for that move (DrainHandover.noteYield). */
+  serverSwitchYield?(on: boolean): void;
   /** Show Claude's goal line to the player (null clears it). */
   showGoal?(text: string | null): void;
   /** The 3D view as a JPEG (base64), for the hosted connector's ac_look / ac_screenshot. */
@@ -1692,6 +1699,26 @@ export class AgentApi {
     // A world object (corpse contents included) carries them; an item in your own pack has them from its CreateObject.
     const refs = this.host.object(guid)?.palettes ?? this.host.carriedPalettes?.(guid) ?? [];
     return refs.map((p) => ({ id: p.id, example: this.host.paletteColor?.(p.id, p.offset + Math.floor(p.length / 2)) ?? null }));
+  }
+
+  /**
+   * The observation's line while a bridge deploy waits to move the session (AgentObservation.serverSwitch): what the
+   * move needs, and whether your routine is already holding for it. An agent fighting by hand is told, not held.
+   */
+  serverSwitchText(): string {
+    const r = this.routine.status();
+    const head = 'the game\'s bridge is being redeployed: it moves your session to the new one without a reconnect once you have been out of combat for about 17 s (peace mode, nothing attacking or chasing you, no trade, vendor or dialog open)';
+    if (r.serverSwitch) return `${head}; your routine "${r.profile}" is holding for it (${r.serverSwitch.phase}) and carries on by itself afterwards`;
+    return `${head}. Finish the fight you are in, start no new one, go to peace mode and wait; within 2 minutes of the notice it can still happen, after that you are reconnected later instead (a few seconds out of the world)`;
+  }
+
+  /** A bridge deploy wants to move the session now (AgentHost.serverSwitchPending): a running routine holds for it. */
+  serverSwitchPending(): boolean {
+    try { return this.host.serverSwitchPending?.() === true; } catch { return false; }
+  }
+  /** The running routine holds for that move (true), or carries on (false). */
+  serverSwitchYield(on: boolean): void {
+    try { this.host.serverSwitchYield?.(on); } catch { /* the move's bookkeeping never stops the routine */ }
   }
 
   /** The selected object's guid, or null. */
@@ -5210,6 +5237,7 @@ export class AgentApi {
       me: this.self(),
       target,
       ...(behind ? { targetLeftBehind: `${behind.name} #${(behind.guid >>> 0).toString(16)}` } : {}),
+      ...(!lean && this.serverSwitchPending() ? { serverSwitch: this.serverSwitchText() } : {}),
       nearby: all.slice(0, max),
       nearbyTotal: all.length,
       dialogs: this.host.dialogs(),

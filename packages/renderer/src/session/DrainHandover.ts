@@ -17,7 +17,16 @@
  *
  * Telemetry: one 'handover' preworld outcome per move, with how long it took,
  * why ('safe' / 'hard_cut') and how ('adopt': the socket moved; 'relogin':
- * the resume logged back in).
+ * the resume logged back in), and `yieldedMs` when a running macro held for it.
+ *
+ * A running macro (agent/RoutineEngine.ts) is always fighting, so it never
+ * found a safe moment and always took the hard cut (Coldeve, 2026-11-07 22:41Z
+ * and 00:26Z: three macro tabs each deploy). While a handover is wanted
+ * (yieldWanted: draining, the bridge can hand over, and no more than
+ * HANDOVER_YIELD_MAX_MS since the notice) the macro yields: it finishes its
+ * fight, starts nothing new, goes to peace and holds still, so the safe moment
+ * comes; it tells this class so (noteYield). None of the safety rules above
+ * change for it.
  */
 import type { HandoverResult } from '@ac/network';
 import type { HandoverPath, HandoverReason } from '../telemetry/PreworldReporter.js';
@@ -51,6 +60,12 @@ export const HANDOVER_SAFE_HOLD_MS = 2_000;
 export const HANDOVER_POLL_MS = 500;
 /** Waits before another try after an attempt that left the session in place; then the hard cut is the backstop. */
 export const HANDOVER_RETRY_MS: readonly number[] = Object.freeze([5_000, 15_000, 30_000, 60_000, 120_000]);
+/**
+ * A running macro holds for the handover for at most this long after the drain notice; after that it carries on, and
+ * a session that still finds no safe moment takes the drain's hard cut as before. A calm macro needs the quiet period
+ * plus the hold (about 17 s) after its last fight.
+ */
+export const HANDOVER_YIELD_MAX_MS = 120_000;
 
 export type HandoverBlocker =
   | 'entering' | 'dead' | 'portal_space' | 'combat_stance' | 'recent_combat' | 'hostile' | 'trade' | 'vendor' | 'dialog';
@@ -75,7 +90,8 @@ export interface DrainHandoverHost {
   safety(): HandoverSafety;
   /** NetConnection.handover(): answered through onResult. */
   handover(): void;
-  report(r: { reason: HandoverReason; path: HandoverPath; ms: number; token?: string | null }): void;
+  /** `yieldedMs`: a running macro held this long for the move (absent: none held). */
+  report(r: { reason: HandoverReason; path: HandoverPath; ms: number; token?: string | null; yieldedMs?: number }): void;
   now(): number;
   setInterval?(fn: () => void, ms: number): unknown;
   clearInterval?(t: unknown): void;
@@ -96,7 +112,10 @@ export class DrainHandover {
   private nextTryAt = 0;
   private timer: unknown = null;
   /** The session ended while its bridge drained: the resume's arrival is reported (why, and since when). */
-  private dropped: { at: number; reason: HandoverReason } | null = null;
+  private dropped: { at: number; reason: HandoverReason; yieldedMs: number | null } | null = null;
+  /** A running macro started holding for this drain's handover at (host clock), and stopped (or the handover began) at. */
+  private yieldFrom: number | null = null;
+  private yieldTo: number | null = null;
 
   constructor(private readonly host: DrainHandoverHost) {}
 
@@ -112,10 +131,40 @@ export class DrainHandover {
     return this.draining ? Math.max(0, this.host.now() - this.drainingAt) : null;
   }
 
+  /**
+   * A running macro should hold for the handover now: the bridge drains and can hand the session over, and it is no
+   * more than HANDOVER_YIELD_MAX_MS since the notice (or an attempt is under way). Players not running one are never
+   * held: nothing else reads this.
+   */
+  yieldWanted(): boolean {
+    if (!this.draining || !this.capable) return false;
+    return this.inFlight || this.host.now() - this.drainingAt < HANDOVER_YIELD_MAX_MS;
+  }
+
+  /** The running macro started (true) or stopped (false) holding for the handover: reported as `yieldedMs`. */
+  noteYield(on: boolean): void {
+    const now = this.host.now();
+    if (on) {
+      if (!this.draining || this.yieldFrom !== null) return;
+      this.yieldFrom = now;
+      this.host.log?.('the running macro is holding for the handover');
+    } else if (this.yieldFrom !== null && this.yieldTo === null) {
+      this.yieldTo = now;
+    }
+  }
+
+  /** How long a running macro held for this drain's handover, up to the attempt (or until now); null: none did. */
+  private yieldedMs(): number | null {
+    if (this.yieldFrom === null) return null;
+    // Never past the cap: a macro mid-step there lets go at its next step, but the yield ended at the cap.
+    const end = Math.min(this.yieldTo ?? this.host.now(), this.drainingAt + HANDOVER_YIELD_MAX_MS);
+    return Math.max(0, end - this.yieldFrom);
+  }
+
   /** The session's bridge started draining (`handover`: it can hand the session over). */
   onDraining(handover: boolean): void {
     if (this.draining && this.capable === handover) return;
-    if (!this.draining) this.drainingAt = this.host.now();
+    if (!this.draining) { this.drainingAt = this.host.now(); this.yieldFrom = null; this.yieldTo = null; }
     this.draining = true;
     this.capable = handover;
     this.safeSince = null;
@@ -139,6 +188,8 @@ export class DrainHandover {
     if (now - this.safeSince < HANDOVER_SAFE_HOLD_MS) return;
     this.inFlight = true;
     this.startedAt = now;
+    // A macro's hold counts up to here: what follows is the move itself.
+    if (this.yieldFrom !== null && this.yieldTo === null) this.yieldTo = now;
     this.host.log?.('safe moment: handing the session over to the new bridge');
     this.host.handover();
   }
@@ -148,19 +199,21 @@ export class DrainHandover {
     if (!this.inFlight) return;
     this.inFlight = false;
     this.safeSince = null;
+    const yielded = this.yieldedMs();
+    const y = yielded !== null ? { yieldedMs: yielded } : {};
     if (r.ok) {
-      this.host.log?.(`handed over in ${r.ms} ms`);
-      this.host.report({ reason: 'safe', path: 'adopt', ms: r.ms });
+      this.host.log?.(`handed over in ${r.ms} ms${yielded !== null ? ` (the macro held ${Math.round(yielded / 1000)} s for it)` : ''}`);
+      this.host.report({ reason: 'safe', path: 'adopt', ms: r.ms, ...y });
       this.stop();
       return;
     }
     const token = `${r.stage}_${r.reason}`.replace(/[^A-Za-z0-9_]/g, '_');
     this.host.log?.(`handover failed at ${r.stage}: ${r.reason}${r.released ? ' (the session ended: resuming)' : ''}`);
-    this.host.report({ reason: 'safe', path: 'adopt', ms: r.ms, token });
+    this.host.report({ reason: 'safe', path: 'adopt', ms: r.ms, token, ...y });
     if (r.released) {
       // The session is gone; the resume brings it back and is reported from where this began.
       this.stop();
-      this.dropped = { at: this.startedAt, reason: 'safe' };
+      this.dropped = { at: this.startedAt, reason: 'safe', yieldedMs: yielded };
       return;
     }
     if (this.failures >= HANDOVER_RETRY_MS.length) {
@@ -173,7 +226,7 @@ export class DrainHandover {
 
   /** The session ended (not deliberately): while draining, that is the hard cut (or a drop), and the resume follows. */
   onSessionDropped(): void {
-    if (this.draining && !this.dropped) this.dropped = { at: this.host.now(), reason: 'hard_cut' };
+    if (this.draining && !this.dropped) this.dropped = { at: this.host.now(), reason: 'hard_cut', yieldedMs: this.yieldedMs() };
     this.stop();
   }
 
@@ -181,7 +234,7 @@ export class DrainHandover {
   onEnteredWorld(): void {
     const d = this.dropped;
     this.dropped = null;
-    if (d) this.host.report({ reason: d.reason, path: 'relogin', ms: this.host.now() - d.at });
+    if (d) this.host.report({ reason: d.reason, path: 'relogin', ms: this.host.now() - d.at, ...(d.yieldedMs !== null ? { yieldedMs: d.yieldedMs } : {}) });
   }
 
   /** A deliberate logout, a launcher return, giving up: nothing to report. */
@@ -195,6 +248,8 @@ export class DrainHandover {
     this.capable = false;
     this.inFlight = false;
     this.safeSince = null;
+    this.yieldFrom = null;
+    this.yieldTo = null;
     if (this.timer !== null) (this.host.clearInterval ?? ((t) => clearInterval(t as ReturnType<typeof setInterval>)))(this.timer);
     this.timer = null;
   }

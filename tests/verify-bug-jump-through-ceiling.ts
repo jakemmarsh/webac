@@ -20,20 +20,19 @@
  * (only inside a registered cell) the nearest below, else the floor the body stood on (no geometry yet / a doorway
  * seam) — so outside every cell the body kept z 0.
  *
- * The live-frame driver below runs the shipped pieces in main.ts's frame order: stepPlayerMovement (the collided
+ * The live-frame driver (tests/_harness/liveFrames.ts) runs the shipped pieces in main.ts's frame order: stepPlayerMovement (the collided
  * airborne step), interiorGroundY (getBodyFloorHeight + findCellContaining, as main.ts passes them), losesContact (the
  * walk-off), advanceAirborneFrame (the airborne vertical step main.ts calls).
  */
 import { existsSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { getJumpVelocity, sphereIntersectsAnyPoly, type CollisionBSPNode } from '@ac/shared';
-import { advanceAirborneFrame, airborneReferenceY, ceilingStop, losesContact } from '../packages/renderer/src/world/fallPhysics.ts';
-import { floorSearchFromY, interiorGroundY } from '../packages/renderer/src/world/outdoorGround.ts';
-import { stepPlayerMovement, type MovementServices } from '../packages/renderer/src/player/OutdoorMovement.ts';
+import { advanceAirborneFrame, ceilingStop } from '../packages/renderer/src/world/fallPhysics.ts';
 import { simulateFlight } from '../packages/renderer/src/agent/jumpPlan.ts';
 import type { DungeonCollision } from '../packages/renderer/src/world/DungeonCollision.ts';
 import { DAT_PATHS } from './_harness/dat.ts';
 import { dungeonNav, type DungeonNav } from './_harness/dungeonNav.ts';
+import { liveFramesOver } from './_harness/liveFrames.ts';
 
 const G = -9.8; // main.ts GRAVITY (ACE PhysicsGlobals.Gravity)
 
@@ -98,73 +97,6 @@ describe('BUG.jump-through-ceiling — sphereIntersectsAnyPoly\'s graze toleranc
 });
 
 const DATS = existsSync(DAT_PATHS.portal) && existsSync(DAT_PATHS.cell);
-
-interface Run { x: number; y: number; z: number; cell: number; maxX: number; minX: number; peak: number; frames: number; landed: boolean }
-
-/**
- * main.ts's frame loop for the player's body over a landblock's collision (landblock-local metres in and out, AC
- * axes: y north): standing at `at`, either jumping (`jump`: launch velocity, m/s) or walking (`walk`: m/s) until it
- * has landed and stood a moment, or `seconds` pass. `ceilings: false` runs it as the client did before the fix. The
- * movement services keep one sliding normal across frames, as main.ts's movementServices.slide does.
- */
-function liveFramesOver(nav: DungeonNav, landblock: number, at: { x: number; y: number; z: number }, opts: { jump?: { vx: number; vy: number; up: number }; walk?: { vx: number; vy: number }; seconds?: number; ceilings?: boolean }): Run {
-  const col = nav.col;
-  const BX = ((landblock >>> 24) & 0xff) * 192, BY = ((landblock >>> 16) & 0xff) * 192;
-  const dt = 1 / 60;
-  const stepDown = nav.stepDown;
-  const sv = {
-    dungeonCollision: col, outdoorCollision: col,
-    terrain: { getHeightAt: () => null, getTriangleNormalAt: () => null, isWalkable: () => true },
-    water: { blockWaterTypeAt: () => null }, creatureObstacles: null, defaultPlayerRadius: col.playerRadius,
-    edgeSlide: true, stepDownHeight: stepDown, slide: { slidingNormal: null },
-    dungeonGroundAt: (x: number, z: number, fromY: number) => col.getFloorHeight(x, z, fromY, Infinity),
-  } as unknown as MovementServices;
-  let cell = col.findCellContaining(BX + at.x, BY + at.y, at.z + col.lowerSphereHeight);
-  const ground = {
-    floorHeight: (x: number, z: number, fromY: number, maxDrop?: number) => col.getBodyFloorHeight(x, z, fromY, stepDown, maxDrop),
-    cellAt: (x: number, z: number, footY: number) => col.findCellContaining(x, z, footY + col.lowerSphereHeight, cell),
-  };
-  let x = BX + at.x, z = BY + at.y;
-  let lastGround = at.z;
-  let prevGrounded: number | null = at.z;
-  let airborne = false, baseY = at.z, offY = 0, vy = 0, vx = 0, vz = 0;
-  if (opts.jump) { airborne = true; baseY = at.z; vy = opts.jump.up; vx = opts.jump.vx; vz = opts.jump.vy; prevGrounded = null; }
-  let maxX = -Infinity, minX = Infinity, peak = at.z, landedAt = -1, landed = false;
-  const total = Math.round((opts.seconds ?? 6) / dt);
-  let f = 0;
-  for (; f < total; f++) {
-    const px = x, pz = z;
-    const step = stepPlayerMovement(
-      { x, z, floorY: airborneReferenceY(airborne, baseY, offY, lastGround), inDungeon: true, airborne, jumpVelocityX: vx, jumpVelocityZ: vz, slideVelocity: null },
-      airborne || !opts.walk ? 0 : opts.walk.vx * dt, airborne || !opts.walk ? 0 : opts.walk.vy * dt, dt, sv,
-    );
-    x = step.x; z = step.z;
-    const groundY = interiorGroundY(ground, px, pz, x, z,
-      floorSearchFromY(null, airborneReferenceY(airborne, baseY, offY, lastGround), col.lastStepUp ?? 0), col.transitionSphereRadius, lastGround);
-    lastGround = groundY;
-    if (!airborne && losesContact(prevGrounded, groundY, stepDown)) {
-      airborne = true; baseY = prevGrounded as number; offY = 0; vy = 0; vx = (x - px) / dt; vz = (z - pz) / dt;
-    }
-    prevGrounded = airborne ? null : groundY;
-    if (airborne) {
-      const air = advanceAirborneFrame(baseY, offY, vy, [dt], groundY, G, {
-        riseLimit: opts.ceilings === false ? null : (from, to) => col.riseLimit(x, z, from, to),
-        floorAtHead: (headY) => col.getFloorHeight(x, z, headY, Infinity),
-        height: col.playerHeight,
-      });
-      offY = air.offsetY; vy = air.velocityY;
-      if (air.landed) { airborne = false; offY = 0; vx = 0; vz = 0; landed = true; landedAt = f; prevGrounded = groundY; }
-    }
-    const feet = airborne ? baseY + offY : groundY;
-    peak = Math.max(peak, feet);
-    maxX = Math.max(maxX, x - BX); minX = Math.min(minX, x - BX);
-    const c = col.findCellContaining(x, z, feet + col.lowerSphereHeight, cell);
-    if (c) cell = c;
-    if (landed && !airborne && f - landedAt > 30) break;
-  }
-  const feet = airborne ? baseY + offY : lastGround;
-  return { x: x - BX, y: z - BY, z: feet, cell: col.findCellContaining(x, z, feet + col.lowerSphereHeight) >>> 0, maxX, minX, peak, frames: f, landed };
-}
 
 describe.skipIf(!DATS)('BUG.jump-through-ceiling — Mountain Keep (0x01D2), the live frame over the real cells (needs DAT files)', () => {
   const LB = 0x01d20000;

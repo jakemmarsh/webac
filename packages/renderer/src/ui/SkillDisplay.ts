@@ -105,3 +105,20 @@ export function statLineRuns1999(stat: StatLine1999, vitaeMultiplier: number): T
 }
 
 export const argbToCss = (argb: number): string => `#${((argb >>> 0) & 0xffffff).toString(16).padStart(6, '0')}`;
+
+/**
+ * The skills the character panel lists (webac#28): exactly the era's SkillTable
+ * (0x0E000004), never a server skill record the table lacks. Both clients build
+ * the list by walking the SkillTable hash and asking the qualities for each key:
+ * end of retail gmSkillUI::RebuildSkillList @ 0x0049c3a0 (PackableHashTable<
+ * SkillBase>::begin, InqSkill per key), and 1999 SkillListPanel::
+ * UpdateSkillsFromPlayerDesc @ 0x00547470 (SkillTable_Get, one row slot per
+ * table entry, rows from the table's hash iterator 0x0054a930). A record for a
+ * skill outside the table is never shown: the AC1999 server stores a record
+ * for every slot of chargen's skill array (CACQualities::SetSkillAdvancementClass,
+ * even Inactive ones), so it sends Sling 8, Spellcraft 17, Awareness 25 and
+ * Arms and Armor Repair 26, none of which the 1999 SkillTable has. With no table loaded, the server's records are all we have.
+ */
+export function skillPanelCensusIds(table: ReadonlyMap<number, unknown> | null | undefined, recordIds: Iterable<number>): number[] {
+  return table ? [...table.keys()] : [...recordIds];
+}

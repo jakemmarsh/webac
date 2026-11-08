@@ -165,6 +165,8 @@ export interface ClientPreworldEvent {
   handoverMs?: number;
   reason?: typeof HANDOVER_REASONS[number];
   path?: typeof HANDOVER_PATHS[number];
+  /** 'handover' only: a running macro held this long (ms) for the move (the page's DrainHandover.noteYield). */
+  yieldedMs?: number;
   /** 'login_retry' only: why the page retried (LOGIN_RETRY_KINDS). */
   retry?: typeof LOGIN_RETRY_KINDS[number];
   /**
@@ -391,9 +393,10 @@ export function afterRefusalField(v: unknown): Pick<ClientPreworldEvent, 'afterR
 }
 
 /** The 'handover' outcome's own fields, each only when valid. */
-function handoverFields(b: Record<string, unknown>): Pick<ClientPreworldEvent, 'handoverMs' | 'reason' | 'path'> {
+function handoverFields(b: Record<string, unknown>): Pick<ClientPreworldEvent, 'handoverMs' | 'reason' | 'path' | 'yieldedMs'> {
   const ms = uint(b.handoverMs, 24 * 3600_000);
   const reason = pick(b.reason, HANDOVER_REASONS);
   const path = pick(b.path, HANDOVER_PATHS);
-  return { ...(ms !== null ? { handoverMs: ms } : {}), ...(reason ? { reason } : {}), ...(path ? { path } : {}) };
+  const yielded = uint(b.yieldedMs, 24 * 3600_000);
+  return { ...(ms !== null ? { handoverMs: ms } : {}), ...(reason ? { reason } : {}), ...(path ? { path } : {}), ...(yielded !== null ? { yieldedMs: yielded } : {}) };
 }

@@ -15,6 +15,8 @@ verification/screens/
 .provision-lanes
 verification/screen-regression/
 verification/screen-regression-*/
+# tools/probe-ledge-drop.ts runs (results.json + screenshots)
+verification/ledge-drop/
 # tools/live-gate.sh run logs, step reports and screenshots (the stamp itself lives in .git/acjs-gate/)
 verification/live-gate/
 

@@ -7,7 +7,8 @@
  */
 import { Sound } from '@ac/shared';
 import type { TextureSamplingRule } from '../models/TextureSamplerPrefs.js';
-import type { LightColourRule } from '../models/RetailLighting.js';
+import type { LightColourRule, PointLightRule } from '../models/RetailLighting.js';
+import type { LightPoolRule } from '../effects/DatLightBudget.js';
 
 /** The chargen "you have unspent credits" requesters (gmCharGenMainUI::DoFinish / the 1999 CG pages). */
 export interface ChargenCreditWarnings {
@@ -116,6 +117,32 @@ export interface EraWorldRules {
    */
   lightColour: LightColourRule;
   /**
+   * How a point light falls off (RetailLighting.pointLightRule, BUG.ac1999-point-light-falloff).
+   * End of retail: 'd3d', calc_point_light @ 0059c8b0 for static lights on env cells (range
+   * falloff × 1.3, a (1 − d/range) window, 1/d² past a metre, capped at the colour) and the D3D
+   * hardware light for the rest (N·L / d inside falloff × 1.5). 1999: 'software1999', one software
+   * function @ 0x583330 for every point light on every vertex: range = falloff, the same
+   * (cos θ + 0.5) / 1.5 wrap and 1/d² past a metre, no window, no cap.
+   */
+  pointLight: PointLightRule;
+  /**
+   * The viewer (player) light's intensity and falloff per unit of the brightness slider, or null
+   * for end of retail's fixed SmartBox.ViewerLightIntensity / Falloff (2.25 / 10, ViewerLight.ts).
+   * 1999: SmartBox_SetBrightness @ 0x40df93 sets 0x62ffe4 = b·4.5 + b·4.5, and SmartBox_set_viewer
+   * @ 0x40e2ad copies it into BOTH the viewer light's intensity (+0x48, 0x62ffb8) and falloff
+   * (+0x4c, 0x62ffbc): 9 · b, 4.5 at the default b = 0.5 (the Performance panel's ctor applies its
+   * settings through PerformancePanel_ApplySettings @ 0x598430).
+   */
+  viewerLightPerBrightness: number | null;
+  /**
+   * Which lights make the world pool (DatLightBudget.LightPoolRule). End of retail: 'eor', 40 + 20·L
+   * static / 7 + 3·L dynamic, from the player. 1999: 'ac1999', 0x43ffd0's 20 + 10·L static (30 /
+   * 10 at the Automatic degrade's L = 1), from the player's current cell's frame (0x43f7b0,
+   * CellManager_ChangePosition); the same per-object reach test. Both rank each light by its
+   * owner's origin (0054d1b0 / 0x43f7b0; DatLightBudget.lightPoolRanksFromOwner).
+   */
+  lightPool: LightPoolRule;
+  /**
    * The open Examine window re-appraises its creature / character every 0.75 s outside peace mode.
    * End of retail: gmExaminationUI::UseTime @ 004ab530. 1999: no such loop; CM_Item_Event_Appraise
    * @ 0x005adca0 is called only by ExaminePanel_ExamineObject @ 0x005096d0 (an examine, or a new
@@ -214,6 +241,9 @@ export const EOR_WORLD_RULES: EraWorldRules = Object.freeze({
   chatHistory: Object.freeze({ max: 100, trimTo: 100 }),
   textureSampling: 'prefs' as const,
   lightColour: 'rgb' as const,
+  pointLight: 'd3d' as const,
+  viewerLightPerBrightness: null,
+  lightPool: 'eor' as const,
   examineReappraise: true,
   appraisalTurnsAppraiser: false,
   landscapeDetailTextures: null,
@@ -250,15 +280,23 @@ export const AC1999_WORLD_RULES: EraWorldRules = Object.freeze({
   chatHistory: Object.freeze({ max: 300, trimTo: 200 }),
   textureSampling: 'bilinearNoMips' as const,
   lightColour: 'intensityOnly' as const,
+  pointLight: 'software1999' as const,
+  viewerLightPerBrightness: 9, // 0x40df93: b * 4.5 + b * 4.5
+  lightPool: 'ac1999' as const,
   examineReappraise: false,
   appraisalTurnsAppraiser: true,
   landscapeDetailTextures: AC1999_LANDSCAPE_DETAIL,
   textureDetailMenu: AC1999_TEXTURE_DETAIL_MENU,
 });
 
+/** The slider's value `pref` (-1..1) as the 1999 Performance panel's brightness b (0..1, default 0.5). */
+export function sliderBrightness(pref: number): number {
+  return Math.max(0, Math.min(1, ((Number.isFinite(pref) ? pref : 0) + 1) / 2));
+}
+
 /** LScape min_ambient for the brightness slider's value `pref` (Render.ScreenBrightness, -1..1). */
 export function landscapeMinAmbient(rules: EraWorldRules, pref: number): number {
-  const b = Math.max(0, Math.min(1, ((Number.isFinite(pref) ? pref : 0) + 1) / 2));
+  const b = sliderBrightness(pref);
   return rules.brightness.minAmbientBase + rules.brightness.minAmbientPerBrightness * b;
 }
 

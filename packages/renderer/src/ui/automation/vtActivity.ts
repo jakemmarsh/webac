@@ -43,7 +43,8 @@ export function vtStatusText(st: RoutineStatus, mine: boolean): string {
   if (!st.running || !mine) return 'Macro: Stopped.';
   if (st.paused) return 'Macro: Paused.';
   const doing = st.acting && st.acting !== 'macro' ? st.acting : null;
-  return doing ? `Macro: ${doing}` : 'Macro: Running.';
+  // Navigation on and not walking: why (VirindiTank shows its navigation state; BUG.vtank-nav-stands-still).
+  return doing ? `Macro: ${doing}` : st.navWait ? `Macro: ${st.navWait.short}` : 'Macro: Running.';
 }
 
 export class VtActivity {

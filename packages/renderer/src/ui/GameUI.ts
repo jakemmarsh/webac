@@ -57,7 +57,7 @@ import { CREATURE_EXAMINE_ELEMENTS, STAT_VALUE_COLORS, MISC_INFO_COLORS, type Cr
 import { wheelScrollPixels } from './wheelScroll.js';
 import { pageStorage } from '../utils/pageStorage.js';
 import { COMBAT_WINDOW, combatWindowPlacement, combatBarPageVisible } from './CombatWindow.js';
-import { skillFooterTitleRuns, skillRowTone, statLineRuns1999, FOOTER_TITLE_COLORS, argbToCss, type TextRun } from './SkillDisplay.js';
+import { skillFooterTitleRuns, skillRowTone, statLineRuns1999, skillPanelCensusIds, FOOTER_TITLE_COLORS, argbToCss, type TextRun } from './SkillDisplay.js';
 import { AutomationPanel, hudStripText, type AutomationKit, type RoutineEditor } from './automation/AutomationPanel.js';
 import { VTankWindow, type VTankKit, type VTankSource } from './automation/VTankWindow.js';
 import { attachVTankFileDrop, guardPageFileDrops, pickVTankFiles } from './automation/vtankFileIn.js';
@@ -268,7 +268,8 @@ import {
   eraClientRules, resolveClientText, EOR_TRAIN_SKILL_CONFIRM, ERA_DEFAULTED_OPTION_KEYS, type EraClientRules, type ClientText,
 } from '../era/EraFeatures.js';
 import { EncumbranceNotice, type EncumbranceNoticeRules } from './EncumbranceNotice.js';
-import { ERA_OPTIONAL_UI_SOUNDS, eraTextureDetail, eraTexturePrefs, landscapeDetailTexturesOption, landscapeDrawDistanceOption, landscapeMinAmbient, textureFilteringOption, trimChatLog } from '../era/EraWorldRules.js';
+import { ERA_OPTIONAL_UI_SOUNDS, eraTextureDetail, eraTexturePrefs, landscapeDetailTexturesOption, landscapeDrawDistanceOption, landscapeMinAmbient, sliderBrightness, textureFilteringOption, trimChatLog } from '../era/EraWorldRules.js';
+import { viewerLightLevel, type ViewerLightLevel } from '../effects/ViewerLight.js';
 import { ACFontRenderer, OUTLINE_NEIGHBOUR_OFFSETS } from './ACFontRenderer.js';
 import { placeScrollbarButtons, bindHotClick, hotClickTiming, buttonVisualState } from './ScrollbarButtons.js';
 import { outlineCssFromArgb, DEFAULT_TEXT_OUTLINE_ARGB } from './TextOutline.js';
@@ -19903,8 +19904,11 @@ export class GameUI {
       this.spellDragScroll = { clock: new DragScrollClock(rule.delaySeconds), rule, x, y, raf: 0 };
       this.spellDragScroll.raf = requestAnimationFrame(this.spellDragScrollTick);
     };
+    // Bubble phase: the source's own dragstart has put its spell on the drag by now.
+    let live = false;
     document.addEventListener('dragstart', (e) => {
       if (!isSpellDrag(e.dataTransfer)) return;
+      live = true;
       this.spellcastBackgroundDragTarget(true);
       begin(e.clientX, e.clientY);
     });
@@ -19913,14 +19917,21 @@ export class GameUI {
       if (s) { s.x = e.clientX; s.y = e.clientY; } else if (isSpellDrag(e.dataTransfer)) begin(e.clientX, e.clientY);
     });
     const end = () => {
+      live = false;
       this.spellcastBackgroundDragTarget(false);
       const s = this.spellDragScroll;
       if (!s) return;
       cancelAnimationFrame(s.raf);
       this.spellDragScroll = null;
     };
-    document.addEventListener('dragend', end);
+    document.addEventListener('dragend', end, true);
     document.addEventListener('drop', end, true);
+    // BUG.spell-drag-source-torn-out — a drag whose source left the page mid-drag (a rebuilt
+    // spellbook row, a bar cell the list dropped) never sends the document its dragend. A native
+    // drag sends no mouse events while it runs, so the next one means it is over.
+    const afterLostDragEnd = () => { if (live || this.spellDragScroll) end(); };
+    document.addEventListener('mousemove', afterLostDragEnd, true);
+    document.addEventListener('pointerdown', afterLostDragEnd, true);
   }
 
   /** One frame of the spell drag's scrolling: the open tab's list, its band under the pointer, the rest clock. */
@@ -30229,6 +30240,8 @@ export class GameUI {
     // LScape's ambient floor (SmartBox_SetBrightness @ 0x40df93), not a gamma ramp.
     const gamma = this.clientRules.world.brightness.gamma;
     this.onLandscapeMinAmbient?.(landscapeMinAmbient(this.clientRules.world, gamma ? 0 : pref));
+    // 1999: the same brightness sets the viewer light's intensity and falloff (EraWorldRules.viewerLightPerBrightness).
+    this.onViewerLightLevel?.(viewerLightLevel(this.clientRules.world.viewerLightPerBrightness, sliderBrightness(gamma ? 0 : pref)));
     const root = typeof document !== 'undefined' ? document.body : null;
     if (!root) return;
     root.style.filter = frameScreenBrightnessFilter(pref, { gamma, ownScreen: this.ownPreworldScreens > 0 });
@@ -30253,6 +30266,8 @@ export class GameUI {
 
   /** LScape min_ambient for the era's brightness (main.ts → SkyboxRenderer.setLandscapeMinAmbient). */
   onLandscapeMinAmbient: ((level: number) => void) | null = null;
+  /** The era's viewer-light level for the brightness slider (main.ts → ViewerLight.setViewerLightLevel). */
+  onViewerLightLevel: ((level: ViewerLightLevel) => void) | null = null;
 
   /**
    * VISUAL3.70 — Config "Full Screen" toggle via the Fullscreen API. Persists
@@ -36974,13 +36989,8 @@ export class GameUI {
     // Healing, …) read 0 until trained. Pre-fix only server-record skills
     // were listed (6 rows on a fresh ACE char vs retail's full census).
     const recordIds = new Set(state.skills.getAllSkillIds());
-    const censusIds: number[] = this.skillTable
-      ? [...this.skillTable.skills.keys()]
-      : [...recordIds];
-    if (this.skillTable) {
-      // Defensive: keep any server-record skill the DAT table doesn't carry.
-      for (const id of recordIds) if (!this.skillTable.skills.has(id)) censusIds.push(id);
-    }
+    // webac#28: only the table's skills; a record the table lacks is never listed.
+    const censusIds = skillPanelCensusIds(this.skillTable?.skills, recordIds);
     for (const id of censusIds) {
       // getSkillName prefers DAT SkillTable, falling back to the ACE-anchored
       // skillIdLabel (FAITHFUL.249 fix — the old off-by-2 hardcoded map is gone).
@@ -37283,7 +37293,11 @@ export class GameUI {
       hover.reset();
       this.scheduleHudTooltipCheck();
     });
-    document.addEventListener('dragend', () => { this.hudDragActive = false; });
+    document.addEventListener('dragend', () => { this.hudDragActive = false; }, true);
+    // BUG.spell-drag-source-torn-out — a dragend lost with its source: the next mouse event ends the drag.
+    const lostDragEnd = (): void => { if (this.hudDragActive) this.hudDragActive = false; };
+    document.addEventListener('mousemove', lostDragEnd, true);
+    document.addEventListener('pointerdown', lostDragEnd, true);
     // RECON.inventory-grid-dat-cells.b — capture, then defer past the target's
     // handlers (some stop propagation) so a request the drop sent is recorded.
     const settleWaiting = (): void => { setTimeout(() => this.settleItemDragWaiting(), 0); };

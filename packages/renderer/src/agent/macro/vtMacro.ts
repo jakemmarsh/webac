@@ -925,7 +925,7 @@ export class VtMacro {
 
   /** What the macro should do now, or null. `range`: Monster Range (metres). */
   /** The routine's hold-position (beyond VTank, Jake 2026-10-12): a monster this refuses is no target. */
-  allowTarget?: (o: { dist: number; bearing: number }) => boolean;
+  allowTarget?: (o: { guid: number; dist: number; bearing: number }) => boolean;
 
   /**
    * BuffSelfNormal alone: a buff under RebuffTimeRemainingSeconds (or a Force Buff round), and nothing else of the rule

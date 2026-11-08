@@ -8,7 +8,6 @@
  */
 import { getJumpVelocity } from '@ac/shared';
 import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { DatDatabase } from '../../packages/dat-parser/src/DatDatabase.js';
 import { DatReader } from '../../packages/dat-parser/src/DatReader.js';
 import { FileDatBytes } from '../../packages/dat-parser/src/node/FileDatBytes.js';
@@ -18,9 +17,7 @@ import { SetupModel } from '../../packages/dat-parser/src/file-types/SetupModel.
 import { stepPlayerMovement, type MovementServices } from '../../packages/renderer/src/player/OutdoorMovement.js';
 import type { NavPoint, NavProbe } from '../../packages/renderer/src/agent/navPlanner.js';
 import type { JumpKit } from '../../packages/renderer/src/agent/jumpPlan.js';
-import { DAT_PATHS, openDat } from './dat.js';
-
-const REPO = resolve(__dirname, '..', '..');
+import { DAT_PATHS, dataPath, openDat } from './dat.js';
 
 export interface DungeonNav {
   col: import('../../packages/renderer/src/world/DungeonCollision.js').DungeonCollision;
@@ -48,7 +45,7 @@ export interface DungeonNavOptions {
 
 /** The AC1999 world portal + cell (dat-sets/ac1999-retail), each through its 1999 overlay; null when absent. */
 export function ac1999Dats(): { portal: DatDatabase; cell: DatDatabase } | null {
-  const portal = resolve(REPO, 'dat-sets/ac1999-retail/portal.dat'), cell = resolve(REPO, 'dat-sets/ac1999-retail/cell.dat');
+  const portal = dataPath('dat-sets/ac1999-retail/portal.dat'), cell = dataPath('dat-sets/ac1999-retail/cell.dat');
   if (!existsSync(portal) || !existsSync(cell)) return null;
   // Own instances, not openDat's shared cache: the overlay changes every read.
   const p = new DatDatabase(new FileDatBytes(portal)); p.setOverlay(ac1999PortalOverlay());

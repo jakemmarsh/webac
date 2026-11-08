@@ -26,8 +26,8 @@ import { BEING_CAST_AT_S, PULL_LAND_MS, RECALL_MOVE_M, RECALL_WAIT_MS, awayWord,
 import { isCorpseDenial } from './macro/corpseBook.ts';
 import { LootExtras } from './macro/lootExtras.ts';
 import { propertyDumpLines, testItemLine } from './macro/lootTest.ts';
-import type { AgentObject, AgentObservation, AgentResult } from './types.ts';
-import type { RoutineDriver, RoutineErrorPlace, RoutineLifecycleEvent, RoutineStopReason } from '../telemetry/AutomationReporter.ts';
+import type { AgentObject, AgentObservation, AgentResult, AgentSelf } from './types.ts';
+import type { NavIdleReason, RoutineDriver, RoutineErrorPlace, RoutineLifecycleEvent, RoutineStopReason } from '../telemetry/AutomationReporter.ts';
 
 /** Live facts the conditions read that the observation doesn't carry. */
 export interface RoutineFacts {
@@ -216,7 +216,22 @@ export interface RoutineStatus {
   nav?: { route: string; point: number; done: boolean };
   /** A Follow route: whom it follows, whether they are in sight (out of sight: standing still), and the corners of their path still to run. */
   follow?: { target: string; inSight: boolean; trail: number };
+  /**
+   * Navigation is on and the route isn't being walked, and why (BUG.vtank-nav-stands-still): `short` for the window's
+   * status line, `text` for the chat line and the agent. Absent: walking, or navigation off.
+   */
+  navWait?: { reason: NavIdleReason; short: string; text: string };
+  /**
+   * Yielding for a bridge deploy's server switch (serverSwitchStep): since when (a lull the run had anyway), and what it
+   * does meanwhile ('defending' against what came at it, going to 'peace', 'looting' its kills, 'walking' its route
+   * where nothing is near, 'holding' still). Not shown in the VTank window: the move is meant to go unnoticed. Absent
+   * otherwise.
+   */
+  serverSwitch?: { since: number; phase: SwitchPhase };
 }
+
+/** What a run holding for a server switch is doing (RoutineStatus.serverSwitch). */
+export type SwitchPhase = 'defending' | 'peace' | 'looting' | 'walking' | 'holding';
 
 /** What this run has done (the panel's Stats tab), since it started. */
 export interface RoutineStats {
@@ -236,6 +251,15 @@ export interface RoutineStats {
 const emptyStats = (): RoutineStats => ({ startedAt: null, xpGained: 0, kills: 0, deaths: 0, kept: 0, left: 0, sold: 0, rebuffs: 0, stateTime: {} });
 
 const STEP_MS = 500;
+/**
+ * Navigation on and the character no more than NAV_IDLE_M from where it stood this long: it says why, once per reason a
+ * run (a chat line, and the nav_idle report). BUG.vtank-nav-stands-still (2026-11-07): a player's character "just stands
+ * there" with navigation on, and nothing said why.
+ */
+export const NAV_IDLE_MS = 20_000;
+const NAV_IDLE_M = 2;
+/** Walks to route points that failed in a row before the route counts as unreachable (no_path). */
+const NAV_FAILS_NO_PATH = 3;
 /** The shared look the rules are checked against (metres); a condition reaching farther asks for its own range. */
 const RULE_SIGHT_M = 120;
 
@@ -301,6 +325,13 @@ export function pickCorpse<T extends { dist: number; relBearing: number }>(corps
 
 export class RoutineEngine {
   private profile: RoutineProfile | null = null;
+  /**
+   * A bridge deploy wants to move the session (AgentApi.serverSwitchPending; session/DrainHandover.ts) and the run yields
+   * for it: since when, and what it is doing.
+   */
+  private switchHold: { since: number; phase: SwitchPhase } | null = null;
+  /** While yielding for a server switch: the only monsters the run may fight (those on it). */
+  private switchTargets: Set<number> | null = null;
   private state = '';
   private stateSince = 0;
   private busy = false;
@@ -326,11 +357,25 @@ export class RoutineEngine {
   /** Events at or before this sequence number are already accounted for (portal / death conditions). */
   private eventMark = 0;
   /** The route the macro walks (load-route / VTank's Embed Nav). */
-  private nav: { route: Route; i: number; dir: 1 | -1; done: boolean } | null = null;
+  private nav: { route: Route; i: number; dir: 1 | -1; done: boolean; empty?: boolean } | null = null;
   /** OpenDoors: doors left alone for a while (wouldn't open, or locked past our lockpicks). */
   private doorSkip = new Map<number, number>();
   /** The route point NavFarStopRange last held the route at (said once per point). */
   private farHeld: string | null = null;
+  /**
+   * The profile's Auto-Navigation route (navRoute) the run last took: a different one in an edit (the window's dropdown,
+   * or the Route tab's first Add making "Route 1") loads it, as VirindiTank's dropdown loads a route into the running macro.
+   */
+  private navFromProfile: string | undefined = undefined;
+  /** Walks to route points that failed in a row (reset by one that arrives), the last one's answer, and whether it was said. */
+  private navFails = 0;
+  private navFailMsg = '';
+  private navFailSaid = false;
+  /** Why navigation isn't walking, as the last macro step found it (status().navWait). */
+  private navWhy: { reason: NavIdleReason; short: string; text: string } | null = null;
+  /** Where the character stood since when, while navigation is on (the nav_idle watch), and the reasons said this run. */
+  private navStill: { x: number; y: number; since: number } | null = null;
+  private navIdleSaid = new Set<NavIdleReason>();
   private callStack: string[] = [];
   /**
    * A Follow route's leader: where they have been (global metres, the
@@ -448,6 +493,9 @@ export class RoutineEngine {
     this.paused = false;
     this.stats = { ...emptyStats(), startedAt: this.now() };
     this.resting.clear();
+    if (this.switchHold) this.api.serverSwitchYield(false);
+    this.switchHold = null;
+    this.switchTargets = null;
     this.stateClock = this.now();
     this.xpAtStart = this.api.self()?.xp?.total ?? 0;
     this.chatSeq = this.api.currentSeq();
@@ -472,6 +520,13 @@ export class RoutineEngine {
     // VirindiTank's Auto-Navigation and Looting profiles: the route and loot set it starts with.
     const navRoute = profile.navRoute ? profile.routes.find((r) => r.name === profile.navRoute) : undefined;
     this.reversed = false;
+    this.navFromProfile = profile.navRoute;
+    this.navFails = 0;
+    this.navFailSaid = false;
+    this.navWhy = null;
+    this.navStill = null;
+    this.navIdleSaid.clear();
+    this.combatIdle = { since: -1, said: false };
     if (navRoute) this.nav = this.loadNav(navRoute);
     this.activeLootSet = null;
     if (profile.lootSet && profile.lootSets?.[profile.lootSet]) { this.profile.loot = profile.lootSets[profile.lootSet]; this.activeLootSet = profile.lootSet; }
@@ -488,6 +543,8 @@ export class RoutineEngine {
     this.note(`${why}`);
     this.paused = false;
     this.stopRequested = true;
+    // A stopped run holds nothing: the move waits on the player's own calm, as for anyone.
+    if (this.switchHold) { this.switchHold = null; this.switchTargets = null; this.api.serverSwitchYield(false); }
     const name = this.profile.name;
     // A meta's views go with the run.
     this.views?.closeAll();
@@ -502,6 +559,8 @@ export class RoutineEngine {
       acting: this.acting, last: this.log.slice(-12), stateSince: this.stateSince, lastChange: this.lastChange, spent: [...this.spent], forcingBuffs: !!this.vt?.forcing,
       ...(this.nav ? { nav: { route: this.nav.route.name, point: this.nav.i, done: this.nav.done } } : {}),
       ...(this.follow && this.nav?.route.mode === 'follow' ? { follow: { target: this.follow.who, inSight: this.follow.inSight, trail: this.follow.trail.length } } : {}),
+      ...(this.profile && !this.paused && this.navWhy && truthySetting(this.settings.EnableNav) ? { navWait: { ...this.navWhy } } : {}),
+      ...(this.profile && this.switchHold ? { serverSwitch: { since: this.switchHold.since, phase: this.switchHold.phase } } : {}),
     };
   }
 
@@ -629,7 +688,8 @@ export class RoutineEngine {
    */
   private buffWhileYouWalk(p: RoutineProfile): void {
     const h = this.hand;
-    if (!h || !HAND_WALKS.has(h.what) || !p.vtank || !p.macro || this.busy) return;
+    // A server switch waiting: no buff of the routine's own (a cast is a combat stance; DrainHandover waits it out).
+    if (!h || !HAND_WALKS.has(h.what) || !p.vtank || !p.macro || this.busy || this.api.serverSwitchPending()) return;
     const st = this.settings;
     if (!truthySetting(st.EnableBuffing) || !p.modules.buffs) return;
     const t = this.now();
@@ -791,7 +851,31 @@ export class RoutineEngine {
     const set = profile.lootSet !== before ? profile.lootSet ?? null : this.activeLootSet;
     if (set !== null && profile.lootSets?.[set]) { this.profile.loot = profile.lootSets[set]; this.activeLootSet = set; } else this.activeLootSet = null;
     if (!profile.states.some((s) => s.name === this.state)) this.enterState(profile.initialState, null);
-    if (this.nav) { const r = profile.routes.find((x) => x.name === this.nav!.route.name); this.nav = r ? { ...this.nav, route: r, i: Math.min(this.nav.i, Math.max(0, r.points.length - 1)), done: this.nav.done || (r.mode !== 'follow' && r.points.length === 0) } : null; } // a Follow route has no points and never ends
+    // VirindiTank's Auto-Navigation dropdown (and the Route tab's first Add, which makes "Route 1" the profile's route)
+    // load that route into the running macro. Before 2026-11-07 an edit only refreshed a route already loaded, so a
+    // route recorded with Run Macro already on was never walked: "once I hit enable navigation the toon just stands
+    // there" (BUG.vtank-nav-stands-still). A route a meta loaded (Load Embedded Navroute) stays until the profile's changes.
+    if (profile.navRoute !== this.navFromProfile) {
+      this.navFromProfile = profile.navRoute;
+      const r = profile.navRoute ? profile.routes.find((x) => x.name === profile.navRoute) : undefined;
+      this.reversed = false;
+      this.nav = r ? this.loadNav(r) : null;
+      this.navFails = 0;
+      this.note(r ? `route "${r.name}" loaded (${r.points.length} points)` : 'no route loaded');
+    } else if (this.nav) {
+      const r = profile.routes.find((x) => x.name === this.nav!.route.name);
+      if (!r) this.nav = null;
+      else {
+        // An empty route is done at once (nothing to walk); waypoints added to it since start it from the nearest one.
+        const empty = r.mode !== 'follow' && r.points.length === 0;
+        const refilled = this.nav.empty && !empty;
+        this.nav = refilled ? this.loadNav(r) : { ...this.nav, route: r, i: Math.min(this.nav.i, Math.max(0, r.points.length - 1)), done: this.nav.done || empty, empty }; // a Follow route has no points and never ends
+      }
+    } else if (profile.navRoute) {
+      // The profile's route didn't exist at the start (or was removed and is back): load it now.
+      const r = profile.routes.find((x) => x.name === profile.navRoute);
+      if (r) this.nav = this.loadNav(r);
+    }
     this.spent.clear();
     this.resting.clear();
     return { ok: true, message: `updated "${profile.name}"` };
@@ -1156,6 +1240,7 @@ export class RoutineEngine {
       return;
     }
     if (!this.paused) this.watchLeader(p);
+    this.watchNavIdle(p);
     if (this.busy) return;
     if (this.lootThisGuid !== null) {
       const guid = this.lootThisGuid;
@@ -1187,6 +1272,8 @@ export class RoutineEngine {
       }
     }
     if (me && !me.dead) this.deadSeen = false;
+    // A bridge deploy waiting for a calm moment, and the run already yielding for it (begun in a lull: switchLull).
+    if (this.switchHold && this.serverSwitchStep(p, me)) return;
     if (this.watchdog && me) {
       // Where you are (global metres), indoors and in dungeons too: the radar's text (me.coords) is the 24 m cell and
       // none at all indoors, so a watchdog in a dungeon never sampled.
@@ -1204,11 +1291,11 @@ export class RoutineEngine {
       }
     }
     // Enable Meta off (VirindiTank): the rules don't run; the macro still does.
-    if (!truthySetting(this.settings.EnableMeta)) { if (p.macro) this.macroStep(p); else this.lootUpkeep(p); return; }
+    if (!truthySetting(this.settings.EnableMeta)) { if (p.macro) this.macroStep(p); else if (!this.lootUpkeep(p)) this.switchLull(p); return; }
     const verdicts = this.dryRun();
     const at = verdicts.findIndex((v) => v.fires);
     // No rule acting: the macro, or (a rules-only profile) the loot's salvaging.
-    if (at < 0) { if (p.macro) this.macroStep(p); else this.lootUpkeep(p); return; }
+    if (at < 0) { if (p.macro) this.macroStep(p); else if (!this.lootUpkeep(p)) this.switchLull(p); return; }
     const rule = p.states.find((s) => s.name === this.state)!.rules[at];
     const key = `${this.state}#${at}`;
     if (p.ruleFiring === 'once') this.spent.add(key);
@@ -1235,6 +1322,7 @@ export class RoutineEngine {
     const combat = truthySetting(st.EnableCombat) && p.modules.combat;
     const looting = truthySetting(st.EnableLooting) && p.modules.looting;
     const navOn = truthySetting(st.EnableNav) && p.modules.navigation && !!this.nav && !this.nav.done && this.now() >= this.navHeldUntil;
+    this.navWhy = truthySetting(st.EnableNav) ? this.navBlocked(p) : null;
     const monsters = obs.nearby.filter((o) => o.kind === 'monster' && !o.dying && (!this.hold || !obs.me || holdAllows(this.hold, obs.me.pos, o)));
     const inRange = combat && monsters.some((o) => o.dist <= range);
     const near = combat && truthySetting(st.EnableNav) && approach > range ? monsters.filter((o) => o.dist > range && o.dist <= approach).sort((a, b) => a.dist - b.dist)[0] : undefined;
@@ -1252,17 +1340,12 @@ export class RoutineEngine {
     const lootDue = looting && (truthySetting(st.LootOnlyRareCorpses) ? this.rarePending : this.killsToLoot().length > 0 || this.othersDue(obs.nearby, reach));
     // A profile with VirindiTank's tabs: its planners decide recharge, combat and buffs (vtMacro.ts).
     if (p.vtank) {
-      this.vt ??= new VtMacro(this.api, this.now);
-      this.vt.allowTarget = (o) => this.holdOk(o);
-      this.vt.held = () => this.isHeld();
-      this.vt.rebuffed = () => { this.stats.rebuffs++; };
-      this.vt.picked = () => this.handPick;
-      this.vt.followLeash = () => this.followLeashNow();
-      for (const name of this.vt.kills()) { this.kills.push({ name, at: this.now() }); this.kills = this.kills.slice(-KILLS_KEPT); this.stats.kills++; }
+      this.vt = this.vtReady();
       // A corpse of ours waiting and nothing in range: only recharging comes before the loot (buffs wait for idle);
       // with Boost Loot Priority it comes first outright.
       if (lootDue && truthySetting(st.LootPriorityBoost) && !inRange) { /* loot first, below */ } else {
         const step = this.vt.decide(p as RoutineProfile & { vtank: NonNullable<RoutineProfile['vtank']> }, st, { combat, buffing: truthySetting(st.EnableBuffing) && p.modules.buffs && !(lootDue && !inRange), idle: !inRange && !lootDue });
+        this.watchCombatIdle(combat && inRange && !step, monsters.find((o) => o.dist <= range)?.name ?? null);
         if (step) {
           this.acting = step.label;
           this.busy = true;
@@ -1285,6 +1368,8 @@ export class RoutineEngine {
         void this.api.walkTo(near.guid, { within: Math.max(1, range - 0.5), timeoutMs: 30_000 }).finally(() => { this.busy = false; this.acting = null; });
         return;
       }
+      // A lull the macro has anyway (nothing in range, no loot, no buff due): where a server switch's yield begins.
+      if (!steps.length && !inRange && this.switchLull(p)) return;
       if (!steps.length && navOn) { void this.walkNav(); return; }
       if (!steps.length) {
         // VTank's last rules: RandomHelperBuffs, then Peace Mode When Idle (through the macro's mode gate).
@@ -1319,6 +1404,7 @@ export class RoutineEngine {
     } else if (truthySetting(st.EnableBuffing) && p.modules.buffs && this.buffsDue().length) {
       steps.push({ kind: 'cast-buffs', set: this.macroBuffSet()!.name });
     }
+    if (!steps.length && this.switchLull(p)) return;
     if (!steps.length && navOn) { void this.walkNav(); return; }
     if (!steps.length) {
       const mode = obs.me?.combatMode;
@@ -1329,6 +1415,162 @@ export class RoutineEngine {
     this.busy = true;
     const looting2 = steps.some((x) => x.kind === 'loot-nearby');
     void this.run(steps, p).finally(() => { if (looting2) this.rarePending = false; this.busy = false; this.acting = null; });
+  }
+
+  /** VirindiTank's planners, wired to this run (hold-position, a server switch's targets, your hand), its kills counted. */
+  private vtReady(): VtMacro {
+    const vt = (this.vt ??= new VtMacro(this.api, this.now));
+    vt.allowTarget = (o) => this.holdOk(o) && this.switchOk(o);
+    vt.held = () => this.isHeld();
+    vt.rebuffed = () => { this.stats.rebuffs++; };
+    vt.picked = () => this.handPick;
+    vt.followLeash = () => this.followLeashNow();
+    for (const name of vt.kills()) { this.kills.push({ name, at: this.now() }); this.kills = this.kills.slice(-KILLS_KEPT); this.stats.kills++; }
+    return vt;
+  }
+
+  /** Whether a monster may be fought while the run holds for a server switch (always, with no switch waiting). */
+  private switchOk(o: { guid?: number }): boolean {
+    return !this.switchTargets || (o.guid !== undefined && this.switchTargets.has(o.guid));
+  }
+
+  /**
+   * A bridge deploy moves the session to the new deployment only at a calm moment (session/DrainHandover.ts: no combat
+   * stance, no attack either way for 15 s, nothing chasing), and a running macro is never calm: Coldeve's macro tabs
+   * took the drain's hard cut and a re-login every deploy (2026-11-07 22:41Z, 00:26Z). The yield is meant to go
+   * unnoticed, as the move itself does (Jake, 2026-11-07): it begins only in a lull the run has anyway (the macro has
+   * nothing in Monster Range, no loot and no buff due, so it would walk its route or idle; a rules-only routine has no
+   * rule firing), never mid-fight or mid-leg; nothing is said in chat or the window (the History has it). True: the
+   * yield began, and this step was its first.
+   */
+  private switchLull(p: RoutineProfile): boolean {
+    if (this.switchHold || !this.api.serverSwitchPending()) return false;
+    const me = this.api.self();
+    if (!me || me.dead) return false;
+    this.switchHold = { since: this.now(), phase: 'holding' };
+    this.note('server switch: yielding for it in this lull (no new pull or buff until it is done)');
+    this.api.serverSwitchYield(true);
+    this.serverSwitchStep(p, me);
+    return true;
+  }
+
+  /**
+   * One step of a server switch's yield (begun in a lull: switchLull), while the move is wanted (AgentApi.serverSwitchPending:
+   * at most HANDOVER_YIELD_MAX_MS after the notice). In order: a rule healing a vital still runs; whatever comes at you is
+   * fought off (safety first, and only that); a combat stance drops to peace, as Peace Mode When Idle does in a lull, and
+   * the next fight's attack takes the stance back up; the run's kills are looted and salvaged; the route is walked on
+   * where no monster is within Monster or Approach range (the move needs no standing still, only calm) and the point is a
+   * plain one; otherwise it stands, as it would between legs. Nothing in range that isn't on you is pulled, and no buff is
+   * cast (a cast is a combat stance). When the move is done (or no longer wanted) it carries on at its next step: the same
+   * state, the same route point, Seconds in State counted from then as after a pause. True: this step was the yield's.
+   */
+  private serverSwitchStep(p: RoutineProfile, me: AgentSelf | null): boolean {
+    const hold = this.switchHold;
+    if (!hold) return false;
+    if (!this.api.serverSwitchPending()) { this.endSwitchHold(hold); return false; }
+    // Dead: the death rules and StopMacroOnDeath above; the move waits for you to be back anyway.
+    if (!me || me.dead) return true;
+    const st = this.settings;
+    const range = Math.max(0, Number(st.AttackDistance) || 0);
+    const approach = Math.max(0, Number(st.ApproachDistance) || 0);
+    const reach = this.corpseReach();
+    const obs = this.api.look({ radius: Math.max(range, approach, reach, 60), max: 40 });
+    const live = obs.nearby.filter((o) => o.kind === 'monster' && !o.dying);
+    const vt = p.vtank && p.macro ? this.vtReady() : null;
+    // Safety first: a rule healing a vital under its mark still runs (VirindiTank's planners do their own recharge below).
+    if (!p.vtank && truthySetting(st.EnableMeta)) {
+      const at = this.dryRun().findIndex((v) => v.fires);
+      const rule = at >= 0 ? p.states.find((x) => x.name === this.state)?.rules[at] : undefined;
+      if (rule && ruleModules(rule).includes('vitals')) {
+        this.acting = rule.label ?? `rule ${at + 1}`;
+        this.busy = true;
+        void this.run(rule.do, p, `${this.state}#${at}`).catch((e) => this.failed('rule', e)).finally(() => { this.busy = false; this.acting = null; });
+        return true;
+      }
+    }
+    // On you: attacking you, coming at you (and able to reach you), casting at you.
+    const threats = live.filter((o) => !!o.attackingYou || (!!o.comingAtYou && !o.comingAtYouStuck) || !!o.castingAtYou);
+    const combat = truthySetting(st.EnableCombat) && p.modules.combat;
+    if (threats.length && combat) {
+      hold.phase = 'defending';
+      this.switchTargets = new Set(threats.map((o) => o.guid));
+      const said = `server switch: ${threats.map((o) => o.name).join(', ')} on you: fighting it off first`;
+      if (!this.log.at(-1)?.endsWith(said)) this.note(said);
+      if (vt) {
+        const step = vt.decide(p as RoutineProfile & { vtank: NonNullable<RoutineProfile['vtank']> }, st, { combat: true, buffing: false, idle: false });
+        if (step) {
+          this.acting = step.label;
+          this.busy = true;
+          void this.runMacroStep(step).finally(() => { this.busy = false; this.acting = null; });
+          return true;
+        }
+      } else if (threats.some((o) => o.dist <= range)) {
+        this.acting = 'macro';
+        this.busy = true;
+        void this.run([{ kind: 'attack-nearest', meters: range }], p).catch((e) => this.failed('rule', e)).finally(() => { this.busy = false; this.acting = null; });
+        return true;
+      }
+      // Hitting you from beyond Monster Range (a caster, an archer): to within range of it, as the macro's approach.
+      const far = threats.filter((o) => o.dist > range && (!!o.attackingYou || !!o.castingAtYou)).sort((a, b) => a.dist - b.dist)[0];
+      if (far && range > 0) {
+        this.acting = `approach ${far.name}`;
+        this.busy = true;
+        void this.api.walkTo(far.guid, { within: Math.max(1, range - 0.5), timeoutMs: 30_000 }).finally(() => { this.busy = false; this.acting = null; });
+      }
+      return true;
+    }
+    this.switchTargets = null;
+    // Nothing on you: peace (a combat stance holds the move back), as Peace Mode When Idle does in a lull.
+    const mode = me.combatMode;
+    if (mode !== 'peace' && mode !== 'unknown') {
+      hold.phase = 'peace';
+      this.acting = 'peace mode';
+      this.busy = true;
+      void this.act({ kind: 'combat-mode', mode: 'peace' }, p).catch((e) => this.failed('rule', e)).finally(() => { this.busy = false; this.acting = null; });
+      return true;
+    }
+    // The run's own kills (a fight off during the yield leaves corpses): looted and salvaged as ever.
+    const looting = truthySetting(st.EnableLooting) && p.modules.looting;
+    if (looting) this.loot.book.observe(obs.nearby.filter((o) => o.kind === 'corpse').map((o) => o.guid), this.now(), this.loot.settings(st));
+    const lootDue = looting && (truthySetting(st.LootOnlyRareCorpses) ? this.rarePending : this.killsToLoot().length > 0 || this.othersDue(obs.nearby, reach));
+    if (this.lootUpkeep(p)) { hold.phase = 'looting'; return true; }
+    if (lootDue) {
+      hold.phase = 'looting';
+      this.acting = 'macro';
+      this.busy = true;
+      void this.run([{ kind: 'loot-nearby', meters: reach }], p).catch((e) => this.failed('loot', e)).finally(() => { this.rarePending = false; this.busy = false; this.acting = null; });
+      return true;
+    }
+    // The route, where nothing is near enough to pull or be pulled by: a plain point's leg, or the Follow.
+    const navOn = p.macro && truthySetting(st.EnableNav) && p.modules.navigation && !!this.nav && !this.nav.done && this.now() >= this.navHeldUntil;
+    const clear = !live.some((o) => o.dist <= Math.max(range, approach));
+    if (navOn && clear) {
+      const n = this.nav!;
+      const plain = n.route.mode === 'follow' || (walksTo(n.route, n.i) && !stopsAt(n.route, n.i).length);
+      if (plain) {
+        hold.phase = 'walking';
+        void this.walkNav();
+        return true;
+      }
+    }
+    if (hold.phase !== 'holding') this.note('server switch: at peace, standing until it is done');
+    hold.phase = 'holding';
+    return true;
+  }
+
+  /** The server switch is over (moved, or no longer waited for): carry on where the run was. */
+  private endSwitchHold(h: { since: number }): void {
+    this.switchHold = null;
+    this.switchTargets = null;
+    const t = this.now();
+    // Seconds in State, the watchdog and the nav-idle watch count from here, as after a pause.
+    this.resumedAt = t;
+    this.navStill = null;
+    if (this.watchdog) this.watchdog.samples = [];
+    const s = Math.round((t - h.since) / 1000);
+    const where = this.nav && !this.nav.done ? `, route "${this.nav.route.name}" point ${this.nav.i + 1}` : '';
+    this.note(`server switch: over after ${s} s; carrying on in "${this.state}"${where}`);
+    this.api.serverSwitchYield(false);
   }
 
   /**
@@ -1485,11 +1727,12 @@ export class RoutineEngine {
    * A route as the macro starts it (VirindiTank, at Run Macro and at a route load): circular and linear
    * routes start at the point nearest you that you could be at; a once route at its head.
    */
-  private loadNav(route: Route): { route: Route; i: number; dir: 1 | -1; done: boolean } {
+  private loadNav(route: Route): { route: Route; i: number; dir: 1 | -1; done: boolean; empty: boolean } {
     const me = this.api.self();
     const i = me && route.points.length ? nearestStart(route, me.pos) : 0;
     if (i) this.note(`route "${route.name}" starts at point ${i + 1}, the nearest`);
-    return { route, i, dir: 1, done: route.mode !== 'follow' && route.points.length === 0 };
+    const empty = route.mode !== 'follow' && route.points.length === 0;
+    return { route, i, dir: 1, done: empty, empty };
   }
 
   /** What the route steps need from the engine (routeNodes.ts). */
@@ -1534,9 +1777,12 @@ export class RoutineEngine {
       }
       // VTank's height (map units: metres / 240) says which storey of a dungeon the point is on.
       const hz = route.z?.length === route.points.length ? route.z[i] : null;
+      const from = this.api.self()?.pos ?? null;
       const r = await this.api.walkTo(pt, { within, timeoutMs: 90_000, ...(typeof hz === 'number' ? { z: hz * 240 } : {}) });
       const said = r.message.split('\n')[0];
       this.note(`route "${route.name}" point ${i + 1}: ${said}`);
+      const to = this.api.self()?.pos ?? null;
+      this.noteNavWalk(route, i, r.ok || !from || !to || Math.hypot(to.x - from.x, to.y - from.y) > NAV_IDLE_M, said);
       // As before: a walk that didn't get there moves on without the point's steps.
       if (!r.ok || !stopsAt(route, i).length) return { advance: true, ok: r.ok, message: said };
     }
@@ -1725,6 +1971,91 @@ export class RoutineEngine {
       this.note(`Follow: ${out.who} is ${out.dist !== null ? `${out.dist.toFixed(0)} m off` : 'out of sight in another room'}, past the ${out.limit.toFixed(0)} m leash (Follow distance ${(out.limit - slack).toFixed(0)} m + FollowLeash ${slack} m): following before buffing or fighting (unless something is hitting you)`);
     } else if (!out) this.leashSaid = false;
     return out;
+  }
+
+  /**
+   * Why navigation, switched on, doesn't walk the route now (BUG.vtank-nav-stands-still); null: nothing stops it. VirindiTank
+   * shows its navigation state; ours said nothing and the character stood ("once I hit enable navigation the toon just
+   * stands there", Reddit 2026-11-07).
+   */
+  private navBlocked(p: RoutineProfile): { reason: NavIdleReason; short: string; text: string } | null {
+    if (!p.modules.navigation) return { reason: 'module_off', short: 'Nav: module off', text: 'Navigation is on, but the Navigation module is switched off for this run (the Automation panel\'s Navigation switch)' };
+    const n = this.nav;
+    if (!n) return { reason: 'no_route', short: 'Nav: no route loaded', text: 'Navigation is on, but no route is loaded: Add waypoints on the Route tab where you stand, or pick a route under Auto-Navigation (Profiles tab)' };
+    const name = n.route.name;
+    if (n.route.mode !== 'follow' && n.route.points.length === 0) return { reason: 'empty_route', short: `Nav: "${name}" has no points`, text: `Navigation is on, but route "${name}" has no waypoints: Add them on the Route tab where you stand` };
+    if (n.done) return { reason: 'route_done', short: `Nav: "${name}" finished`, text: `Route "${name}" is finished: a Once route stops at its last point (set it to Circular or Linear on the Route tab to keep walking it)` };
+    if (this.now() < this.navHeldUntil) return { reason: 'held', short: 'Nav: held by UtilityBelt', text: 'Navigation is held while UtilityBelt uses a vendor, portal or NPC' };
+    if (this.farHeld) return { reason: 'far', short: 'Nav: next point too far', text: `Navigation is holding: point ${n.i + 1} of "${name}" is farther than NavFarStopRange (walk nearer it, or raise NavFarStopRange in Advanced Options)` };
+    if (this.navFails >= Math.min(NAV_FAILS_NO_PATH, Math.max(1, n.route.points.length))) {
+      return { reason: 'no_path', short: `Nav: can't reach point ${n.i + 1}`, text: `Navigation can't reach the points of "${name}": ${this.navFailMsg}` };
+    }
+    return null;
+  }
+
+  /** A walk to a route point ended: `got` there (or moved on its way), or stood (counted toward no_path, said once). */
+  private noteNavWalk(route: Route, i: number, got: boolean, said: string): void {
+    if (got) { this.navFails = 0; this.navFailSaid = false; return; }
+    this.navFails++;
+    this.navFailMsg = `point ${i + 1}: ${said}`;
+    if (!this.navFailSaid && this.navFails >= Math.min(NAV_FAILS_NO_PATH, Math.max(1, route.points.length))) {
+      this.navFailSaid = true;
+      this.report(`Navigation: no walk reaches the points of "${route.name}" (${this.navFailMsg})`, 'Warnings');
+    }
+  }
+
+  /** Combat on, a monster within Monster Range, and the planners fighting nothing: since when, and whether it was said this run. */
+  private combatIdle: { since: number; said: boolean } = { since: -1, said: false };
+
+  /**
+   * The same silent stand in combat (the BUG.vtank-nav-stands-still sweep): Combat on and `name` within Monster Range, yet
+   * no attack planned for NAV_IDLE_MS (no weapon, castable attack spell or ammunition the macro can use, or the Monsters
+   * tab's row attacks nothing). Said once a run; a step planned again resets it.
+   */
+  private watchCombatIdle(idle: boolean, name: string | null): void {
+    if (!idle) { this.combatIdle.since = -1; return; }
+    const t = this.now();
+    if (this.combatIdle.since < 0) { this.combatIdle.since = t; return; }
+    if (this.combatIdle.said || t - this.combatIdle.since < NAV_IDLE_MS) return;
+    this.combatIdle.said = true;
+    this.report(`Combat: ${name ?? 'a monster'} is within Monster Range, but the macro has nothing it can attack with (no weapon, attack spell or ammunition it can use), or its Monsters tab row has no attack column (A, R or S) on`, 'Warnings');
+  }
+
+  private navWatchAt = -Infinity;
+  private navLastActing: string | null = null;
+
+  /**
+   * Navigation on, the run going, and the character no more than NAV_IDLE_M from one spot for NAV_IDLE_MS: say why once
+   * per reason a run (a chat line when it is something to change; the nav_idle report always). Fighting, looting and
+   * buffing in one place are the macro at work: reported, not said.
+   */
+  private watchNavIdle(p: RoutineProfile): void {
+    // What the macro is doing, every tick (a step's label lasts only while it runs).
+    if (this.acting) this.navLastActing = this.acting;
+    const t = this.now();
+    if (t - this.navWatchAt < STEP_MS) return;
+    this.navWatchAt = t;
+    const me = this.api.self();
+    if (this.paused || this.hand || !p.macro || !truthySetting(this.settings.EnableNav) || !me || me.dead) { this.navStill = null; return; }
+    const s = this.navStill;
+    if (!s || Math.hypot(me.pos.x - s.x, me.pos.y - s.y) > NAV_IDLE_M) { this.navStill = { x: me.pos.x, y: me.pos.y, since: t }; this.navLastActing = this.acting; return; }
+    if (t - s.since < NAV_IDLE_MS) return;
+    const why = this.navWhy ?? this.navBusyReason();
+    if (this.navIdleSaid.has(why.reason)) return;
+    this.navIdleSaid.add(why.reason);
+    if (why.reason !== 'fighting' && why.reason !== 'looting' && why.reason !== 'buffing') this.report(why.text, 'Warnings');
+    this.note(`standing ${Math.round((t - s.since) / 1000)} s with navigation on: ${why.text}`);
+    this.lifecycle({ type: 'nav_idle', reason: why.reason, indoors: me.indoors, points: this.nav?.route.points.length ?? 0 });
+  }
+
+  /** Nothing stops the route, yet the character stands: what the macro has been doing instead (its last action's label). */
+  private navBusyReason(): { reason: NavIdleReason; short: string; text: string } {
+    const a = this.navLastActing ?? '';
+    if (/^(combat|approach)\b|attack/i.test(a)) return { reason: 'fighting', short: 'Nav: fighting', text: `fighting before walking on (${a})` };
+    if (/loot|corpse|salvage/i.test(a)) return { reason: 'looting', short: 'Nav: looting', text: `looting before walking on (${a})` };
+    if (/^(buff|force buff|helper|recharge|dispel|pet|mana|buff item)\b/i.test(a)) return { reason: 'buffing', short: 'Nav: buffing', text: `buffing before walking on (${a})` };
+    const n = this.nav;
+    return { reason: 'other', short: 'Nav: not moving', text: `Navigation is on but the character hasn't moved for ${NAV_IDLE_MS / 1000} s${n ? ` (route "${n.route.name}", next point ${n.i + 1}${a ? `; last: ${a}` : ''})` : ''}` };
   }
 
   /** One point of the loaded route; circular loops, linear turns back, once ends (route-done). */
@@ -2082,7 +2413,7 @@ export class RoutineEngine {
         // SkipUnreachableMonsters, as the macro: hand to hand, not one only the long way round, a storey off or away from your
         // fellow reaches (AgentApi.meleeChaseBar; the stream's 2026-10-18 03:16Z chases up Mountain Keep's floors).
         const skipFar = beyondSetting(this.settings, 'SkipUnreachableMonsters');
-        const m = obs.nearby.find((o) => o.kind === 'monster' && !o.dying && !ignored(o) && this.holdOk(o) && (!a.names?.length || a.names.some((n) => o.name.toLowerCase().includes(n.toLowerCase()))) && !(skipFar && this.api.meleeChaseBar(o.guid)));
+        const m = obs.nearby.find((o) => o.kind === 'monster' && !o.dying && !ignored(o) && this.holdOk(o) && this.switchOk(o) && (!a.names?.length || a.names.some((n) => o.name.toLowerCase().includes(n.toLowerCase()))) && !(skipFar && this.api.meleeChaseBar(o.guid)));
         // Nothing to fight is nothing to do: the rule rests, so the rules below it (a "clear" / move-on rule) get their turn
         // (2026-10-13: a monster-within rule saw a creature the held position put out of reach, and fired twice a second).
         if (!m) return { ok: false, message: this.hold ? `no monster in reach within ${this.hold.meters} m of the held position` : 'no monster in reach', idle: true };
