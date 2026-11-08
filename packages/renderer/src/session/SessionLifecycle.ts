@@ -79,21 +79,35 @@ export const RESUME_UNREACHABLE_GRACE_MS = 120_000;
  * one, that pattern risks the address being banned). Drops that come from the
  * session itself being refused come within seconds of the login (that 30 ms;
  * ACE's account-in-use boot 2 s after the refusal; the servers' own logout
- * clocks of 5-8 s), and a resume takes 2-15 s end to end (prod 2026-10-17:
- * 11 s and 15 s), so a minute up is a session that works: a drop after that
- * is a new blip and resumes from the start, every time.
+ * clocks of 5-8 s), all well under 20 s after the resume came back.
+ *
+ * 20 s, not the first cut's 60 s (2026-11-08, BUG.resume-chain-window-blip):
+ * in its first 10 days on prod the guard fired once, and that once was a
+ * false positive. An end-of-retail player on a flaky home connection dropped
+ * at 16:27:55, the resume spent all three attempts (one failed with
+ * ID_NetError_CantSocket) and was back in the world at 16:28:16, and the
+ * connection dropped again 53 s later, an ordinary blip: the Disconnected
+ * screen (resume_ended loop_chain_spent) and a manual login. 20 s keeps over
+ * twice the 8 s worst case of a refused session, and a drop past it is a new
+ * blip that resumes from the start. A server that drops each session just
+ * past 20 s is stopped by RESUME_PAGE_CAP.
  */
-export const RESUME_HEALTHY_MS = 60_000;
+export const RESUME_HEALTHY_MS = 20_000;
 /**
  * BUG.resume-loop-unbounded — the backstop: at most this many automatic resume
  * attempts in any RESUME_PAGE_CAP_WINDOW_MS on the page, whatever each
- * session's uptime between them (a server that drops every 61 s would
- * otherwise get a fresh budget each time). Two full budgets: a player with a
- * couple of real blips in ten minutes still resumes from each. Attempts given
+ * session's uptime between them (a server that drops every 21 s would
+ * otherwise get a fresh budget each time). Three full budgets (two until
+ * 2026-11-08): prod trace 7fcff3ce1adfaaac, an end-of-retail player on a
+ * flaky home connection, dropped four times in ~8 min (one resume took all
+ * three attempts) and had used exactly 6 attempts by 16:35:39, so a 4th blip
+ * before 16:37:57 would have ended on the Disconnected screen. A server that
+ * drops each session just past RESUME_HEALTHY_MS still stops after 9
+ * attempts, about three minutes. Attempts given
  * back while the network is out (RESUME_UNREACHABLE_GRACE_MS) do not count.
  * Reached, the Disconnected screen shows, as when a budget is spent.
  */
-export const RESUME_PAGE_CAP = RESUME_DELAYS_MS.length * 2;
+export const RESUME_PAGE_CAP = RESUME_DELAYS_MS.length * 3;
 export const RESUME_PAGE_CAP_WINDOW_MS = 10 * 60_000;
 
 /** Why the resume a drop asked for was refused before its budget's own end (BUG.resume-loop-unbounded), for logs and telemetry. */

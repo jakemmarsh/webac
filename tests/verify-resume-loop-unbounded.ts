@@ -248,6 +248,112 @@ describe('BUG.resume-loop-unbounded — the inverse: real blips still resume, de
   });
 });
 
+/**
+ * BUG.resume-chain-window-blip (prod 2026-11-08, trace 7fcff3ce1adfaaac, end of
+ * retail): a flaky home connection dropped, the resume spent all three attempts
+ * (one ID_NetError_CantSocket) and came back at 16:28:16, and the next drop 53 s
+ * later got the Disconnected screen (resume_ended loop_chain_spent) under the
+ * first cut's 60 s window: the guard's only prod firing in 10 days, a false
+ * positive. The window is 20 s now: past the 8 s worst case of a refused session.
+ */
+describe('BUG.resume-chain-window-blip — the chain window catches refusal loops, not later blips', () => {
+  /** A world page whose resume spent the whole budget (two failed attempts, the third came back). */
+  function restoredAfterFullBudget(): Page {
+    const p = inWorld();
+    expect(p.drop()).toBe('resuming');
+    // Attempts 1 and 2 fail (the 16:27:59 CantSocket counted, as a fast-refused open does).
+    expect(p.scheduleResume()).toBe(true);
+    expect(p.scheduleResume()).toBe(true);
+    expect(p.attempts).toEqual([...RESUME_DELAYS_MS]);
+    p.characterList();
+    p.playerCreate();
+    expect(p.lc.resumingAfterDrop).toBe(false);
+    return p;
+  }
+
+  it('the window is 20 s', () => {
+    expect(RESUME_HEALTHY_MS).toBe(20_000);
+  });
+
+  it('the prod case: a drop 53 s after a full-budget resume came back gets a fresh resume (2 s)', () => {
+    const p = restoredAfterFullBudget();
+    p.now += 53_000;
+    expect(p.drop()).toBe('resuming');
+    expect(p.attempts).toEqual([...RESUME_DELAYS_MS, RESUME_DELAYS_MS[0]]);
+    expect(p.lc.resumeBound).toBeNull();
+  });
+
+  it('a drop ~5 s after a full-budget resume (a server logout clock) still ends with the chain bound', () => {
+    const p = restoredAfterFullBudget();
+    p.now += 5_000;
+    expect(p.drop()).toBe('disconnected');
+    expect(p.lc.resumeBound).toBe('chain');
+    expect(p.attempts).toEqual([...RESUME_DELAYS_MS]);
+  });
+
+  it('an 8 s logout clock, and the account-in-use boot ~2 s on, are inside the window', () => {
+    for (const after of [2_000, 8_000]) {
+      const p = restoredAfterFullBudget();
+      p.now += after;
+      expect(p.drop()).toBe('disconnected');
+      expect(p.lc.resumeBound).toBe('chain');
+    }
+  });
+
+  it('the boundary: 1 ms short of the window continues the budget; at the window a whole budget', () => {
+    const short = restoredAfterFullBudget();
+    short.now += RESUME_HEALTHY_MS - 1;
+    expect(short.drop()).toBe('disconnected');
+    expect(short.lc.resumeBound).toBe('chain');
+
+    const at = restoredAfterFullBudget();
+    at.now += RESUME_HEALTHY_MS;
+    expect(at.drop()).toBe('resuming');
+    expect(at.attempts.at(-1)).toBe(RESUME_DELAYS_MS[0]);
+    expect(at.lc.resumeBound).toBeNull();
+  });
+
+  it('the GDL wrong-era loop (list, then a drop 30 ms on) still stops after three attempts', () => {
+    const p = new Page();
+    p.loopUntilDisconnected();
+    expect(p.attempts).toEqual([...RESUME_DELAYS_MS]);
+    expect(p.lc.resumeBound).toBe('chain');
+  });
+
+  it('the trace replayed: drops 53 s, then ~3.6 min and ~2.6 min apart, and a 4th blip at ~16:37, all resume', () => {
+    const p = restoredAfterFullBudget();
+    // 16:29:09, 16:32:59, 16:35:37, then a 4th at ~16:37:10 (inside the 10 min from 16:27:57).
+    for (const gap of [53_000, 216_000, 147_000, 90_000]) {
+      p.now += gap;
+      expect(p.drop()).toBe('resuming');
+      expect(p.lc.resumeBound).toBeNull();
+      p.characterList();
+      p.playerCreate();
+    }
+    expect(p.attempts).toEqual([...RESUME_DELAYS_MS, 2000, 2000, 2000, 2000]);
+    expect(p.attempts.length).toBeLessThan(RESUME_PAGE_CAP);
+  });
+
+  it('the page cap is three budgets: 9 attempts in ten minutes', () => {
+    expect(RESUME_PAGE_CAP).toBe(9);
+  });
+
+  it('a server that drops each session every 21 s (just past the window) still stops at 9 attempts', () => {
+    const p = inWorld();
+    let outcome: 'resuming' | 'disconnected' = 'resuming';
+    for (let i = 0; i < 50; i++) {
+      outcome = p.drop();
+      if (outcome === 'disconnected') break;
+      p.characterList();
+      p.playerCreate();
+      p.now += 21_000;
+    }
+    expect(outcome).toBe('disconnected');
+    expect(p.attempts.length).toBe(9);
+    expect(p.lc.resumeBound).toBe('page_cap');
+  });
+});
+
 describe('BUG.resume-loop-unbounded — the page-wide cap', () => {
   it('a server that drops each session just past the healthy window stops after RESUME_PAGE_CAP attempts in ten minutes', () => {
     const p = inWorld();

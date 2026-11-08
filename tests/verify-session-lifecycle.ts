@@ -213,7 +213,7 @@ describe('resume after an unexpected drop in the world (bridge restart, network 
     s.noteWorldEntered(t0 + 10_000);
     expect(s.resumingAfterDrop).toBe(false);
     s.noteDisconnected();
-    // BUG.resume-loop-unbounded — a drop a minute later is a new blip: a whole budget.
+    // BUG.resume-loop-unbounded — a drop past the window is a new blip: a whole budget.
     expect(s.nextResumeDelay({ now: t0 + 10_000 + RESUME_HEALTHY_MS })).toBe(RESUME_DELAYS_MS[0]);
 
     const out = inWorldAs(0x50000002);
