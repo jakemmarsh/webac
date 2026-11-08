@@ -42,16 +42,20 @@ describe.skipIf(!existsSync(DAT_PATHS.cell) || !existsSync(DAT_PATHS.portal))('H
   let nav: DungeonNav;
   beforeAll(async () => {
     const { dungeonNav } = await import('./_harness/dungeonNav.js');
-    nav = await dungeonNav(LB, { statics: true });
+    nav = await dungeonNav(LB, { statics: true, surface: true, runRate: 2, bodySpeed: 8 }); // a town building: the live client walks it outdoors; a real run, 8 m/s
   }, 120_000);
   afterEach(() => vi.useRealTimers());
 
+  // Harness = the live client here (BUG.planner-live-jump-gap, both starts walked live 2026-11-08 on 88f1ea2ad and
+  // arrived): the building is walked in the OUTDOOR movement (dungeonNav surface), the body at 60 Hz at the run's speed
+  // with one sliding normal, the NPCs' disks at their live size (Setup block radius 0.48), the planner flying jumps
+  // with the live flight body (navFlight).
   for (const start of [{ x: 182.8, y: 87.9, z: 116 }, { x: 183.3, y: 87.2, z: 116.815 }]) {
     it(`walks out of 0x0102 from (${start.x}, ${start.y}) past the scrivener, never Using the door upstairs`, async () => {
       vi.useFakeTimers();
       const { DungeonHost } = await import('./_harness/dungeonWalk.js');
       const host = new DungeonHost(nav, { portal: openDat(DAT_PATHS.portal), cell: openDat(DAT_PATHS.cell) }, LB, { fixtures: FIXTURES, creatures: true });
-      host.objectReach = (g) => (host.object(g)?.itemType ?? 0) & 0x10 ? 0.4 : 0;
+      host.objectReach = (g) => (host.object(g)?.itemType ?? 0) & 0x10 ? 0.48 : 0;
       try {
         // The front vestibule (0x0105), inside the front door #7a9b3004: the way out toward Renald.
         const r = await host.walk(0xa9b30102, start, { cell: 0xa9b30105, x: 180.2, y: 78.6, z: 116, name: 'Front hall', itemType: 0 }, { within: 1, maxMs: 120_000 });

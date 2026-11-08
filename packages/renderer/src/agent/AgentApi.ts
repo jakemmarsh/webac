@@ -25,7 +25,7 @@ import { BODY_BITS, casterGap, equipSwapText, gearEmptyFacts, shieldRefusal } fr
 import { routineSuppliesMissing, supplyOf } from './macro/routineSupplies.ts';
 import { itemsText, lossText, parseDeathBroadcast, parseDeathLoss, parseFellowDied, parseVictimDeathLine, type DeathLoss } from './deathLines.ts';
 import { APPRAISAL_SKILL_NAMES, ATTRIBUTE_NAMES, VITAL_NAMES } from '../ui/examine/appraisalFormat.js';
-import { dropDamage, fallBudget, fallModelFor, GRAVITY, isDrop, reaimJump, safeDropHeight, type JumpKit, type JumpSpec } from './jumpPlan.js';
+import { dropDamage, fallBudget, fallModelFor, GRAVITY, isDrop, reaimJump, safeDropHeight, type FlightBody, type JumpKit, type JumpSpec } from './jumpPlan.js';
 import type { RouteCutOff, RouteGap } from './cellPath.js';
 import { CELL_LENGTH, mapCoordinateText, mapCoordsOfCell } from '../ui/MapMarkers.js';
 import { IN_TOWN_UNITS, nearestTownOf, townInName } from './towns.js';
@@ -260,6 +260,11 @@ export interface AgentHost {
    * forward speed (run, or walk with Shift) and upward speed, m/s, and the seconds a full charge takes.
    */
   jumpLaunch?(power: number, walk: boolean): { forward: number; up: number; chargeSeconds: number };
+  /**
+   * BUG.planner-live-jump-gap — a body for one planned flight in the live frame's own physics (jumpPlan.FlightBody:
+   * the collided airborne step and the landing's coast through one set of collision services, and the frame's ground).
+   */
+  navFlight?(): FlightBody;
   /**
    * Which server family bills fall damage (jumpPlan.FallModel): 'ace' (ACE, ClassicACE) or 'gdle'
    * (GDLE, GDL-Classic, the AC1999 server). ACE's when absent.
@@ -6974,7 +6979,8 @@ export class AgentApi {
     // GDLE's ratio divides by the player's own full-power jump (InqJumpVelocity(1.0)): its Jump skill and load now.
     const fall = fallModelFor(h.fallServer?.() ?? 'ace', full.up);
     const ceiling = h.navCeiling?.bind(h);
-    return { floor, airStep, ...(ceiling ? { ceiling } : {}), launch: (p, w) => launch(p, w), chargeSeconds: full.chargeSeconds, fall };
+    const flight = h.navFlight?.bind(h);
+    return { floor, airStep, ...(ceiling ? { ceiling } : {}), ...(flight ? { flight } : {}), launch: (p, w) => launch(p, w), chargeSeconds: full.chargeSeconds, fall };
   }
 
   /** Jumps and drops the planner may take, with the fall damage your health allows now. */
@@ -11270,6 +11276,8 @@ export class AgentApi {
     // The fine re-search of a tight nook (FINE_SEARCH_*), and the spots it was laid from (once each).
     let fineSearch: PathSearch | null = null;
     const fineFrom = new Set<string>();
+    const fineOffsetFrom = new Set<string>();
+    const fineSlideFrom = new Set<string>();
     // Nor through an NPC's body: a flight meets it as a wall. The Holtburg scriveners' upstairs walk planned a 0.6 m hop
     // through the Apprentice Scrivener of Creature Magic from the nook beside him, landed back on its take-off, and went
     // round that loop until it gave up, three walks running (Arcanist, 2026-10-18 10:05:40–10:07:25Z). The bodies' own
@@ -12520,7 +12528,8 @@ export class AgentApi {
           this.host.setYaw(compassToYaw(bearing(me.g, { x: me.g.x + spec.dir.x, y: me.g.y + spec.dir.y })));
           leap(spec);
           this.trace(`walk ${isDrop(spec) ? `drop ${(here.z - spec.to.z).toFixed(1)} m` : 'jump'} from (${here.x.toFixed(1)}, ${here.y.toFixed(1)}, z ${here.z.toFixed(1)}) facing ${Math.round(normDeg(bearing(me.g, { x: me.g.x + spec.dir.x, y: me.g.y + spec.dir.y })))}°, ${spec.walk ? 'walking' : 'running'}, jump key held ${Math.max(120, spec.holdMs)} ms (power ${spec.power.toFixed(2)}); landing (${spec.to.x.toFixed(1)}, ${spec.to.y.toFixed(1)}, z ${spec.to.z.toFixed(1)}) in ${spec.flight.toFixed(1)} s${spec.damage > 0 ? `, about ${Math.round(spec.damage)} fall damage` : ''}`);
-          jumping = { spec, phase: 'air', until: now + Math.max(120, spec.holdMs) + spec.flight * 1000 + 700 };
+          // Judged once the landing's coast has stopped the body (BUG.planner-live-jump-gap: `to` is where it comes to rest).
+          jumping = { spec, phase: 'air', until: now + Math.max(120, spec.holdMs) + Math.max(spec.flight * 1000 + 700, (spec.settle ?? 0) * 1000 + 300) };
           return null;
         }
         if (now < j.until) return null;
@@ -12745,6 +12754,49 @@ export class AgentApi {
             this.trace(`walk: the search found no way within ${r.expanded} point(s) of here; laying it again finer (${AgentApi.FINE_SEARCH_SPACING_M} m)`);
             fineSearch = search = new PathSearch(probe, here, aimNow, { within: legWithin(aimNow as { drop?: number }), spacing: AgentApi.FINE_SEARCH_SPACING_M, tolerance: 0.1, margin: 8, maxNodes: 6000 });
             return null;
+          }
+        }
+        // The fine grid found none either: lay it once more half a point aside (its rows and columns between the first
+        // one's). A gap the body fits through by a few centimetres is threaded by one grid's rows and missed by the
+        // other's: the scriveners' back corner opens west only along y 88.3 (the plinth's corner at y 87.7, the wall
+        // behind at 88.8); a grid from (182.8, 87.9) has rows at 88.2 and 88.5 and found the corner closed in, the live
+        // walk's from (181.9, 88.0) a row at 88.3 and got out (Bulwark's planner check, 2026-11-08 05:55Z).
+        if (r.status === 'none' && sr === fineSearch && probe && r.expanded <= AgentApi.FINE_SEARCH_OFFSET_MAX_EXPANDED) {
+          const fk = `${here.x.toFixed(1)},${here.y.toFixed(1)},${here.z.toFixed(0)}`;
+          if (!fineOffsetFrom.has(fk)) {
+            fineOffsetFrom.add(fk);
+            const h = AgentApi.FINE_SEARCH_SPACING_M / 2;
+            const aside = [[0, h], [h, 0], [0, -h], [-h, 0], [h, h], [-h, h], [h, -h], [-h, -h]]
+              .map(([dx, dy]) => ({ x: here.x + dx, y: here.y + dy }))
+              .map((t) => ({ t, got: probe(here, t) }))
+              .find(({ t, got }) => !!got && Math.hypot(got.x - t.x, got.y - t.y) < 0.05);
+            if (aside?.got) {
+              const aimNow = legAim() ?? gl;
+              this.trace(`walk: the fine search found no way either; laying it again from (${aside.got.x.toFixed(1)}, ${aside.got.y.toFixed(1)}), half a point aside`);
+              fineSearch = search = new PathSearch(probe, aside.got, aimNow, { within: legWithin(aimNow as { drop?: number }), spacing: AgentApi.FINE_SEARCH_SPACING_M, tolerance: 0.1, margin: 8, maxNodes: 6000 });
+              return null;
+            }
+          }
+          // Still none: the body may slide out where no grid point is reached. Pressed into a corner the body's moves
+          // turn along the walls, so a short probe to a grid point 0.3 m off misses it by more than the tolerance, while
+          // a metre's run that way slides clear (the Holtburg scriveners' nook under the stairs, beside the Apprentice
+          // Scrivener of Creature Magic: every 0.3 m point missed by 0.2–0.4 m, a run SE gets 1.3 m out; live
+          // 2026-11-08 07:26Z, "closed in (about 3 m²)" three walks running). Lay the search again from where such a
+          // run ends, the one heading nearest the way on first.
+          if (!fineSlideFrom.has(fk)) {
+            fineSlideFrom.add(fk);
+            const aimNow = legAim() ?? gl;
+            const toAim = Math.atan2(aimNow.y - here.y, aimNow.x - here.x);
+            const outs = Array.from({ length: 8 }, (_, k) => (k * Math.PI) / 4)
+              .map((a) => ({ a, got: probe(here, { x: here.x + Math.cos(a) * AgentApi.SLIDE_OUT_M, y: here.y + Math.sin(a) * AgentApi.SLIDE_OUT_M }) }))
+              .filter((o): o is { a: number; got: NavPoint } => !!o.got && Math.hypot(o.got.x - here.x, o.got.y - here.y) >= AgentApi.SLIDE_OUT_M / 2 && Math.abs(o.got.z - here.z) < 1)
+              .sort((p, q) => Math.abs(Math.atan2(Math.sin(p.a - toAim), Math.cos(p.a - toAim))) - Math.abs(Math.atan2(Math.sin(q.a - toAim), Math.cos(q.a - toAim))));
+            if (outs.length) {
+              const out = outs[0].got;
+              this.trace(`walk: the fine search found no way either; laying it again from (${out.x.toFixed(1)}, ${out.y.toFixed(1)}), where a run ${compassPoint((90 - (outs[0].a * 180) / Math.PI + 360) % 360)} slides out`);
+              fineSearch = search = new PathSearch(probe, out, aimNow, { within: legWithin(aimNow as { drop?: number }), spacing: AgentApi.FINE_SEARCH_SPACING_M, tolerance: 0.1, margin: 8, maxNodes: 6000 });
+              return null;
+            }
           }
         }
         // Following, no doorway route to the leader and a rift between that the search that may jump found no way over:
@@ -13409,6 +13461,10 @@ export class AgentApi {
   /** A search that ends "none" within this many points is laid again from the same spot at FINE_SEARCH_SPACING_M. */
   static readonly FINE_SEARCH_MAX_EXPANDED = 12;
   static readonly FINE_SEARCH_SPACING_M = 0.3;
+  /** The fine search found no way within this many points: laid once more half a point aside. */
+  static readonly FINE_SEARCH_OFFSET_MAX_EXPANDED = 200;
+  /** How far the walk probes each way for a run that slides out of a corner no fine grid point leaves (m). */
+  static readonly SLIDE_OUT_M = 1.2;
   /**
    * The GDLE family's (the AC1999 server, GDL-Classic, GDLE end-of-retail worlds): MonsterAI.cpp DEFAULT_AWARENESS_RANGE
    * 40 m, indoors too (GetVisualRange clamps only a larger one to DEFAULT_INDOOR_AWARENESS_RANGE 25).

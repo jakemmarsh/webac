@@ -201,7 +201,7 @@ import {
   applySurfaceCellVisibility, objectCellDrawn, type SurfaceView} from './world/buildingCells.js';
 import { DungeonRenderer } from './world/DungeonRenderer.js';
 import { placementFrameOf, PLACEMENT_RESTING } from './models/SetupModelGroup.js';
-import { DungeonCollision } from './world/DungeonCollision.js';
+import { DungeonCollision, type CollisionMoveState } from './world/DungeonCollision.js';
 import { populateDungeonCollision, type DungeonCollisionSources } from './world/DungeonCollisionBuild.js';
 import { arrivalMode, confirmSurfaceArrival } from './world/arrivalMode.js';
 import { runRetryingOnArrival } from './dat/streaming/RetryOnArrival.js';
@@ -3903,6 +3903,53 @@ async function main() {
   // floor raycasts start from the player's current elevation — enabling
   // progressive stair climbing instead of always starting from terrain.
   let lastFloorAwareGroundY = 0;
+
+  /**
+   * The frame's ground under the body that moved from (fromX, fromZ) to (toX, toZ) this frame, searching from
+   * `floorFromY` (floorSearchFromY), `lastGroundY` the frame before's: in a dungeon its cells' walkables
+   * (interiorGroundY), outdoors the terrain and the buildings' floors traced along the move (traceGroundAlongPath),
+   * the wade below the water surface on water-textured terrain (GAP.6). Null outdoors where nothing is under it.
+   * The frame loop and the agent's jump planner (navFlight, BUG.planner-live-jump-gap) both call it.
+   */
+  const bodyGroundY = (inDungeon: boolean, fromX: number, fromZ: number, toX: number, toZ: number, floorFromY: number, lastGroundY: number): number | null => {
+    if (inDungeon && dungeonCollision?.hasCells) {
+      const dc = dungeonCollision;
+      return interiorGroundY(
+        {
+          floorHeight: (x, z, fromY, maxDrop) => dc.getBodyFloorHeight(x, z, fromY, playerStepDownHeight, maxDrop),
+          cellAt: (x, z, footY) => dc.findCellContaining(x, z, footY + dc.lowerSphereHeight, dungeonLandblockId >>> 0),
+        },
+        fromX, fromZ, toX, toZ,
+        // BUG.academy-olthoi-leg-upper-floor — with no floor found (a step
+        // ending exactly on a doorway's shared polygon edge) the body
+        // keeps the floor it stood on. dungeonFloorY is only the ARRIVAL
+        // height, so a fresh character (who arrives upstairs) popped 6 m up
+        // at the x = 195 seam of 0x86020121 | 0x86020111.
+        floorFromY, dc.transitionSphereRadius, lastGroundY,
+      );
+    }
+    if (inDungeon) return dungeonFloorY;
+    // Outdoors: use terrain heightmap, but also check BSP floor from building
+    // interior cells (stairs, elevated floors in surface buildings).
+    const terrainY = terrainCollision.getHeightAt(toX, toZ);
+    let ground = traceGroundAlongPath(
+      // In a surface env cell with no walkable under it at all, the floor it stood on (as interiorGroundY).
+      (x, z, fromY) => outdoorGroundY(playerGroundSources, x, z, fromY, { fallbackY: lastGroundY }),
+      fromX, fromZ, toX, toZ,
+      floorFromY, outdoorCollision.transitionSphereRadius,
+    );
+    // GAP.6 — wading: on water-textured terrain the resting plane sits
+    // waterDepth BELOW the water surface (ACE ObjectInfo.cs:124 adds
+    // waterDepth to the contact-plane distance; depth per
+    // ObjCell.get_water_depth: 0.45 nearest-vertex-water / 0.1 dry
+    // vertex of a partially-flooded cell). Only when standing on the
+    // terrain itself — building floors (bridges, docks) stay dry.
+    if (ground !== null && terrainY !== null && standsOnTerrain(outdoorGroundSources, toX, toZ, ground)) {
+      const wadeDepth = waterMap.waterDepthAt(toX, toZ);
+      if (wadeDepth > 0) ground = terrainY - wadeDepth;
+    }
+    return ground;
+  };
 
   // ── Jump physics state ──
   let playerWorldY = 0;        // vertical offset above terrain (0 = on ground)
@@ -18415,19 +18462,25 @@ async function main() {
           const { inDungeon, toWorld, toGlobal, services } = agentNav();
           const a = toWorld(from.x, from.y), b = toWorld(to.x, to.y);
           const dist = Math.hypot(b.x - a.x, b.z - a.z);
-          const n = Math.max(1, Math.ceil(dist / 0.15));
+          // BUG.planner-live-jump-gap — the probe moves as the run's frames move the body: one 60 Hz frame of the run per
+          // sub-step (a collision step-up depends on the step's length: 0.15 m sub-steps climbed the Holtburg scriveners'
+          // 0.82 m plinth that the body's 0.07–0.11 m frames never do), and the frame's own ground (bodyGroundY, searched
+          // from the feet plus the step's step-up), not the floor 0.6 m above them.
+          const stepLen = Math.min(0.15, Math.max(0.04, (RUN_ANIM_SPEED * cameraController.runRate) / 60));
+          const collision = (inDungeon ? dungeonCollision : outdoorCollision) ?? outdoorCollision;
+          const n = Math.max(1, Math.ceil(dist / stepLen));
           let x = a.x, z = a.z, floorY = from.z;
           for (let i = 1; i <= n; i++) {
             const tx = a.x + ((b.x - a.x) * i) / n, tz = a.z + ((b.z - a.z) * i) / n;
             const step = stepPlayerMovement(
               { x, z, floorY, inDungeon, airborne: false, jumpVelocityX: 0, jumpVelocityZ: 0, slideVelocity: null },
-              tx - x, tz - z, 1 / 30, services,
+              tx - x, tz - z, 1 / 60, services,
             );
-            const ground = inDungeon ? services.dungeonGroundAt?.(step.x, step.z, floorY + 0.6) : services.groundAt?.(step.x, step.z, floorY + 0.6);
-            if (ground === null || ground === undefined || floorY - ground > services.stepDownHeight + 0.05) break; // a drop
+            const ground = bodyGroundY(inDungeon, x, z, step.x, step.z, floorSearchFromY(null, floorY, collision.lastStepUp ?? 0), floorY);
+            if (ground === null || floorY - ground > services.stepDownHeight + 0.05) break; // a drop
             const moved = Math.hypot(step.x - x, step.z - z);
             x = step.x; z = step.z; floorY = ground;
-            if (moved < 0.01) break; // blocked
+            if (moved < stepLen * 0.07) break; // blocked (0.01 of the old 0.15 m sub-step)
           }
           const g = toGlobal(x, z);
           return { x: g.x, y: g.y, z: floorY };
@@ -18463,6 +18516,38 @@ async function main() {
             0, 0, 1, services,
           );
           return toGlobal(step.x, step.z);
+        },
+        // BUG.planner-live-jump-gap — one planned flight in the frame loop's own physics: one set of collision services
+        // (one sliding normal, as movementServices.slide across frames), the airborne step and the landing's coast
+        // (stepPlayerMovement's groundVelocity) the frame loop runs, and its ground (bodyGroundY).
+        navFlight: () => {
+          const { inDungeon, toWorld, toGlobal, services } = agentNav();
+          const collision = (inDungeon ? dungeonCollision : outdoorCollision) ?? outdoorCollision;
+          // The flight's own last-move results (DungeonCollision.withMoveState): the player's are never touched.
+          const st: CollisionMoveState = { lastStepUp: 0, collisionNormal: null, lastShellCell: 0 };
+          const own = <T>(fn: () => T): T => collision.withMoveState(st, fn);
+          return {
+            air: (from, dx, dy) => own(() => {
+              const a = toWorld(from.x, from.y);
+              const step = stepPlayerMovement({ x: a.x, z: a.z, floorY: from.z, inDungeon, airborne: true, jumpVelocityX: dx, jumpVelocityZ: dy, slideVelocity: null }, 0, 0, 1, services);
+              return toGlobal(step.x, step.z);
+            }),
+            coast: (from, v, dt) => own(() => {
+              const a = toWorld(from.x, from.y);
+              const step = stepPlayerMovement(
+                { x: a.x, z: a.z, floorY: from.z, inDungeon, airborne: false, jumpVelocityX: 0, jumpVelocityZ: 0, slideVelocity: null, groundVelocity: { x: v.x, z: v.y } },
+                0, 0, dt, services,
+              );
+              const g = toGlobal(step.x, step.z);
+              const nv = step.groundVelocity;
+              return { x: g.x, y: g.y, v: nv ? { x: nv.x, y: nv.z } : null };
+            }),
+            ground: (px, py, x, y, feetZ, lastGround) => own(() => {
+              const a = toWorld(px, py), b = toWorld(x, y);
+              return bodyGroundY(inDungeon, a.x, a.z, b.x, b.z, floorSearchFromY(null, feetZ, collision.lastStepUp), lastGround);
+            }),
+            stepDown: playerStepDownHeight,
+          };
         },
         jumpLaunch: (power, walk) => {
           // As the jump release does (the frame loop's triggerJump branch): the Jump skill's current
@@ -20689,44 +20774,8 @@ async function main() {
       // frame's move in retail transition steps (traceGroundAlongPath), and
       // a body inside a cell with no floor under it drops to the walkable
       // below instead of standing on the arrival height (interiorGroundY).
-      if (playerInDungeon && dungeonCollision?.hasCells) {
-        const dc = dungeonCollision;
-        playerGroundY = interiorGroundY(
-          {
-            floorHeight: (x, z, fromY, maxDrop) => dc.getBodyFloorHeight(x, z, fromY, playerStepDownHeight, maxDrop),
-            cellAt: (x, z, footY) => dc.findCellContaining(x, z, footY + dc.lowerSphereHeight, dungeonLandblockId >>> 0),
-          },
-          prePhysicsPlayerX, prePhysicsPlayerZ, playerWorldX, playerWorldZ,
-          // BUG.academy-olthoi-leg-upper-floor — with no floor found (a step
-          // ending exactly on a doorway's shared polygon edge) the body
-          // keeps the floor it stood on. dungeonFloorY is only the ARRIVAL
-          // height, so a fresh character (who arrives upstairs) popped 6 m up
-          // at the x = 195 seam of 0x86020121 | 0x86020111.
-          floorFromY, dc.transitionSphereRadius, lastFloorAwareGroundY,
-        );
-      } else if (playerInDungeon) {
-        playerGroundY = dungeonFloorY;
-      } else {
-        // Outdoors: use terrain heightmap, but also check BSP floor from building
-        // interior cells (stairs, elevated floors in surface buildings).
-        const terrainY = terrainCollision.getHeightAt(playerWorldX, playerWorldZ);
-        playerGroundY = traceGroundAlongPath(
-          // In a surface env cell with no walkable under it at all, the floor it stood on (as interiorGroundY).
-          (x, z, fromY) => outdoorGroundY(playerGroundSources, x, z, fromY, { fallbackY: lastFloorAwareGroundY }),
-          prePhysicsPlayerX, prePhysicsPlayerZ, playerWorldX, playerWorldZ,
-          floorFromY, outdoorCollision.transitionSphereRadius,
-        );
-        // GAP.6 — wading: on water-textured terrain the resting plane sits
-        // waterDepth BELOW the water surface (ACE ObjectInfo.cs:124 adds
-        // waterDepth to the contact-plane distance; depth per
-        // ObjCell.get_water_depth: 0.45 nearest-vertex-water / 0.1 dry
-        // vertex of a partially-flooded cell). Only when standing on the
-        // terrain itself — building floors (bridges, docks) stay dry.
-        if (playerGroundY !== null && terrainY !== null && standsOnTerrain(outdoorGroundSources, playerWorldX, playerWorldZ, playerGroundY)) {
-          const wadeDepth = waterMap.waterDepthAt(playerWorldX, playerWorldZ);
-          if (wadeDepth > 0) playerGroundY = terrainY - wadeDepth;
-        }
-      }
+      // bodyGroundY: the agent's jump planner flies with the same function.
+      playerGroundY = bodyGroundY(playerInDungeon, prePhysicsPlayerX, prePhysicsPlayerZ, playerWorldX, playerWorldZ, floorFromY, lastFloorAwareGroundY);
       const groundY = playerGroundY ?? 0;
       lastFloorAwareGroundY = groundY;
 

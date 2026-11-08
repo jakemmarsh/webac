@@ -190,11 +190,15 @@ describe.skipIf(!DATS)('BUG.jump-through-ceiling — Mountain Keep (0x01D2), the
     const withCeiling = simulateFlight(nav.kit, from, l.vx, l.vy, l.up)!;
     expect(withCeiling.x - BX).toBeGreaterThan(85.4);
     expect(withCeiling.z).toBeCloseTo(0, 2);
-    // What it planned before (no ceiling in the kit): through the ceiling, over the wall, down to −6.
+    // With no ceiling in the kit: through the ceiling and over the wall. The planner flies the live frame's own ground
+    // (BUG.planner-live-jump-gap: interiorGroundY, not "any floor below"), so it comes down where the live client did
+    // before the fix, hanging at z 0 outside every cell (the planner used to put it on the −6 floor 14 m west).
     const { ceiling: _drop, ...noCeiling } = nav.kit;
     const before = simulateFlight(noCeiling, from, l.vx, l.vy, l.up)!;
-    expect(before.x - BX).toBeLessThan(80);
-    expect(before.z).toBeLessThan(-5.5);
+    const live = liveFrames(TAKE_OFF, { jump: westJump(), ceilings: false, coast: true });
+    expect(before.x - BX).toBeLessThan(84);
+    expect(before.z).toBeCloseTo(0, 2);
+    expect(Math.hypot(before.x - BX - live.x, before.y - BY - live.y)).toBeLessThan(0.05);
   });
 });
 

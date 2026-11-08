@@ -51,7 +51,31 @@
  * (the server's tick lands ~2% fast) and keeps it within fallBudget.
  */
 import type { NavPoint } from './navPlanner.js';
-import { headroomClamp } from '../world/fallPhysics.js';
+import { advanceAirborneFrame, losesContact, PLAYER_STEP_DOWN_HEIGHT } from '../world/fallPhysics.js';
+import { coastQuantum, landingGroundVelocity } from '../player/LandingCoast.js';
+
+/**
+ * BUG.planner-live-jump-gap — one flight's body in the client's own frame physics, with one set of collision services
+ * (one sliding normal kept from frame to frame, as the live frame's movementServices.slide is). Agent global metres.
+ */
+export interface FlightBody {
+  /** One airborne transition (stepPlayerMovement, airborne): the body with its feet at `from.z` moved by (dx, dy). */
+  air(from: NavPoint, dx: number, dy: number): { x: number; y: number };
+  /**
+   * One grounded quantum of the landing's coast (stepPlayerMovement with groundVelocity: calc_friction, the collided
+   * move, the edge slide, a wall's bounce): the body standing at `from` carrying `v` (m/s) for `dt` s; where it ends
+   * and the velocity left (null: stopped).
+   */
+  coast(from: NavPoint, v: { x: number; y: number }, dt: number): { x: number; y: number; v: { x: number; y: number } | null };
+  /**
+   * The live frame's ground under the body that moved from (px, py) to (x, y) with its feet at `feetZ` (main.ts
+   * bodyGroundY: interiorGroundY indoors, traceGroundAlongPath outdoors, searched from the feet plus the step's
+   * step-up), `lastGround` the frame before's; null when there is none.
+   */
+  ground(px: number, py: number, x: number, y: number, feetZ: number, lastGround: number): number | null;
+  /** The body's StepDownHeight: a coast that finds its floor more than this below leaves the ground (losesContact). */
+  stepDown: number;
+}
 
 /** What the planner needs from the client to fly a jump. All heights are feet heights (agent global metres, z up). */
 export interface JumpKit {
@@ -70,6 +94,12 @@ export interface JumpKit {
   ceiling?(x: number, y: number, fromZ: number, toZ: number): number | null;
   /** The body's height (Setup 0x02000001: 1.835 m), for the floor above its head (fallPhysics.headroomClamp). */
   bodyHeight?: number;
+  /**
+   * BUG.planner-live-jump-gap — a fresh body for one flight in the live frame's physics (the host's navFlight). Absent:
+   * one built from `airStep` and `floor` (a fresh sliding normal each step, the floor under a point, a coast that
+   * meets no walls).
+   */
+  flight?(): FlightBody;
   /** The server's fall-damage formula (ACE's when absent). */
   fall?: FallModel;
 }
@@ -87,6 +117,10 @@ export interface JumpSpec {
   walk: boolean;
   /** Seconds in the air. */
   flight: number;
+  /** Seconds from the launch until the landing's coast has stopped the body at `to` (flight when it never coasts). */
+  settle?: number;
+  /** Where the feet first came down (`to` is where the coast after it stops the body). */
+  touch?: NavPoint;
   /** The fall damage the planner counts on for the landing (expectedFallDamage, before resistances). */
   damage: number;
 }
@@ -163,37 +197,91 @@ export function safeDropHeight(budget: number, model: FallModel = ACE_FALL_MODEL
   return speed > 0 ? (speed * speed) / (2 * GRAVITY) : 0;
 }
 
-export interface Landing extends NavPoint { vz: number; t: number }
+/**
+ * Where a flight ends: the body at rest after the landing's coast (x, y, z), the hardest landing on the way (vz, m/s;
+ * a coast off a narrow landing falls and lands again), when it first touched down (`t`, `touch`) and when it stopped
+ * (`settle`).
+ */
+export interface Landing extends NavPoint {
+  vz: number;
+  t: number;
+  /** Where the feet first met a walkable. */
+  touch: NavPoint;
+  /** Seconds from the launch until the coast stopped. */
+  settle: number;
+}
 
-/** The flight's time step: the client's physics quantum at 30 frames a second. */
-const FLIGHT_DT = 1 / 30;
+/** The flight's time step: one physics quantum of the client at 60 frames a second (main.ts's usual frame). */
+const FLIGHT_DT = 1 / 60;
+
+/** A flight body from a kit's point hooks (no host navFlight): airStep, floor, the coast moved by airStep from the feet. */
+function pointFlightBody(kit: Pick<JumpKit, 'floor' | 'airStep'>): FlightBody {
+  return {
+    air: (from, dx, dy) => kit.airStep(from, dx, dy),
+    coast: (from, v, dt) => {
+      const q = coastQuantum({ x: v.x, z: v.y }, dt);
+      const to = q.dx || q.dz ? kit.airStep(from, q.dx, q.dz) : from;
+      return { x: to.x, y: to.y, v: q.velocity ? { x: q.velocity.x, y: q.velocity.z } : null };
+    },
+    ground: (_px, _py, x, y, feetZ) => kit.floor(x, y, feetZ),
+    stepDown: PLAYER_STEP_DOWN_HEIGHT,
+  };
+}
 
 /**
- * Fly the body from `from` (standing, feet at from.z) with launch velocity (vx, vy, vz): the landing
- * (where its feet reach a walkable, with the vertical speed then) or null when it never lands within
- * `maxSeconds` or falls more than `maxFall` metres.
+ * Fly the body from `from` (standing, feet at from.z) with launch velocity (vx, vy, vz), frame by frame in main.ts's
+ * order (BUG.planner-live-jump-gap; tests/_harness/liveFrames.ts is the same order over real cells): the collided
+ * airborne step, the frame's ground under the body, the vertical step with the ceiling check (advanceAirborneFrame,
+ * the function the frame loop calls); on the landing the jump's velocity kept as a coast (landingGroundVelocity) that
+ * friction stops (calc_friction), the body falling again when the coast carries it off its floor. Returns where it
+ * comes to rest, or null when it never does within `maxSeconds` or falls more than `maxFall` metres.
  */
-export function simulateFlight(kit: Pick<JumpKit, 'floor' | 'airStep' | 'bodyHeight' | 'ceiling'>, from: NavPoint, vx: number, vy: number, vz: number, opts: { maxSeconds?: number; maxFall?: number } = {}): Landing | null {
-  const maxT = opts.maxSeconds ?? 4;
+export function simulateFlight(kit: Pick<JumpKit, 'floor' | 'airStep' | 'bodyHeight' | 'ceiling' | 'flight'>, from: NavPoint, vx: number, vy: number, vz: number, opts: { maxSeconds?: number; maxFall?: number } = {}): Landing | null {
+  const maxT = opts.maxSeconds ?? 6;
   const maxFall = opts.maxFall ?? 60;
   const height = kit.bodyHeight ?? BODY_HEIGHT;
-  let x = from.x, y = from.y, z = from.z, v = vz, t = 0;
+  const body = kit.flight ? kit.flight() : pointFlightBody(kit);
+  const dt = FLIGHT_DT;
+  let x = from.x, y = from.y, t = 0;
+  let airborne = true, baseZ = from.z, off = 0, v = vz, hx = vx, hy = vy;
+  let lastGround = from.z;
+  let coast: { x: number; y: number } | null = null;
+  let touch: NavPoint | null = null, touchT = 0, worst = 0;
   while (t < maxT) {
-    let nz = z + v * FLIGHT_DT - 0.5 * GRAVITY * FLIGHT_DT * FLIGHT_DT;
-    let nv = v - GRAVITY * FLIGHT_DT;
-    // The head meets the ceiling: the rise stops there (as the live frame's ceilingStop does).
-    if (nz > z && kit.ceiling) {
-      const top = kit.ceiling(x, y, z, nz);
-      if (top !== null) { nz = top; nv = 0; }
+    const feet = airborne ? baseZ + off : lastGround;
+    let moved: { x: number; y: number };
+    if (airborne) moved = body.air({ x, y, z: feet }, hx * dt, hy * dt);
+    else if (coast) { const c = body.coast({ x, y, z: feet }, coast, dt); moved = c; coast = c.v; }
+    else moved = { x, y };
+    t += dt;
+    const g = body.ground(x, y, moved.x, moved.y, feet, lastGround);
+    if (!airborne) {
+      if (g === null || losesContact(lastGround, g, body.stepDown)) {
+        // The coast carried the body off its floor: it falls from there with what it carried (losesContact).
+        airborne = true; baseZ = lastGround; off = 0; v = 0;
+        hx = (moved.x - x) / dt; hy = (moved.y - y) / dt; coast = null;
+      } else lastGround = g;
+    } else if (g !== null) lastGround = g;
+    if (airborne) {
+      const mx = moved.x, my = moved.y;
+      const air = advanceAirborneFrame(baseZ, off, v, [dt], g ?? -Infinity, -GRAVITY, {
+        riseLimit: kit.ceiling ? (a, b) => kit.ceiling!(mx, my, a, b) : null,
+        floorAtHead: (headZ) => kit.floor(mx, my, headZ),
+        height,
+      });
+      off = air.offsetY; v = air.velocityY;
+      if (air.landed) {
+        airborne = false; off = 0;
+        worst = Math.min(worst, air.impactVelocityY);
+        if (!touch) { touch = { x: mx, y: my, z: g! }; touchT = t; }
+        const kept = landingGroundVelocity(hx, hy);
+        coast = kept ? { x: kept.x, y: kept.z } : null;
+        hx = 0; hy = 0;
+      }
     }
-    if (nv > 0) ({ feetY: nz, velocityY: nv } = headroomClamp(nz, nv, kit.floor(x, y, nz + height), height));
-    const moved = vx || vy ? kit.airStep({ x, y, z }, vx * FLIGHT_DT, vy * FLIGHT_DT) : { x, y };
-    t += FLIGHT_DT;
-    // The walkable under the body at or below where its feet were (a floor passed through this step counts).
-    const ground = kit.floor(moved.x, moved.y, Math.max(z, nz));
-    if (nv < 0 && ground !== null && nz <= ground) return { x: moved.x, y: moved.y, z: ground, vz: nv, t };
-    x = moved.x; y = moved.y; z = nz; v = nv;
-    if (from.z - z > maxFall) return null;
+    x = moved.x; y = moved.y;
+    if (!airborne && !coast && touch) return { x, y, z: lastGround, vz: worst, t: touchT, touch, settle: t };
+    if (airborne && from.z - (baseZ + off) > maxFall) return null;
   }
   return null;
 }
@@ -219,8 +307,27 @@ export function stableLanding(kit: Pick<JumpKit, 'floor'>, at: NavPoint): boolea
   return true;
 }
 
+/**
+ * Whether the body first came down on its floor clear of the edge: its middle over that floor and no drop within
+ * LANDING_MARGIN_M round it (stableLanding at the touchdown; BUG.planner-live-jump-gap). The live frame's ground is
+ * the body's (getBodyFloorHeight: any floor under its sphere), so a jump that comes down a few tenths short of a far
+ * lip lands on the lip's edge and the coast carries it on; that holds only by the width of the sphere at one frame
+ * rate, so the walk never counts on it (the doll dungeon's 10 m rift: Arcanist's jumps touched down 0.46 m short of
+ * the far lip, 0.37 m down its edge, or 0.27 m past it at full charge, then coasted 4 m onto the floor).
+ */
+export function touchdownOnFloor(kit: Pick<JumpKit, 'floor'>, l: Pick<Landing, 'touch'>): boolean {
+  const f = kit.floor(l.touch.x, l.touch.y, l.touch.z + 0.5);
+  return f !== null && Math.abs(f - l.touch.z) < 0.25 && stableLanding(kit, l.touch);
+}
+
 /** The charge powers tried, gentlest first. A press shorter than ~0.15 s can't fit the forward key in after the charge starts. */
 const POWERS = [0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 1];
+/**
+ * A jump must land the same way from this far (m) short of or past its take-off along the jump (BUG.planner-live-jump-gap):
+ * the walk's body stands within about this of the planned spot when it jumps. Mountain Keep's 7.1 m leap planned for
+ * Arcanist from (89.6, −64.5) came down on the far lip's edge from where her body really stood, and into the pit.
+ */
+const TAKEOFF_SLOP_M = 0.15;
 /** A jump must land the same way when the key is held a frame or two longer or shorter. */
 const POWER_SLOP = 0.05;
 
@@ -229,32 +336,38 @@ const POWER_SLOP = 0.05;
  * running ones, each from the gentlest charge up. Kept only when the landing deals at most
  * `maxDamage` and a slightly shorter or longer charge lands on the same floor. At most `max`.
  */
-/** `accept`: a landing the caller may take (navPlanner: none in a portal's disk); a refused one is no option, and the search goes on. */
-export function jumpOptions(kit: JumpKit, from: NavPoint, dir: { x: number; y: number }, opts: { maxDamage: number; max?: number; minDistance?: number; accept?: (to: NavPoint) => boolean }): JumpSpec[] {
+/** `accept`: a leg the caller may take, to `to` from `via` (the take-off, then the touchdown for the coast after it; navPlanner: none through a portal's or an NPC's disk); a refused one is no option, and the search goes on. */
+export function jumpOptions(kit: JumpKit, from: NavPoint, dir: { x: number; y: number }, opts: { maxDamage: number; max?: number; minDistance?: number; accept?: (to: NavPoint, via: NavPoint) => boolean }): JumpSpec[] {
   const out: JumpSpec[] = [];
   const max = opts.max ?? 3;
   const minDistance = opts.minDistance ?? 0.6;
   const n = Math.hypot(dir.x, dir.y) || 1;
   const u = { x: dir.x / n, y: dir.y / n };
-  const fly = (power: number, walk: boolean): Landing | null => {
+  const fly = (power: number, walk: boolean, shift = 0): Landing | null => {
     const l = kit.launch(power, walk);
-    return simulateFlight(kit, from, u.x * l.forward, u.y * l.forward, l.up);
+    // A take-off shifted along the jump only as far as the body gets there (never into the wall it stands against).
+    const moved = shift ? kit.airStep({ x: from.x, y: from.y, z: from.z + 0.05 }, u.x * shift, u.y * shift) : from;
+    const at = { x: moved.x, y: moved.y, z: from.z };
+    return simulateFlight(kit, at, u.x * l.forward, u.y * l.forward, l.up);
   };
   for (const walk of [true, false]) {
     for (const power of POWERS) {
       const to = fly(power, walk);
-      if (!to || Math.hypot(to.x - from.x, to.y - from.y) < minDistance) continue;
-      if (opts.accept && !opts.accept(to)) continue;
+      // The flight itself must carry the body (a hop whose coast does the moving is a walk, for the walk's probe).
+      if (!to || Math.hypot(to.touch.x - from.x, to.touch.y - from.y) < minDistance) continue;
+      if (opts.accept && !(opts.accept(to.touch, from) && opts.accept(to, to.touch))) continue;
       const damage = expectedFallDamage(to.vz, kit.fall);
       if (damage > opts.maxDamage) continue;
-      if (!stableLanding(kit, to)) continue;
+      if (!stableLanding(kit, to) || !touchdownOnFloor(kit, to)) continue;
       if (out.some((o) => Math.hypot(o.to.x - to.x, o.to.y - to.y) < 1 && Math.abs(o.to.z - to.z) < 0.5)) continue;
-      const steady = [power - POWER_SLOP, power + POWER_SLOP].filter((p) => p > 0 && p <= 1).every((p) => {
-        const o = fly(p, walk);
+      // ...and when the body takes off a little short of or past the planned spot (the walk stops within a step of it).
+      const tries: Array<[number, number]> = [[power - POWER_SLOP, 0], [power + POWER_SLOP, 0], [power, -TAKEOFF_SLOP_M], [power, TAKEOFF_SLOP_M]];
+      const steady = tries.filter(([p]) => p > 0 && p <= 1).every(([p, shift]) => {
+        const o = fly(p, walk, shift);
         return !!o && Math.abs(o.z - to.z) < 0.5 && Math.hypot(o.x - to.x, o.y - to.y) < 1.5 && expectedFallDamage(o.vz, kit.fall) <= opts.maxDamage;
       });
       if (!steady) continue;
-      out.push({ from, to: { x: to.x, y: to.y, z: to.z }, dir: u, power, holdMs: Math.round(power * kit.chargeSeconds * 1000), walk, flight: to.t, damage });
+      out.push({ from, to: { x: to.x, y: to.y, z: to.z }, dir: u, power, holdMs: Math.round(power * kit.chargeSeconds * 1000), walk, flight: to.t, settle: to.settle, touch: to.touch, damage });
       if (out.length >= max) return out;
     }
   }
@@ -275,9 +388,9 @@ export function reaimJump(kit: JumpKit, here: NavPoint, plan: JumpSpec, maxDamag
   for (let power = 0.15; power <= 1.0001; power += 0.025) {
     const l = kit.launch(power, plan.walk);
     const to = simulateFlight(kit, here, u.x * l.forward, u.y * l.forward, l.up);
-    if (!to || Math.abs(to.z - plan.to.z) > 0.5 || expectedFallDamage(to.vz, kit.fall) > maxDamage || !stableLanding(kit, to)) continue;
+    if (!to || Math.abs(to.z - plan.to.z) > 0.5 || expectedFallDamage(to.vz, kit.fall) > maxDamage || !stableLanding(kit, to) || !touchdownOnFloor(kit, to)) continue;
     const err = Math.hypot(to.x - plan.to.x, to.y - plan.to.y);
-    if (err < bestErr) { bestErr = err; best = { from: here, to: { x: to.x, y: to.y, z: to.z }, dir: u, power, holdMs: Math.round(power * kit.chargeSeconds * 1000), walk: plan.walk, flight: to.t, damage: expectedFallDamage(to.vz, kit.fall) }; }
+    if (err < bestErr) { bestErr = err; best = { from: here, to: { x: to.x, y: to.y, z: to.z }, dir: u, power, holdMs: Math.round(power * kit.chargeSeconds * 1000), walk: plan.walk, flight: to.t, settle: to.settle, touch: to.touch, damage: expectedFallDamage(to.vz, kit.fall) }; }
   }
   return best && bestErr < 1.5 ? best : null;
 }

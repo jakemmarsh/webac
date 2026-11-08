@@ -33,6 +33,8 @@ export class DungeonHost extends FakeHost {
   readonly traces: string[] = [];
   private flight: { until: number; to: { x: number; y: number; z: number } } | null = null;
   private chargeT: number | null = null;
+  /** The body's sliding normal, kept across frames as main.ts's movementServices.slide is. */
+  private readonly slide: { slidingNormal: unknown } = { slidingNormal: null };
   private readonly bx: number;
   private readonly by: number;
   private readonly graph: ReturnType<typeof loadCellGraph>;
@@ -188,9 +190,11 @@ export class DungeonHost extends FakeHost {
       this.pendingUse = null;
     }
     if (code === 'Space') {
-      if (down && !this.keys.has('Space') && !this.flight) this.chargeT = this.t;
+      // The charge is timed by the (fake) clock the key timers run on, to the millisecond as the client's is, not by the
+      // 100 ms page tick: a 625 ms hold read as 700 ms flew a charge the planner never checked (BUG.planner-live-jump-gap).
+      if (down && !this.keys.has('Space') && !this.flight) this.chargeT = Date.now();
       if (!down && this.keys.has('Space') && this.chargeT !== null) {
-        const power = Math.min(1, Math.max(0.001, (this.t - this.chargeT) / (this.nav.kit.chargeSeconds * 1000)));
+        const power = Math.min(1, Math.max(0.001, (Date.now() - this.chargeT) / (this.nav.kit.chargeSeconds * 1000)));
         this.chargeT = null;
         const walk = this.keys.has('ShiftLeft');
         const l = this.nav.kit.launch(power, walk);
@@ -226,21 +230,24 @@ export class DungeonHost extends FakeHost {
     // Forward (W, run; walk with Shift), back (S) and the sidesteps (Z left, C right) a stall's recovery uses.
     const fx = -Math.sin(this.me.yaw), fy = -Math.cos(this.me.yaw);
     let vx = 0, vy = 0;
-    if (this.keys.has('KeyW')) { const s = this.keys.has('ShiftLeft') ? 3.12 : 4; vx += fx * s; vy += fy * s; }
+    if (this.keys.has('KeyW')) { const s = this.keys.has('ShiftLeft') ? 3.12 : this.nav.runSpeed; vx += fx * s; vy += fy * s; }
     if (this.keys.has('KeyS')) { vx -= fx * 2; vy -= fy * 2; }
     if (this.keys.has('KeyC')) { vx += fy * 2; vy -= fx * 2; }
     if (this.keys.has('KeyZ')) { vx -= fy * 2; vy += fx * 2; }
     if (!vx && !vy) return;
-    const from = { x: this.bx + this.me.x, y: this.by + this.me.y, z: this.me.z };
+    // The live frame loop's move (BUG.planner-live-jump-gap): 60 Hz frames, the body's one sliding normal kept from
+    // frame to frame, the frame's ground. A 100 ms planner probe per tick (a fresh sliding normal, a stop at the first
+    // blocked sub-step) left the body against the Scrivener of War Magic where the live body slid past him.
     const bodies = this.creatureShapes.flatMap((s) => s());
-    let got: ReturnType<DungeonNav['probe']>;
     try {
-      got = this.nav.probe(from, { x: from.x + (vx * dtMs) / 1000, y: from.y + (vy * dtMs) / 1000 });
+      let p = { x: this.bx + this.me.x, y: this.by + this.me.y, z: this.me.z };
+      const frames = Math.max(1, Math.round((dtMs / 1000) * 60));
+      const dt = dtMs / 1000 / frames;
+      for (let f = 0; f < frames; f++) p = this.nav.stepBody(p, vx * dt, vy * dt, dt, this.slide);
+      this.me.x = p.x - this.bx; this.me.y = p.y - this.by; this.me.z = p.z;
     } finally {
       for (const k of bodies) this.nav.col.removeKey(k);
     }
-    if (!got) return;
-    this.me.x = got.x - this.bx; this.me.y = got.y - this.by; this.me.z = got.z;
     this.updateCell();
   }
 

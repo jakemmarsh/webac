@@ -181,7 +181,9 @@ describe('1. a leap of the doorway route that comes down short (Bulwark, 0x01D20
     host = new LeapHost();
     api = new AgentApi(host);
     host.jumpSkill = 300;
-    host.floors = (_x, y) => (y < 30 || y > 33.5 ? [94] : [88]);
+    // The pit's floor runs on under the far ledge (the fake's walls are floor tops within a body's height: a body
+    // falling past the far lip would otherwise fall forever under it).
+    host.floors = (_x, y) => (y < 30 ? [94] : y > 33.5 ? [94, 88] : [88]);
     host.me.cell = 0xa9b40150; host.me.x = 80; host.me.y = 22; host.me.z = 94;
     host.me.health = { current: 175, max: 175 };
     host.add({ guid: 0x80000077, name: 'Chest', itemType: 0x200, cell: 0xa9b40151, x: 80, y: 42, z: 94 });

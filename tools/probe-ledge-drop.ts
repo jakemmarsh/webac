@@ -262,6 +262,11 @@ try {
       if (v.outcome !== 'PASS' && r.samples.length) for (const row of sampleTable(r.samples, v)) console.log(`      ${row}`);
     }
   }
+  // Leave the character in town: the live gate plays these same accounts, and one left in Mountain Keep
+  // dies on its next login (2026-11-08: the ClassicACE play-through failed that way).
+  log(`  ${era.home}`);
+  await adminCommand(page, era.home);
+  await page.waitForTimeout(8000);
 } catch (e) {
   log(`aborted: ${(e as Error).message}`);
   code = 1;

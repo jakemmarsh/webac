@@ -486,6 +486,13 @@ function floorProbeMayHit(cell: CellCollision, acX: number, acY: number): boolea
   return b !== null && acX >= b.minX && acX <= b.maxX && acY >= b.minY && acY <= b.maxY;
 }
 
+/** A mover's last-move results in a DungeonCollision (DungeonCollision.withMoveState). */
+export interface CollisionMoveState {
+  lastStepUp: number;
+  collisionNormal: { x: number; z: number } | null;
+  lastShellCell: number;
+}
+
 export class DungeonCollision {
   private cells = new Map<CollisionKey, CellCollision>();
   /** BUG.10 — the EnvCell subset (numeric cell ids with a CELL BSP), for findCellContaining. */
@@ -583,6 +590,13 @@ export class DungeonCollision {
   get transitionSphereRadius(): number { return this.bodySphereRadius; }
   /** Height of the (resolved) lower body sphere's centre above the feet. */
   get lowerSphereHeight(): number { return this.bodySphereHeights[0]; }
+  /**
+   * BUG.floor-edge-snag — how far above ours retail's body stands on a floor: CPolygon::adjust_sphere_to_plane
+   * @ 00538210 rests the feet sphere its full radius off the plane, where stepDownContact rests its centre
+   * lowerSphereHeight off it (5 mm for every player Setup: radius 0.48, height 0.475). The movement tests
+   * (bspTestMovement, obstacleTestMovement) put the body spheres this much higher, where retail's are.
+   */
+  private get restFloat(): number { return Math.max(0, this.bodySphereRadius - this.bodySphereHeights[0]); }
   private bodySphereHeights: readonly [number, number] = [
     DungeonCollision.LOWER_SPHERE_HEIGHT,
     DungeonCollision.UPPER_SPHERE_HEIGHT,
@@ -720,6 +734,32 @@ export class DungeonCollision {
       this.lastShellCell = saved.lastShellCell;
       this.lastStepUp = saved.lastStepUp;
       this.collisionNormal = saved.collisionNormal;
+      this.scopeEpoch++;
+    }
+  }
+
+  /**
+   * BUG.planner-live-jump-gap — run `fn` with a mover's own last-move results (lastStepUp, collisionNormal, the cell
+   * hint lastShellCell) in place of the player's, and keep what `fn` leaves in `state` for its next call. The agent's
+   * planned flights step a body through this collider frame after frame; without this their step-ups, wall normals
+   * and cell hints leaked into the next walk probe and the player's own frame (a Holtburg scriveners walk stalled
+   * against an NPC after a planned coast moved the hint).
+   */
+  withMoveState<T>(state: CollisionMoveState, fn: () => T): T {
+    const saved: CollisionMoveState = { lastStepUp: this.lastStepUp, collisionNormal: this.collisionNormal, lastShellCell: this.lastShellCell };
+    this.lastStepUp = state.lastStepUp;
+    this.collisionNormal = state.collisionNormal;
+    this.lastShellCell = state.lastShellCell;
+    this.scopeEpoch++;
+    try {
+      return fn();
+    } finally {
+      state.lastStepUp = this.lastStepUp;
+      state.collisionNormal = this.collisionNormal;
+      state.lastShellCell = this.lastShellCell;
+      this.lastStepUp = saved.lastStepUp;
+      this.collisionNormal = saved.collisionNormal;
+      this.lastShellCell = saved.lastShellCell;
       this.scopeEpoch++;
     }
   }
@@ -1395,6 +1435,7 @@ export class DungeonCollision {
     const destZ = pos.z + deltaZ;
     const r = this.bodySphereRadius;
     const pad = r + this.maxObstacleRadius;
+    const float = this.restFloat; // the body spheres where retail's stand (restFloat)
     // The current position's outward normal (cx, cz); the destination's only
     // when the body stands on the obstacle's axis (no direction to take).
     const radialNormal = (cx: number, cz: number, dx: number, dz: number): { nx: number; nz: number } => {
@@ -1414,7 +1455,7 @@ export class DungeonCollision {
         if (scoped(cyl) && !this.inScope(cyl, scope ??= this.bodyScope(destX, destZ, pos.y))) continue;
         const radsum = cyl.radius - PHYSICS_EPSILON + r;
         for (let si = 0; si < this.bodySphereHeights.length; si++) {
-          const cy = pos.y + this.bodySphereHeights[si];
+          const cy = pos.y + this.bodySphereHeights[si] + float;
           // Vertical span test (CollidesWithSphere's |H/2 − dz| ≤ r − EPS + H/2).
           if (cy < cyl.bottomY - (r - PHYSICS_EPSILON) || cy > cyl.topY + (r - PHYSICS_EPSILON)) continue;
           const dx = destX - cyl.x;
@@ -1436,7 +1477,7 @@ export class DungeonCollision {
         if (scoped(sph) && !this.inScope(sph, scope ??= this.bodyScope(destX, destZ, pos.y))) continue;
         const radsum = sph.radius + r - PHYSICS_EPSILON;
         for (let si = 0; si < this.bodySphereHeights.length; si++) {
-          const dy = pos.y + this.bodySphereHeights[si] - sph.y;
+          const dy = pos.y + this.bodySphereHeights[si] + float - sph.y;
           const dx = destX - sph.x;
           const dz = destZ - sph.z;
           const dist2 = dx * dx + dy * dy + dz * dz;
@@ -1973,6 +2014,13 @@ export class DungeonCollision {
     const destX = worldPos.x + dxWorld;
     const destZ = worldPos.z + dzWorld;
 
+    // BUG.floor-edge-snag — the body spheres where retail's are (restFloat). Tested 5 mm low, the feet sphere
+    // reached 4.8 mm under the floor's plane and met any edge lying in it on a step into that face: the top edges
+    // of the ceiling of 0x01D201D0, under the floor portal of Mountain Keep's 0x01D20293, stopped a walk through
+    // the doorway from 0x0294 dead or let it creep on by the heading, and the step up taken over the far edge
+    // skipped the edge slide's precipice rule, so walks ran off the walkway beyond into the pit. Retail's sphere,
+    // a full radius over the floor, meets neither edge.
+    const restFloat = this.restFloat;
     let scope: BodyScope | undefined;
     for (const cell of this.cellsNear(destX, destZ, this.bodySphereRadius)) {
       if (scoped(cell) && !this.inScope(cell, scope ??= this.bodyScope(destX, destZ, worldPos.y))) continue;
@@ -1986,7 +2034,7 @@ export class DungeonCollision {
         const acDest = {
           x: destX - cell.blockOffsetX,
           y: destZ - cell.blockOffsetY,
-          z: worldPos.y + sphereHeight,
+          z: worldPos.y + sphereHeight + restFloat,
         };
 
         // Transform to cell-local via GlobalToLocal; a scaled source tests

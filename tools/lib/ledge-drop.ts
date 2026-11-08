@@ -20,6 +20,8 @@ export interface LedgeEra {
   bridge: string;
   /** An admin account on that server (null: name one with --account). */
   account: string | null;
+  /** The admin command that sends the character back to town after the run (the live gate's characters must not be left in a dungeon). */
+  home: string;
   /**
    * What an admin types to make a dungeon spot safe for a low-level character, given its health now and its max:
    * kill what is near and fill the health. Never cloaking / ethereal modes: those change the body's collision.
@@ -42,10 +44,10 @@ const AC1999_SAFETY = (h: { cur: number; max: number } | null): string[] => [
 ];
 
 export const LEDGE_ERAS: Record<string, LedgeEra> = {
-  eor: { key: 'eor', id: null, label: 'End of retail (local ACE)', bridge: 'ws://localhost:9090', account: 'lgateeor', safety: ACE_SAFETY },
-  'classicace-customdm': { key: 'classicace-customdm', id: 'classicace-customdm', label: 'Dark Majesty (ClassicACE CustomDM, :9200)', bridge: 'ws://localhost:9098', account: 'lgatedm', safety: ACE_SAFETY },
-  'classic-dereth': { key: 'classic-dereth', id: 'classic-dereth', label: 'Dark Majesty (GDL-Classic, :9210)', bridge: 'ws://localhost:9099', account: null, safety: ACE_SAFETY },
-  'ac1999-retail': { key: 'ac1999-retail', id: 'ac1999-retail', label: 'Retail November 1999 (AC1999 server, :9310)', bridge: 'ws://localhost:9312', account: 'lgate99', safety: AC1999_SAFETY },
+  eor: { key: 'eor', id: null, label: 'End of retail (local ACE)', bridge: 'ws://localhost:9090', account: 'lgateeor', safety: ACE_SAFETY, home: '@telepoi Holtburg' },
+  'classicace-customdm': { key: 'classicace-customdm', id: 'classicace-customdm', label: 'Dark Majesty (ClassicACE CustomDM, :9200)', bridge: 'ws://localhost:9098', account: 'lgatedm', safety: ACE_SAFETY, home: '@telepoi Holtburg' },
+  'classic-dereth': { key: 'classic-dereth', id: 'classic-dereth', label: 'Dark Majesty (GDL-Classic, :9210)', bridge: 'ws://localhost:9099', account: null, safety: ACE_SAFETY, home: '@telepoi Holtburg' },
+  'ac1999-retail': { key: 'ac1999-retail', id: 'ac1999-retail', label: 'Retail November 1999 (AC1999 server, :9310)', bridge: 'ws://localhost:9312', account: 'lgate99', safety: AC1999_SAFETY, home: '@teletown Holtburg' },
 };
 
 export function ledgeEra(key: string | undefined): LedgeEra {

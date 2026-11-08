@@ -299,7 +299,7 @@ export class PathSearch {
       let flights = 0;
       const kit: typeof js.kit = { ...js.kit, launch: (power, walk) => { flights++; return js.kit.launch(power, walk); } };
       const avoid = js.avoid?.() ?? [];
-      const options = jumpOptions(kit, p, u, { maxDamage: js.maxDamage, max: 2, ...(avoid.length ? { accept: (to: NavPoint) => !flightCrossesDisk(p, to, avoid) } : {}) });
+      const options = jumpOptions(kit, p, u, { maxDamage: js.maxDamage, max: 2, ...(avoid.length ? { accept: (to: NavPoint, via: NavPoint) => !flightCrossesDisk(via, to, avoid) } : {}) });
       this.flights += flights;
       for (const o of options) {
         const ni = Math.round((o.to.x - this.start.x) / this.spacing), nj = Math.round((o.to.y - this.start.y) / this.spacing);
@@ -456,9 +456,11 @@ export function floorPlan(
       const kit: JumpKit = { ...js.kit, launch: (power, walk) => { flights++; return js.kit.launch(power, walk); } };
       for (const o of jumpOptions(kit, p, { x: di, y: dj }, { maxDamage: js.maxDamage, max: 2 })) {
         if (o.to.z < p.z - 1) continue; // a drop's landing: the 'v' beside it says so
-        const ni = Math.round((o.to.x - center.x) / spacing), nj = Math.round((o.to.y - center.y) / spacing);
+        // Where the jump comes down (its coast then carries the body on, o.to).
+        const at = o.touch ?? o.to;
+        const ni = Math.round((at.x - center.x) / spacing), nj = Math.round((at.y - center.y) / spacing);
         const n = Math.abs(ni) <= r && Math.abs(nj) <= r ? reach[idx(ni, nj)] : undefined;
-        if (n === undefined || (n && Math.abs(n.z - o.to.z) < 1)) continue; // off the plan, or floor you walk to
+        if (n === undefined || (n && Math.abs(n.z - at.z) < 1)) continue; // off the plan, or floor you walk to
         if (cellAt(ni, nj) !== 'J') jumpSpots++;
         setAt(ni, nj, 'J');
       }

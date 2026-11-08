@@ -48,6 +48,20 @@ function walkable(start: NavPoint, path: NavPoint[]): boolean {
   return true;
 }
 
+/**
+ * The drop a walk reports is the body's real fall (BUG.planner-live-jump-gap): from the floor it took off from (here the
+ * AC1999 balcony fence's top, z ≈ −4.1, where every Jump-100 jump at the fence comes down) to the floor it landed on.
+ */
+function expectTrueFall(host: { launches: Array<{ z: number }>; landings: Array<{ z: number }> }, message: string): void {
+  const said = Number(/dropped off a ledge \((\d+\.\d) m\)/.exec(message)![1]);
+  expect(host.landings.some((l) => Math.abs(l.z + 4.1) < 0.3)).toBe(true); // on the fence's top
+  const last = host.launches[host.launches.length - 1];
+  const down = host.landings[host.landings.length - 1];
+  expect(last.z).toBeGreaterThan(-4.5); // the drop is taken from the fence's top
+  expect(said).toBeCloseTo(last.z - down.z, 1);
+  expect(down.z).toBeCloseTo(-12, 1);
+}
+
 describe('agent path planner (movement-probe A*)', () => {
   it('goes through the doorway instead of into the wall, and every leg is walkable', () => {
     const start = { x: 0, y: -4, z: 0 };
@@ -265,7 +279,9 @@ describe.skipIf(!existsSync(DAT_PATHS.cell) || !existsSync(DAT_PATHS.portal))('B
     if (r.status !== 'found') return;
     expect(r.jumps).toBe(1);
     const jump = r.path.find((p) => p.jump)!.jump!;
-    expect(jump.from.z).toBeCloseTo(6, 1);
+    // The take-off is the body's own floor at the lip (bodyGroundY: the feet sphere on the edge sits up to ~0.4 m low).
+    expect(jump.from.z).toBeGreaterThan(5.5);
+    expect(jump.from.z).toBeLessThanOrEqual(6.01);
     expect(jump.to.z).toBeCloseTo(0, 1);
     expect(jump.damage).toBe(0);
   });
@@ -313,7 +329,11 @@ describe.skipIf(!existsSync(AC1999_PORTAL) || !existsSync(AC1999_CELL))('AC1999 
     const host = new DungeonHost(nav, dats, LB);
     const r = await host.walk(LB | 0x139, { x: 37, y: -51, z: -6 }, EXIT);
     expect(r, host.traces.join('\n')).toMatchObject({ ok: true });
-    expect(r.message).toMatch(/^arrived .*dropped off a ledge \(6\.0 m\)/);
+    // BUG.planner-live-jump-gap: flown in the live frame's physics no jump clears the 2 m fence: the body comes down on
+    // its top (z ≈ −4.1) and drops from there to the pit (−12). The fall said is that real one, measured from where the
+    // body stood (the fence's top), not the 6 m from the balcony the old flight model promised.
+    expect(r.message).toMatch(/^arrived .*dropped off a ledge \((\d+\.\d) m\)/);
+    expectTrueFall(host, r.message);
     expect(host.me.cell >>> 0).toBe(EXIT.cell >>> 0);
   }, 120_000);
 
@@ -387,7 +407,9 @@ describe.skipIf(!existsSync(AC1999_PORTAL) || !existsSync(AC1999_CELL) || !ac199
   it('Jump 100: over the fence and down', async () => {
     const { host, r } = await walk(100, false);
     expect(r, host.traces.join('\n')).toMatchObject({ ok: true });
-    expect(r.message).toMatch(/dropped off a ledge \(6\.0 m\)/);
+    // Onto the fence's top (no Jump-100 jump clears it in the live frame's physics), then the real fall from there.
+    expect(r.message).toMatch(/dropped off a ledge \((\d+\.\d) m\)/);
+    expectTrueFall(host, r.message);
   }, 120_000);
 
   it('Jump 50 with the key in the pack: round by the ramp, the key on the locked door, and on to the drudge', async () => {

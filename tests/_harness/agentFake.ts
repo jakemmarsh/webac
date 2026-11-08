@@ -6,6 +6,8 @@
 import { expect, vi } from 'vitest';
 import { compassToYaw, type AgentApi, type FellowshipInfo, type AgentHost, type AgentHostObject, type AgentHostSelf } from '../../packages/renderer/src/agent/AgentApi.ts';
 import { getJumpVelocity } from '@ac/shared';
+import { coastQuantum, type GroundVelocity } from '../../packages/renderer/src/player/LandingCoast.ts';
+import { PLAYER_STEP_DOWN_HEIGHT } from '../../packages/renderer/src/world/fallPhysics.ts';
 import type { AgentItem, AgentSpell } from '../../packages/renderer/src/agent/types.ts';
 
 export const HOLTBURG = 0xa9b40019; // landblock 0xA9,0xB4 outdoor cell
@@ -240,6 +242,8 @@ export class FakeHost implements AgentHost {
     return this.fallFamily ? () => this.fallFamily as 'ace' | 'gdle' : undefined;
   }
   airborne: { vx: number; vy: number; vz: number } | null = null;
+  /** The velocity a landing left on the body (m/s, x east / z north), coasting until friction stops it. */
+  coast: GroundVelocity | null = null;
   private chargeAt: number | null = null;
   /** Every launch: power, forward speed, where from. */
   launches: Array<{ power: number; forward: number; walk: boolean; x: number; y: number; z: number }> = [];
@@ -288,8 +292,26 @@ export class FakeHost implements AgentHost {
         }
         const g = this.floorBelow(m.x, m.y, Math.max(this.me.z, nz));
         this.me.x = m.x; this.me.y = m.y;
-        if (nv < 0 && g !== null && nz <= g) { this.me.z = g; this.landings.push({ x: m.x, y: m.y, z: g, vz: nv }); this.airborne = null; continue; }
+        if (nv < 0 && g !== null && nz <= g) {
+          this.me.z = g; this.landings.push({ x: m.x, y: m.y, z: g, vz: nv }); this.airborne = null;
+          // The landing keeps the jump's velocity and coasts (player/LandingCoast.ts; BUG.planner-live-jump-gap).
+          this.coast = a.vx || a.vy ? { x: a.vx, z: a.vy } : null;
+          continue;
+        }
         this.me.z = nz; a.vz = nv;
+        continue;
+      }
+      if (this.coast) {
+        // calc_friction's coast, moved like the planner's point body (airStep from the feet, the floor under it).
+        const q = coastQuantum(this.coast, dt);
+        this.coast = q.velocity;
+        const m = this.airMove(this.me.x, this.me.y, this.me.z, q.dx, q.dz);
+        const f = this.floorBelow(m.x, m.y, this.me.z);
+        if (f === null || this.me.z - f > PLAYER_STEP_DOWN_HEIGHT) {
+          this.airborne = { vx: (m.x - this.me.x) / dt, vy: (m.y - this.me.y) / dt, vz: 0 };
+          this.coast = null;
+        } else this.me.z = f;
+        this.me.x = m.x; this.me.y = m.y;
         continue;
       }
       // Charging a standing long jump: the held forward key doesn't move the body.

@@ -131,6 +131,12 @@ describe('ledgeVerdict over sample runs (tools/lib/ledge-drop.ts)', () => {
     for (const e of ['eor', 'dm', '1999']) for (const c of ledgeEra(e).safety({ cur: 1, max: 2 })) expect(c).not.toMatch(/cloak|ethereal|invis|ghost/i);
   });
 
+  it('each era sends its character back to town at the end (the live gate plays the same accounts)', () => {
+    expect(ledgeEra('eor').home).toBe('@telepoi Holtburg');
+    expect(ledgeEra('dm').home).toBe('@telepoi Holtburg');
+    expect(ledgeEra('1999').home).toBe('@teletown Holtburg');
+  });
+
   it('a landing needs SETTLE_MS of steady ground; the table keeps the take-off and landing frames', () => {
     expect(SETTLE_MS).toBeGreaterThanOrEqual(200);
     const r = arc(pit, PIT);

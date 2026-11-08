@@ -35,6 +35,10 @@ export interface LiveFrameOptions {
   edgeSlide?: boolean;
   /** A landing keeps the jump's velocity and coasts (player/LandingCoast.ts, as main.ts does since 0cff3b710). */
   coast?: boolean;
+  /** The frame's seconds (default 1/60: main.ts at 60 Hz). */
+  dt?: number;
+  /** A flat floor at this height wherever the cells have none (dungeonNav's `ground`): open level ground. */
+  ground?: number;
   /** Every frame after its step: time (ms from the start), landblock-local position, feet, the cell, on the ground. */
   onFrame?: (f: { t: number; x: number; y: number; z: number; cell: number; onGround: boolean }) => void;
 }
@@ -46,18 +50,19 @@ export interface LiveFrameOptions {
 export function liveFramesOver(nav: DungeonNav, landblock: number, at: { x: number; y: number; z: number }, opts: LiveFrameOptions): LiveRun {
   const col = nav.col;
   const BX = ((landblock >>> 24) & 0xff) * 192, BY = ((landblock >>> 16) & 0xff) * 192;
-  const dt = 1 / 60;
+  const dt = opts.dt ?? 1 / 60;
   const stepDown = nav.stepDown;
+  const flat = (fromY: number): number | null => (opts.ground !== undefined && fromY >= opts.ground - 0.05 ? opts.ground : null);
   const sv = {
     dungeonCollision: col, outdoorCollision: col,
     terrain: { getHeightAt: () => null, getTriangleNormalAt: () => null, isWalkable: () => true },
     water: { blockWaterTypeAt: () => null }, creatureObstacles: null, defaultPlayerRadius: col.playerRadius,
     edgeSlide: opts.edgeSlide ?? true, stepDownHeight: stepDown, slide: { slidingNormal: null },
-    dungeonGroundAt: (x: number, z: number, fromY: number) => col.getFloorHeight(x, z, fromY, Infinity),
+    dungeonGroundAt: (x: number, z: number, fromY: number) => col.getFloorHeight(x, z, fromY, Infinity) ?? flat(fromY),
   } as unknown as MovementServices;
   let cell = col.findCellContaining(BX + at.x, BY + at.y, at.z + col.lowerSphereHeight);
   const ground = {
-    floorHeight: (x: number, z: number, fromY: number, maxDrop?: number) => col.getBodyFloorHeight(x, z, fromY, stepDown, maxDrop),
+    floorHeight: (x: number, z: number, fromY: number, maxDrop?: number) => col.getBodyFloorHeight(x, z, fromY, stepDown, maxDrop) ?? flat(fromY),
     cellAt: (x: number, z: number, footY: number) => col.findCellContaining(x, z, footY + col.lowerSphereHeight, cell),
   };
   let x = BX + at.x, z = BY + at.y;
@@ -108,7 +113,7 @@ export function liveFramesOver(nav: DungeonNav, landblock: number, at: { x: numb
     const c = col.findCellContaining(x, z, feet + col.lowerSphereHeight, cell);
     if (c) cell = c;
     opts.onFrame?.({ t: (f + 1) * dt * 1000, x: x - BX, y: z - BY, z: feet, cell: c >>> 0, onGround: !airborne });
-    if (landed && !airborne && f - landedAt > (opts.coast ? 90 : 30)) break;
+    if (landed && !airborne && (f - landedAt) * dt > (opts.coast ? 1.5 : 0.5)) break;
   }
   const feet = airborne ? baseY + offY : lastGround;
   return { x: x - BX, y: z - BY, z: feet, cell: col.findCellContaining(x, z, feet + col.lowerSphereHeight) >>> 0, maxX, minX, maxY, minY, peak, frames: f, landed, landedFrame: landedAt, fell };
