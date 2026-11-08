@@ -428,7 +428,7 @@ export class Connection1999 implements NetConnection {
       this.stopOpenTimeout();
       // A socket that never opened is retail ClientNet::InitAddresses' ID_NetError_CantSocket, as on
       // ClientConnection: without it the page kept "Please Wait" up forever (an unreachable Custom… bridge).
-      if (!this.everOpened) { this.emit({ type: 'error', error: 'Bridge connection error', netErrorId: 'ID_NetError_CantSocket' }); return; }
+      if (!this.everOpened) { this.emit({ type: 'error', error: 'Bridge connection error', netErrorId: 'ID_NetError_CantSocket', openFailed: true }); return; }
       this.emit({ type: 'error', error: 'Bridge connection error' });
     };
     ws.onclose = (ev: CloseEvent) => {

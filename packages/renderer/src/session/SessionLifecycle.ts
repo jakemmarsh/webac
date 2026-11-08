@@ -66,6 +66,20 @@ export const RESUME_DELAYS_MS: readonly number[] = Object.freeze([2000, 5000, 10
 export const RESUME_UNREACHABLE_GRACE_MS = 120_000;
 
 /**
+ * BUG.resume-outage-fast-fail — the least time from one given-back attempt's
+ * start to the next one's, by how many attempts this resume has given back so
+ * far (the last value repeats). An attempt given back (RESUME_UNREACHABLE_GRACE_MS)
+ * used to go again after the same RESUME_DELAYS_MS delay as the one it
+ * replaced; with an open timeout (15 s each) that was slow enough, but a socket
+ * that fails at once with the network out (DNS, ERR_INTERNET_DISCONNECTED,
+ * ERR_NETWORK_CHANGED: under half a second on prod 2026-11-08) would have
+ * opened every 2 s, some 50 sockets in the two minutes. With these, an outage
+ * costs about ten opens in the grace, and a network that comes back is tried
+ * within 15 s. A timed-out open already took 15 s, so it keeps its old delay.
+ */
+export const RESUME_UNREACHABLE_GAPS_MS: readonly number[] = Object.freeze([2000, 5000, 10000, 15000]);
+
+/**
  * BUG.resume-loop-unbounded — how long a session must stay up after a resume
  * brought it back before its next drop gets a fresh RESUME_DELAYS_MS budget.
  * A drop sooner than this continues the budget the resume left (its next
@@ -186,6 +200,9 @@ export class SessionLifecycle {
   private lastBound: ResumeBound | null = null;
   /** When the resume under way first met the network out (noteNetworkOut), for RESUME_UNREACHABLE_GRACE_MS. */
   private networkOutSince: number | null = null;
+  /** BUG.resume-outage-fast-fail — attempts this resume gave back, and when the last granted attempt was due. */
+  private givenBack = 0;
+  private lastAttemptDueAt: number | null = null;
   /** UX.chargen-resume — the drop came in chargen: the resume reopens chargen, not a character. */
   private chargenResume = false;
   /** UX.charselect-resume — the drop came at character select: the resume lands there, nothing entered. */
@@ -229,11 +246,17 @@ export class SessionLifecycle {
     }
     // BUG.resume-hung-socket — an attempt that failed with the network out (offline, or no answer
     // at all) is given back while the grace lasts: the attempts are for a server that isn't ready yet.
+    let gap = 0;
     if (resumable && this.resuming && opts.unreachable && this.resumeAttempts > 0) {
       this.noteNetworkOut(now);
       if (this.unreachableGraceLeftMs(now) > 0) {
         this.resumeAttempts--;
         this.attemptLog.pop();
+        // BUG.resume-outage-fast-fail — given-back attempts back off (start to start), so a socket
+        // that fails at once doesn't open every 2 s; one that took its open timeout keeps its delay.
+        const elapsed = this.lastAttemptDueAt === null ? 0 : Math.max(0, now - this.lastAttemptDueAt);
+        gap = RESUME_UNREACHABLE_GAPS_MS[Math.min(this.givenBack, RESUME_UNREACHABLE_GAPS_MS.length - 1)] - elapsed;
+        this.givenBack++;
       }
     }
     // BUG.resume-loop-unbounded — the page-wide backstop.
@@ -247,7 +270,14 @@ export class SessionLifecycle {
     }
     this.resuming = true;
     this.attemptLog.push(now);
-    return RESUME_DELAYS_MS[this.resumeAttempts++];
+    const delay = Math.max(RESUME_DELAYS_MS[this.resumeAttempts++], gap);
+    this.lastAttemptDueAt = now + delay;
+    return delay;
+  }
+
+  /** BUG.resume-outage-fast-fail — attempts the resume under way gave back while the network was out. */
+  get resumeAttemptsGivenBack(): number {
+    return this.resuming ? this.givenBack : 0;
   }
 
   /**
@@ -313,6 +343,8 @@ export class SessionLifecycle {
     this.resuming = false;
     this.resumeAttempts = 0;
     this.networkOutSince = null;
+    this.givenBack = 0;
+    this.lastAttemptDueAt = null;
     this.chargenResume = false;
     this.charSelectResume = false;
     this.charSelectSelection = undefined;

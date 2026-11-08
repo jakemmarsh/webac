@@ -405,9 +405,11 @@ export interface PreworldEvent {
   /**
    * BUG.resume-hung-socket — 'connect_failed' only: the network was out
    * ('open_timeout': the socket never answered within WS_OPEN_TIMEOUT_MS;
-   * 'offline': navigator.onLine was false). Absent on an ordinary failed open.
+   * 'offline': navigator.onLine was false; 'open_failed', BUG.resume-outage-fast-fail:
+   * the socket failed on its own before it ever opened, ConnectionEvent.openFailed).
+   * Absent on any other client-side failure (a login that timed out).
    */
-  why?: 'open_timeout' | 'offline';
+  why?: 'open_timeout' | 'offline' | 'open_failed';
 }
 
 export interface PreworldReporterOptions {
@@ -829,9 +831,14 @@ export class PreworldReporter {
    * RESUME_HEALTHY_MS of a resume that had used every attempt, so no new
    * resume (the Disconnected screen); 'loop_page_cap': RESUME_PAGE_CAP
    * attempts in ten minutes (SessionLifecycle).
+   *
+   * BUG.resume-outage-fast-fail — 'budget_spent': a resume's attempts ran out
+   * (the Disconnected screen), with `count` = the attempts it gave back while
+   * the network was out (SessionLifecycle.resumeAttemptsGivenBack): 0 means
+   * every failure was counted.
    */
-  resumeEnded(reason: 'character_gone' | 'charselect_restored' | 'loop_chain_spent' | 'loop_page_cap' | ChargenResumeToken): void {
-    this.report('resume_ended', { token: reason });
+  resumeEnded(reason: 'character_gone' | 'charselect_restored' | 'loop_chain_spent' | 'loop_page_cap' | 'budget_spent' | ChargenResumeToken, count?: number): void {
+    this.report('resume_ended', { token: reason, ...(count !== undefined ? { count } : {}) });
   }
 
   /**
@@ -863,7 +870,7 @@ export class PreworldReporter {
    * account, on the login_refused it makes.
    */
   connectionError(
-    event: Pick<ConnectionEvent, 'characterError' | 'serverNetError' | 'netErrorId' | 'openTimedOut'>, token: string | null = null,
+    event: Pick<ConnectionEvent, 'characterError' | 'serverNetError' | 'netErrorId' | 'openTimedOut' | 'openFailed'>, token: string | null = null,
     opts: LoginHolderTelemetry = {},
   ): void {
     const held = { ...(opts.heldByTab === true ? { heldByTab: true as const } : {}), ...holderFields(opts) };
@@ -893,7 +900,7 @@ export class PreworldReporter {
     if (event.netErrorId) {
       if (SERVER_REFUSAL_NET_ERRORS.has(event.netErrorId)) { this.report('login_refused', { token: safeToken(event.netErrorId) }); return; }
       const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
-      const why = event.openTimedOut ? 'open_timeout' : offline ? 'offline' : undefined;
+      const why = event.openTimedOut ? 'open_timeout' : offline ? 'offline' : event.openFailed ? 'open_failed' : undefined;
       this.report('connect_failed', { token: safeToken(event.netErrorId), ...(why ? { why } : {}) });
     }
   }

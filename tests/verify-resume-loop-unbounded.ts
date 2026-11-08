@@ -391,7 +391,8 @@ describe('BUG.resume-loop-unbounded — the page-wide cap', () => {
     // A dozen attempts that found no network inside the grace: each given back.
     for (let i = 0; i < 12; i++) {
       now += 5000;
-      expect(lc.nextResumeDelay({ unreachable: true, now })).toBe(RESUME_DELAYS_MS[0]);
+      // (BUG.resume-outage-fast-fail: given-back retries back off, never sooner than the delay they replace.)
+      expect(lc.nextResumeDelay({ unreachable: true, now })).toBeGreaterThanOrEqual(RESUME_DELAYS_MS[0]);
     }
     expect(lc.resumeBound).toBeNull();
   });

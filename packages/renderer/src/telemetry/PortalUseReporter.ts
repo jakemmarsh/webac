@@ -109,10 +109,28 @@
  * body since the last check (ownMovementTouch: the body moved, no server placement, and keys, the server's
  * walk, a jump / fall or a MoveToState drove it). A touch without it starts no watch and stays a pending
  * touch: the first own step while still touching starts the watch, as that step is the server's collision.
+ *
+ * BUG.portal-rim-brush-telemetry (2026-11-08): the server collides on the path it is TOLD, not on the body.
+ * Prod (trace 02fe566b3f8f77e2, wcid 24230 Deeper Catacombs in the Lair of Death 0x01AA): a walk-in with
+ * dist 2.5, endDist 2.2, closest 1.78, overlapped, playerMoved, no teleport, no WeenieError. The body
+ * touched (bodyTouchesPortal reaches 1.835 m for a human) but the server never collided. Live on local ACE,
+ * same portal: standing still inside the rim (teleloc to 1.70 / 1.78 / 1.85 / 1.92 m) does nothing, backing
+ * straight out from any of them does nothing even at 1.70, strafing along the rim teleports at every one up
+ * to 1.92, and a normal walk-in teleports. ACE sweeps the player between the positions it is sent (each
+ * MoveToState through SetRequestedLocation, GameActionMoveToState.cs:33, and an AutonomousPosition about
+ * once a second; Player_Tick.cs UpdatePlayerPosition) and reports a collision only for a move into or along
+ * the portal's sphere, never one leaving it. A body that reaches the rim between two sent positions and
+ * turns away is a collision the server never had. Retail's DoCollision (0x0058c3a0) sends nothing on a
+ * walk-in either: this is retail behaviour. The watch now follows the path the server was sent
+ * (positionSent / positionPlaced from MovementSync and the server's placements) and, when no segment of it
+ * came within the server's collision reach (sentPathReach: the same Setup spheres bodyTouchesPortal uses
+ * plus SERVER_REACH_TOLERANCE_M), a silent walk-in ends as `portal_rim_brush` (every field kept, plus
+ * `sentClosest` / `sentReached`). A silent walk-in whose sent path DID come inside stays `portal_use_failed`.
+ * Era-neutral: ACE, GDLE and the AC1999 server all learn our position only from these two messages.
  */
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 
-export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_cancelled', 'portal_used'] as const;
+export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_cancelled', 'portal_rim_brush', 'portal_used'] as const;
 export type PortalOutcome = typeof PORTAL_OUTCOMES[number];
 
 /** How the player tried the portal. */
@@ -271,6 +289,77 @@ export function bodyTouchesPortal(
   return false;
 }
 
+/** A point in the server's frame: east, north, up (m), landblock × 192 m + the cell-local offset. */
+export interface SentPoint { x: number; y: number; z: number }
+
+/** The server frame of a cell id + its local origin (a dungeon's cells share their landblock's frame). */
+export function serverFramePoint(cellId: number, x: number, y: number, z: number): SentPoint {
+  return { x: ((cellId >>> 24) & 0xff) * 192 + x, y: ((cellId >>> 16) & 0xff) * 192 + y, z };
+}
+
+/**
+ * BUG.portal-rim-brush-telemetry — how much wider the server's collision reaches than bodyTouchesPortal
+ * (progress.md 2026-11-03: about 0.1 m; live 2026-11-08, a strafe along the rim of 24230 teleported at 1.92 m
+ * against the 1.835 m body touch).
+ */
+export const SERVER_REACH_TOLERANCE_M = 0.1;
+/**
+ * A sent segment that starts nearest the portal and leaves it at more than this cosine to the outward
+ * direction is a move out of the overlap: ACE reports no collision for it (live 2026-11-08: backing straight
+ * out from 1.70 m never teleported; a strafe along the rim, cosine ~0, always did).
+ */
+export const SENT_OUTWARD_COS = 0.5;
+
+/** One sent segment against a portal: its nearest horizontal approach, and whether the server's sweep reaches the portal on it. */
+export interface SentSegmentReach { closest: number; reached: boolean }
+
+/**
+ * The server's swept move from `a` to `b` (two positions it was sent, body origins) against the portal at
+ * `portal`: `closest` = the segment's nearest horizontal approach to the portal's centre (comparable with
+ * the body's `closest`); `reached` = some pair of the body's and the portal's Setup spheres (the shapes
+ * bodyTouchesPortal tests, on the vertical axis) comes within their radius sum + SERVER_REACH_TOLERANCE_M on
+ * the way, moving in or along (a chord that dips inside counts even with both ends outside), not leaving
+ * an overlap it started in. A segment with no length is no move (standing still collides with nothing).
+ * With either shape unknown, the portal's part-array `fallbackReach` stands in, horizontally.
+ */
+export function sentPathReach(
+  a: SentPoint, b: SentPoint, portal: SentPoint,
+  body: readonly { z: number; radius: number }[] | null | undefined,
+  portalSpheres: readonly { z: number; radius: number }[] | null | undefined,
+  fallbackReach: number,
+): SentSegmentReach {
+  const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+  // Horizontal nearest approach.
+  const h2 = dx * dx + dy * dy;
+  const th = h2 > 0 ? Math.min(1, Math.max(0, ((portal.x - a.x) * dx + (portal.y - a.y) * dy) / h2)) : 0;
+  const closest = Math.hypot(a.x + th * dx - portal.x, a.y + th * dy - portal.y);
+  const len = Math.hypot(dx, dy, dz);
+  if (!(len > 1e-4)) return { closest, reached: false };
+  const pairs: { off: number; r: number; horizontal: boolean }[] = [];
+  if (body?.length && portalSpheres?.length) {
+    for (const s of body) for (const p of portalSpheres) pairs.push({ off: p.z - s.z, r: s.radius + p.radius + SERVER_REACH_TOLERANCE_M, horizontal: false });
+  } else {
+    pairs.push({ off: 0, r: Math.max(0, fallbackReach) + SERVER_REACH_TOLERANCE_M, horizontal: true });
+  }
+  let reached = false;
+  for (const pr of pairs) {
+    // The body sphere's centre moves a → b (offset by its height); the portal sphere's centre is fixed.
+    const qx = portal.x - a.x, qy = portal.y - a.y, qz = pr.horizontal ? 0 : portal.z + pr.off - a.z;
+    const sz = pr.horizontal ? 0 : dz;
+    const l2 = dx * dx + dy * dy + sz * sz;
+    if (!(l2 > 1e-8)) continue;
+    const t = Math.min(1, Math.max(0, (qx * dx + qy * dy + qz * sz) / l2));
+    const d = Math.hypot(a.x + t * dx - portal.x, a.y + t * dy - portal.y, pr.horizontal ? 0 : a.z + t * dz - (portal.z + pr.off));
+    if (d > pr.r) continue;
+    if (t > 0) { reached = true; break; }
+    // Nearest at the start: a move along the rim counts, a move out of the overlap does not.
+    const out = Math.hypot(qx, qy, qz);
+    const cos = out > 1e-6 ? -(qx * dx + qy * dy + qz * sz) / (out * Math.sqrt(l2)) : 1;
+    if (cos <= SENT_OUTWARD_COS) { reached = true; break; }
+  }
+  return { closest, reached };
+}
+
 /** A server chat line worth a template: it speaks of portals or teleports. */
 const PORTAL_CHAT = /portal|teleport|destination|quest|recall|summon/i;
 
@@ -300,6 +389,11 @@ export interface PortalSnapshot {
   rel: { dx: number; dy: number; dz: number } | null;
   playerCell: number | null;
   portalCell: number | null;
+  /** BUG.portal-rim-brush-telemetry — the portal's origin in the server's frame (serverFramePoint); null/absent = unknown. */
+  portalAt?: SentPoint | null;
+  /** The player's and the portal's Setup spheres (the shapes bodyTouchesPortal tests); absent = unknown. */
+  bodySpheres?: readonly { z: number; radius: number }[] | null;
+  portalSpheres?: readonly { z: number; radius: number }[] | null;
 }
 
 interface Ids { era: string; server: string | null; trace: string; build: string }
@@ -309,8 +403,10 @@ export interface PortalUseFailedEvent extends Ids {
    * `portal_refused`: the server answered the try with a refusal (a WeenieError, a portal chat line).
    * `portal_cancelled`: no refusal, and the player's own movement event went out while a Use was unanswered
    * (PORTAL_CANCELLED: ACE ends the walk and the use on it).
+   * `portal_rim_brush`: a silent walk-in whose SENT path never came within the server's collision reach
+   * (BUG.portal-rim-brush-telemetry): the body brushed the rim between positions the server was told.
    */
-  outcome: 'portal_use_failed' | 'portal_refused' | 'portal_cancelled';
+  outcome: 'portal_use_failed' | 'portal_refused' | 'portal_cancelled' | 'portal_rim_brush';
   trigger: PortalTrigger;
   wcid: number;
   itemType: number;
@@ -371,7 +467,16 @@ export interface PortalUseFailedEvent extends Ids {
   waitedMs: number;
   /** A refusal that came before the watch began (PORTAL_EARLY_REFUSAL_MS): how many ms before; null = none. */
   refusalLeadMs: number | null;
+  /**
+   * BUG.portal-rim-brush-telemetry — the nearest horizontal approach (m 0.01) of the path the server was sent
+   * (segments between consecutive MoveToState / AutonomousPosition positions, from the one before the watch
+   * began), and whether it came within the server's collision reach (sentPathReach). null = no segment.
+   */
+  sentClosest: number | null;
+  sentReached: boolean | null;
 }
+
+export const PORTAL_RIM_BRUSH = 'portal_rim_brush' as const;
 
 export interface PortalUsedEvent extends Ids {
   outcome: 'portal_used';
@@ -429,6 +534,8 @@ interface Watch {
   /** A Use went out and no UseDone has come back since. */
   useOutstanding: boolean;
   refusalLeadMs: number | null;
+  sentClosest: number | null;
+  sentReached: boolean;
 }
 
 /** A portal refusal heard while no watch ran (BUG.portal-refusal-before-watch). */
@@ -461,6 +568,9 @@ export class PortalUseReporter {
   private overlapping: Set<number> | null = null;
   /** A portal refusal that came with no watch running; the next watch to start within PORTAL_EARLY_REFUSAL_MS takes it. */
   private early: EarlyRefusal | null = null;
+  /** BUG.portal-rim-brush-telemetry — the last two points of the path the server was told (prev → last is its latest swept move). */
+  private prevSent: SentPoint | null = null;
+  private lastSent: SentPoint | null = null;
 
   constructor(private readonly opts: PortalUseReporterOptions) {
     this.now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
@@ -541,6 +651,36 @@ export class PortalUseReporter {
     if (w.closest === null || horizontalM < w.closest) w.closest = horizontalM;
   }
 
+  /**
+   * A position went out to the server (MoveToState or AutonomousPosition, server frame): the server sweeps the
+   * player from the last one to it (BUG.portal-rim-brush-telemetry).
+   */
+  positionSent(p: SentPoint): void {
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) return;
+    const pt = { x: p.x, y: p.y, z: p.z };
+    if (this.lastSent) this.sentSegment(this.lastSent, pt);
+    this.prevSent = this.lastSent;
+    this.lastSent = pt;
+  }
+
+  /** The server placed the player (a teleport arrival, a forced position): the sent path starts again there, unswept. */
+  positionPlaced(p: SentPoint | null): void {
+    this.prevSent = null;
+    this.lastSent = p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z) ? { x: p.x, y: p.y, z: p.z } : null;
+  }
+
+  /**
+   * One swept move the server was sent, against the watched portal. A use's watch carries it too (evidence for a
+   * use the player then walked into themselves), but only a walk-in is judged on it (the server walks a use in).
+   */
+  private sentSegment(a: SentPoint, b: SentPoint): void {
+    const w = this.watch;
+    if (!w || !w.snap.portalAt) return;
+    const r = sentPathReach(a, b, w.snap.portalAt, w.snap.bodySpheres, w.snap.portalSpheres, w.snap.reach);
+    if (w.sentClosest === null || r.closest < w.sentClosest) w.sentClosest = r.closest;
+    if (r.reached) w.sentReached = true;
+  }
+
   /** The server moved the player (a MoveTo / MoveToPosition, our own movement event). */
   serverMovement(): void {
     const w = this.watch;
@@ -591,6 +731,8 @@ export class PortalUseReporter {
   teleported(): void {
     this.overlapping = null;
     this.early = null;
+    this.prevSent = null;
+    this.lastSent = null;
     const w = this.watch;
     this.watch = null;
     if (!w) return;
@@ -608,6 +750,8 @@ export class PortalUseReporter {
     this.watch = null;
     this.overlapping = null;
     this.early = null;
+    this.prevSent = null;
+    this.lastSent = null;
   }
 
   /**
@@ -634,7 +778,11 @@ export class PortalUseReporter {
     this.failedSent++;
     const end = safe(() => this.opts.snapshot(w.guid), null);
     const s = w.snap;
-    const outcome = this.refused(w) ? PORTAL_REFUSED : w.trigger === 'use' && w.movesSent > 0 ? PORTAL_CANCELLED : 'portal_use_failed';
+    const outcome = this.refused(w) ? PORTAL_REFUSED
+      : w.trigger === 'use' && w.movesSent > 0 ? PORTAL_CANCELLED
+      // BUG.portal-rim-brush-telemetry — the server was never sent a move that reaches the portal.
+      : w.trigger === 'walk_in' && w.sentClosest !== null && !w.sentReached ? PORTAL_RIM_BRUSH
+      : 'portal_use_failed';
     this.post({
       outcome, ...this.ids(), trigger: w.trigger,
       wcid: u32(s.wcid), itemType: u32(s.itemType), descFlags: u32(s.descFlags), physicsState: u32(s.physicsState),
@@ -670,6 +818,8 @@ export class PortalUseReporter {
       chatTemplate: w.chatTemplate,
       waitedMs: Math.max(0, Math.round(at - w.startedAt)),
       refusalLeadMs: w.refusalLeadMs,
+      sentClosest: w.sentClosest === null ? null : r2(w.sentClosest),
+      sentReached: w.sentClosest === null ? null : w.sentReached,
     });
   }
 
@@ -702,7 +852,10 @@ export class PortalUseReporter {
       useDone: null, errors: [], chatLines: 0, chatType: null, chatTemplate: null,
       sends: 0, busyHeld: 0, serverMoves: 0, keysAtSend: null, movesSent: 0, useDones: 0,
       firstSendAt: null, firstUseDoneMs: null, useOutstanding: false, refusalLeadMs: null,
+      sentClosest: null, sentReached: false,
     };
+    // The server's latest swept move (into the last position sent) is part of this walk-in's path.
+    if (this.prevSent && this.lastSent) this.sentSegment(this.prevSent, this.lastSent);
     // A portal refusal that beat the watch (BUG.portal-refusal-before-watch) is this try's answer: taken once.
     const e = this.early;
     this.early = null;

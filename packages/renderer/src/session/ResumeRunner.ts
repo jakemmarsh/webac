@@ -40,6 +40,27 @@ export function windowOnlineSource(w: {
   };
 }
 
+/**
+ * BUG.resume-hung-socket / BUG.resume-outage-fast-fail — whether a resume
+ * attempt's failure means the network (or the bridge) could not be reached,
+ * so it is given back while RESUME_UNREACHABLE_GRACE_MS lasts
+ * (SessionLifecycle.nextResumeDelay): the browser was offline, or the
+ * attempt's socket never opened at all, whether it timed out
+ * (`openTimedOut`) or failed on its own (`openFailed`). On a real outage
+ * with Wi-Fi still associated, Chrome fails a WebSocket open in well under a
+ * second (DNS, ERR_INTERNET_DISCONNECTED, ERR_NETWORK_CHANGED) while
+ * navigator.onLine stays true (prod 2026-11-08: a ~65 s outage spent the
+ * whole char-select resume in 38 s). A server's answer, a refusal included,
+ * comes on a socket that opened, so it is never this.
+ */
+export function attemptFoundNoNetwork(
+  event: { openTimedOut?: boolean; openFailed?: boolean; serverNetError?: unknown },
+  offline: boolean,
+): boolean {
+  if (event.serverNetError) return false;
+  return offline || event.openTimedOut === true || event.openFailed === true;
+}
+
 /** After 'online', the wait before connecting: the interface is up, its DNS and routes a moment later. */
 export const RESUME_ONLINE_SETTLE_MS = 1000;
 

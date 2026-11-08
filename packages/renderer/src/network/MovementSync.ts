@@ -519,6 +519,12 @@ export class MovementSync {
   moveToStatesSent = 0;
   /** Each MoveToState sent (main.ts: the portal telemetry counts those sent while a Use is unanswered). */
   onMoveToStateSent: (() => void) | null = null;
+  /**
+   * BUG.portal-rim-brush-telemetry — every position that went out (MoveToState, a soul-emote MoveToState,
+   * AutonomousPosition): cell + origin in that cell's landblock frame. The server sweeps the player between
+   * consecutive ones, so their path is where it can collide (main.ts: the portal telemetry).
+   */
+  onPositionSent: ((frame: { cellId: number; x: number; y: number; z: number }) => void) | null = null;
 
   private sendMoveToState(state: MovementState, pos: PlayerPosition, now: number): void {
     this.lastSentTime = now; // SendMovementEvent stamps last_sent_position_time
@@ -533,13 +539,12 @@ export class MovementSync {
       turnSpeed: state.turnSpeed ?? 1,
       commands: [],
     };
-    const payload = buildMoveToStatePayload(motion, {
-      ...this.buildPosition(pos.moveToStateYaw === undefined ? pos : { ...pos, playerYaw: pos.moveToStateYaw }),
-      standingLongJump: state.standingLongJump === true,
-    });
+    const fields = this.buildPosition(pos.moveToStateYaw === undefined ? pos : { ...pos, playerYaw: pos.moveToStateYaw });
+    const payload = buildMoveToStatePayload(motion, { ...fields, standingLongJump: state.standingLongJump === true });
     const msg = serializeGameAction(this.actionSequence(), GameActionType.MoveToState, payload);
     this.connection.sendMessage(msg, GameMessageGroup.SmartboxQueue);
     this.onMoveToStateSent?.();
+    this.positionWentOut(fields);
   }
 
   /**
@@ -610,10 +615,19 @@ export class MovementSync {
       turnCommand: 0,
       commands: [{ motionCommand: motion, sequence: this.motionSequence, autonomous: true, speed: 1.0 }],
     };
-    const payload = buildMoveToStatePayload(motionState, this.buildPosition(pos));
+    const fields = this.buildPosition(pos);
+    const payload = buildMoveToStatePayload(motionState, fields);
     const msg = serializeGameAction(this.actionSequence(), GameActionType.MoveToState, payload);
     this.connection.sendMessage(msg, GameMessageGroup.SmartboxQueue);
     this.onMoveToStateSent?.();
+    this.positionWentOut(fields);
+  }
+
+  /** onPositionSent, guarded: a listener's throw never breaks a send. */
+  private positionWentOut(fields: MovementPositionFields): void {
+    const cb = this.onPositionSent;
+    if (!cb) return;
+    try { cb({ cellId: fields.landblockId >>> 0, x: fields.x, y: fields.y, z: fields.z }); } catch { /* telemetry only */ }
   }
 
   // ─── AutonomousPosition ─────────────────────────────────────
@@ -631,6 +645,7 @@ export class MovementSync {
       contactPlane: this.contactPlaneOf(pos),
     };
     this.autonomousPositionsSent++;
+    this.positionWentOut(fields);
   }
 
   /** The last AutonomousPosition's position (null before the first) — for probes/tests. */

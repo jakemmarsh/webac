@@ -30,3 +30,4 @@ tools/gdle/run/
 tools/classicace/run/
 tools/gdl-classic/run/
 /dat-sets/
+tools/monitor/github-seen.tsv

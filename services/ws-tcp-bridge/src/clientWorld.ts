@@ -240,15 +240,19 @@ function perfFields(b: Record<string, unknown>): Partial<ClientFirstMinuteEvent>
  * and every failure carries sends / busyHeld / serverMoves / keysAtSend / movesSent / useDones / firstUseDoneMs.
  * BUG.portal-refusal-before-watch: a portal refusal that came just before the watch began (the server's
  * collision beat the page's 100 ms touch check) is the watch's answer; `refusalLeadMs` says how early.
+ * BUG.portal-rim-brush-telemetry: a silent walk-in whose path as SENT to the server (MoveToState /
+ * AutonomousPosition segments) never came within the server's collision reach is `portal_rim_brush` (the body
+ * brushed the rim between positions; the server collides on the sent path only); every failure carries
+ * `sentClosest` (m) / `sentReached`.
  */
-export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_cancelled', 'portal_used'] as const;
+export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_cancelled', 'portal_rim_brush', 'portal_used'] as const;
 export const PORTAL_TRIGGERS = ['use', 'walk_in'] as const;
 export const PORTAL_USE_HELD = ['stale', 'busy', 'decided'] as const;
 /** A portal watch's longest wait (renderer PORTAL_MAX_WAIT_MS 30 s, with slack for a late tick). */
 const PORTAL_WAIT_MS = 120_000;
 
 export interface ClientPortalUseFailedEvent extends WorldIds {
-  outcome: 'portal_use_failed' | 'portal_refused' | 'portal_cancelled';
+  outcome: 'portal_use_failed' | 'portal_refused' | 'portal_cancelled' | 'portal_rim_brush';
   trigger: typeof PORTAL_TRIGGERS[number] | null;
   wcid: number | null;
   itemType: number | null;
@@ -289,6 +293,9 @@ export interface ClientPortalUseFailedEvent extends WorldIds {
   waitedMs: number | null;
   /** A refusal that came before the watch began: ms before (renderer PORTAL_EARLY_REFUSAL_MS 2 s). */
   refusalLeadMs: number | null;
+  /** The sent path's nearest horizontal approach to the portal (m 0.01), and whether it came within the server's collision reach. */
+  sentClosest: number | null;
+  sentReached: boolean | null;
 }
 
 export interface ClientPortalUsedEvent extends WorldIds {
@@ -367,6 +374,8 @@ function sanitizePortal(outcome: typeof PORTAL_OUTCOMES[number], ids: WorldIds, 
     chatTemplate: match(b.chatTemplate, /^[\x20-\x2f\x3a-\x7e]{1,96}$/),
     waitedMs: uint(b.waitedMs, PORTAL_WAIT_MS),
     refusalLeadMs: uint(b.refusalLeadMs, 10_000),
+    sentClosest: metres(b.sentClosest, 100_000, 2),
+    sentReached: bool(b.sentReached),
   };
 }
 

@@ -172,7 +172,9 @@ function wireLikeMain(conn: { on(cb: (e: ConnectionEvent) => void): void }, r: P
 
 function expectClean(h: Harness): void {
   for (const s of h.sent) {
-    expect(Object.keys(s.body).sort()).toEqual(SCHEMA_KEYS);
+    // BUG.resume-outage-fast-fail — a connect_failed from a socket that never opened carries its cause.
+    const optional = s.body.outcome === 'connect_failed' && s.body.why === 'open_failed' ? ['why'] : [];
+    expect(Object.keys(s.body).filter((k) => !optional.includes(k)).sort()).toEqual(SCHEMA_KEYS);
     expect(s.raw).not.toContain(ACCOUNT);
     expect(s.raw).not.toContain(PASSWORD);
     expect(s.raw).not.toContain('Secretname');
@@ -277,7 +279,7 @@ describe('end of retail (ACE) — ClientConnection', () => {
     wireLikeMain(conn, h.r);
     conn.connect(ACCOUNT, PASSWORD);
     FakeSocket.sockets[0].onerror?.();
-    expect(h.sent.map(s => [s.body.outcome, s.body.token, s.body.sinceLoginMs])).toEqual([['connect_failed', 'ID_NetError_CantSocket', null]]);
+    expect(h.sent.map(s => [s.body.outcome, s.body.token, s.body.sinceLoginMs, s.body.why])).toEqual([['connect_failed', 'ID_NetError_CantSocket', null, 'open_failed']]);
     expectClean(h);
   });
 });

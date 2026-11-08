@@ -414,7 +414,7 @@ import { armDropResume, handleUnexpectedDrop, resumeAttemptRefusalIsFinal } from
 import { SessionLiveness, sessionDropped, liveSessionSocketFailed, characterListRole } from './session/SessionLiveness.js';
 import { ChargenDraftStore, decideChargenDraft, CHARGEN_DRAFT_OFFER_TEXT, type ChargenDraftOwner } from './session/ChargenResume.js';
 import { DrainHandover } from './session/DrainHandover.js';
-import { ResumeRunner, windowOnlineSource } from './session/ResumeRunner.js';
+import { ResumeRunner, attemptFoundNoNetwork, windowOnlineSource } from './session/ResumeRunner.js';
 import { AccountTabGuard, accountSessionKey, openSessionChannel, type LogoutReason } from './session/AccountTabGuard.js';
 import { InWorldEnterWait, LOGGED_OUT_FOR_OTHER_TAB_TEXT } from './session/InWorldHolder.js';
 import { LoginHolderWait, LOGGED_OUT_FOR_LOGIN_TEXT, stoodDownForOtherTabText } from './session/LoginHolder.js';
@@ -454,7 +454,7 @@ import { AutomationReporter } from './telemetry/AutomationReporter.js';
 import { RefusalReporter, scrubNames } from './telemetry/RefusalReporter.js';
 import { knownObjectNames, pendingRequestDetail, castRefusalDetail, selectionRefusalDetail, CastPressTracker, type RefusalDetail, type PlacedObject } from './telemetry/RefusalTemplates.js';
 import { ObjsendReporter, countReleasedInView, summarizeObjects, type ObjsendSnapshot } from './telemetry/ObjsendReporter.js';
-import { PortalUseReporter, bodyTouchesPortal, isPortalObject, overlapsPortal, ownMovementTouch, type PortalSnapshot, type PortalUseHeld } from './telemetry/PortalUseReporter.js';
+import { PortalUseReporter, bodyTouchesPortal, isPortalObject, overlapsPortal, ownMovementTouch, serverFramePoint, type PortalSnapshot, type PortalUseHeld } from './telemetry/PortalUseReporter.js';
 import { accountTag, browserId, realLocalStorage } from './telemetry/LoginTags.js';
 import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, serverIdFromUrl, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
@@ -3750,6 +3750,10 @@ async function main() {
       wcid: o.weenieClassId, itemType: o.itemType, descFlags: o.objectDescFlags, physicsState: o.physicsState,
       useRadius: o.useRadius, reach: fixtureReach(o), rel,
       playerCell: me?.cellId ? me.cellId >>> 0 : null, portalCell: p?.landblock ? p.landblock >>> 0 : null,
+      // BUG.portal-rim-brush-telemetry — what the sent path is judged against (the shapes bodyTouchesPortal tests).
+      portalAt: p && p.landblock ? serverFramePoint(p.landblock, p.x, p.y, p.z) : null,
+      bodySpheres: serverObjectManager?.getObject(aceCharGuid ?? myPlayerGuid ?? 0)?.physicsSpheres ?? null,
+      portalSpheres: o.physicsSpheres ?? null,
     };
   }
   /** TELEMETRY.objsend-diagnostics — when handleTeleportToPosition last placed the player (performance.now ms); null = not this session. */
@@ -6146,6 +6150,7 @@ async function main() {
   function handleTeleportToPosition(landblock: number, x: number, y: number, z: number, rw: number, rx: number, ry: number, rz: number): void {
     lastTeleportArrivalAt = performance.now();
     portalCheckPlaced = true; // BUG.portal-walkin-without-moving — an arrival is no walk-in
+    portalUseReporter?.positionPlaced(serverFramePoint(landblock, x, y, z)); // BUG.portal-rim-brush-telemetry
     // ASSESS — a teleport supersedes any in-flight smooth correction.
     activeCorrection = null;
     playerStepSmoother.reset();
@@ -6389,7 +6394,11 @@ async function main() {
       { moving, forced },
     );
     // BUG.portal-walkin-without-moving — a server placement is no walk-in.
-    if (decision.action !== 'ignore') portalCheckPlaced = true;
+    if (decision.action !== 'ignore') {
+      portalCheckPlaced = true;
+      // BUG.portal-rim-brush-telemetry — the server's own placement starts the sent path again, unswept.
+      portalUseReporter?.positionPlaced(serverFramePoint(landblock, x, y, z));
+    }
     switch (decision.action) {
       case 'ignore':
         return;
@@ -8931,9 +8940,13 @@ async function main() {
     log: (text) => console.log(text),
   });
   const scheduleResume = (opts: { unreachable?: boolean } = {}): boolean => {
+    const wasResuming = sessionLifecycle.resumingAfterDrop;
+    const givenBack = sessionLifecycle.resumeAttemptsGivenBack;
     const delay = sessionLifecycle.nextResumeDelay({ unreachable: opts.unreachable });
     if (delay === null) {
       resumeRunner.cancel();
+      // BUG.resume-outage-fast-fail — a resume whose attempts ran out, and how many it gave back to the outage.
+      if (wasResuming && !sessionLifecycle.resumeBound) preworldReporter?.resumeEnded('budget_spent', givenBack);
       // BUG.resume-loop-unbounded — a drop soon after a resume came back (or too many resumes in
       // ten minutes): no fresh budget, the Disconnected screen, and the reason in telemetry.
       const bound = sessionLifecycle.resumeBound;
@@ -9256,6 +9269,8 @@ async function main() {
     movementSync.stanceProvider = () => playerAnimated?.motionManager.currentStyleId ?? 0;
     // BUG.portal-use-held-keys — a MoveToState while a Use is unanswered cancels ACE's walk (PORTAL_CANCELLED).
     movementSync.onMoveToStateSent = () => { portalCheckMoveSent = true; portalUseReporter?.movementSent(); };
+    // BUG.portal-rim-brush-telemetry — the path the server sweeps the player along (where it can collide with a portal).
+    movementSync.onPositionSent = (f) => portalUseReporter?.positionSent(serverFramePoint(f.cellId, f.x, f.y, f.z));
     // BUG.stale-surface-cell-sent — a position about to name a building room the body is nowhere near went out
     // with the land cell instead: drop the room (the per-frame scan finds the real one) and report it once per
     // cell (ErrorReporter dedupes repeats into a count and caps the page's reports), so prod shows a recurrence.
@@ -19821,8 +19836,9 @@ async function main() {
                 raiseServerDied(attemptNotice.text);
                 break;
               }
-              // BUG.resume-hung-socket — no network at all (offline, or no answer to the socket): not counted while the grace lasts.
-              const unreachable = event.openTimedOut === true || navigator.onLine === false;
+              // BUG.resume-hung-socket / BUG.resume-outage-fast-fail — no network at all (offline, or a socket
+              // that never opened, timed out or failed at once): not counted while the grace lasts.
+              const unreachable = attemptFoundNoNetwork(event, navigator.onLine === false);
               if (!scheduleResume({ unreachable })) raiseServerDied();
               break;
             }

@@ -57,9 +57,11 @@ export const LOGIN_RETRY_KINDS = ['proven', 'first_time', 'case_verbatim', 'case
  * BUG.resume-hung-socket — a 'connect_failed''s cause when the page knows the
  * network was out: 'open_timeout' (the socket stayed CONNECTING until the
  * client's open timeout, renderer network WsOpenTimeout.ts) or 'offline'
- * (navigator.onLine was false). Absent on an ordinary failed open.
+ * (navigator.onLine was false). BUG.resume-outage-fast-fail: 'open_failed' (the
+ * socket failed on its own before it ever opened: DNS, no route, refused /
+ * reset, ERR_INTERNET_DISCONNECTED). Absent on any other client-side failure.
  */
-export const CONNECT_FAILED_CAUSES = ['open_timeout', 'offline'] as const;
+export const CONNECT_FAILED_CAUSES = ['open_timeout', 'offline', 'open_failed'] as const;
 /** OBS.login-refusal-identity — whether the page asked its other tabs who holds the refused account. */
 export const HOLDER_QUERY_STATES = ['ran', 'skipped', 'no_channel'] as const;
 /** The outcomes that carry acct / bid / tab. */

@@ -274,6 +274,15 @@ export interface ConnectionEvent {
    * packets). A 'disconnected' follows, as after any socket that never opened.
    */
   openTimedOut?: boolean;
+  /**
+   * BUG.resume-outage-fast-fail — on type==='error' with ID_NetError_CantSocket:
+   * the socket failed on its own before it ever opened (the browser's error,
+   * not the open timeout): no bridge took it (DNS, no route, the connection
+   * refused or reset, ERR_INTERNET_DISCONNECTED / ERR_NETWORK_CHANGED). A
+   * server's refusal comes as a message on an OPEN socket, never this way.
+   * A 'disconnected' follows.
+   */
+  openFailed?: boolean;
 }
 
 /** A NetError optional header's payload (`NetError::UnPack @ 004114a0`: u32 m_stringID, u32 m_tableID). */
@@ -986,7 +995,7 @@ export class ClientConnection {
         console.warn(`[AC:NET] Bridge not reachable at ${this.url} — start: npx tsx services/ws-tcp-bridge/src/bridge.ts`);
         // CORE.17.k.b — the browser client's local socket layer could not be
         // opened: retail ClientNet::InitAddresses' ID_NetError_CantSocket.
-        this.emit({ type: 'error', error: 'WebSocket error', netErrorId: 'ID_NetError_CantSocket' });
+        this.emit({ type: 'error', error: 'WebSocket error', netErrorId: 'ID_NetError_CantSocket', openFailed: true });
         return;
       }
       this.emit({ type: 'error', error: 'WebSocket error' });
