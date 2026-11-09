@@ -99,6 +99,24 @@ export interface EraProfile {
    * (end-of-retail name → the era exe's), same rects and order (EraFeatures MapPanelRules.notes).
    */
   mapNoteRenames?: Readonly<Record<string, string>>;
+  /**
+   * BUG.ac1999-relogin-resume-pingpong — the era's server ends an account's
+   * live session without a word when the account logs in from another
+   * endpoint, so that session sees only silence (server_silent / link_dead).
+   * A session an automatic resume brought back that goes silent again soon
+   * after is then not resumed (SessionLifecycle.RESUME_SILENT_AGAIN_WINDOW_MS):
+   * the resume would take the account back and the two sides would take it
+   * from each other forever. The AC1999 server: Network.cpp
+   * CNetwork::AcceptClientLogin ("Re-connect for account … dropping stale
+   * session", CClient::Kill, nothing sent to the old client). Not ACE or
+   * ClassicACE (the old session gets CharacterError.Logon,
+   * AuthenticationHandler.cs `account_login_boots_in_use`), not GDL Classic
+   * Dereth (a second login from another endpoint is ignored, Network.cpp
+   * AcceptClientLogin; port 9000 gets STR_LOGIN_ACCOUNT_ONLINE), not Seedsow
+   * (KickClient sends 0xF7DC AccountBooted first): those refuse in words, and
+   * a refusal never resumes.
+   */
+  reloginKillsSilently?: boolean;
 }
 
 export const EOR_ERA_ID = 'eor';
@@ -224,6 +242,7 @@ export const ERA_PROFILES: Readonly<Record<string, EraProfile>> = Object.freeze(
     },
     files: { worldPortal: 'portal.dat', cell: 'cell.dat' },
     source: 'the November 1999 retail CD (portal.dat and cell.dat)',
+    reloginKillsSilently: true,
   },
 });
 

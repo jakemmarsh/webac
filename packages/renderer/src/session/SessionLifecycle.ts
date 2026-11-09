@@ -124,8 +124,34 @@ export const RESUME_HEALTHY_MS = 20_000;
 export const RESUME_PAGE_CAP = RESUME_DELAYS_MS.length * 3;
 export const RESUME_PAGE_CAP_WINDOW_MS = 10 * 60_000;
 
-/** Why the resume a drop asked for was refused before its budget's own end (BUG.resume-loop-unbounded), for logs and telemetry. */
-export type ResumeBound = 'chain' | 'page_cap';
+/**
+ * BUG.ac1999-relogin-resume-pingpong — how long a session an automatic resume
+ * brought back stays "resumed" for the silent-drop rule (nextResumeDelay's
+ * `silentRelogin`): a drop of it to server silence within this window, on a
+ * server that ends an account's session without a word when the account logs
+ * in from elsewhere (EraProfile.reloginKillsSilently, the AC1999 server:
+ * Network.cpp AcceptClientLogin → CClient::Kill), gets no new resume.
+ *
+ * Proven live 2026-11-08 (local AC1999 server, account lgate99, two
+ * browsers): the second login killed the first silently, the first's quiet
+ * resume took the account back and killed the second, and so on, a takeover
+ * every ~40 s forever. Retail 1999 had no resume: the killed client showed the
+ * Disconnected screen. Prod trace 36bd770743abbfc9 is the same against a
+ * client outside webAC: the server cut our resumed session 56-58 s after each
+ * resume.
+ *
+ * 10 min: the other side of a takeover is a person at another client (the
+ * real 1999 client, another browser) who sees the Disconnected screen there
+ * and logs back in, which takes seconds to a few minutes; their next kill of
+ * our resumed session falls well inside it, while a silent drop more than
+ * 10 min after a resume (a server restart, a hiccup) is a new drop and
+ * resumes as before. It matches RESUME_PAGE_CAP_WINDOW_MS. A false stop costs
+ * one Disconnected screen and a manual login, what retail always showed.
+ */
+export const RESUME_SILENT_AGAIN_WINDOW_MS = 10 * 60_000;
+
+/** Why the resume a drop asked for was refused before its budget's own end (BUG.resume-loop-unbounded, BUG.ac1999-relogin-resume-pingpong), for logs and telemetry. */
+export type ResumeBound = 'chain' | 'page_cap' | 'silent_again';
 
 /** Wait before re-asking to enter after a "character still in the world" refusal (CharacterError 0x0D). */
 export const IN_WORLD_RETRY_DELAY_MS = 3000;
@@ -195,6 +221,12 @@ export class SessionLifecycle {
    */
   private restoredAttempts = 0;
   private restoredAt: number | null = null;
+  /**
+   * BUG.ac1999-relogin-resume-pingpong — when the live session was brought back
+   * by an automatic resume (noteResumeRestored); null once a session the player
+   * started, a logout or a give-up (endResume) replaced it.
+   */
+  private resumedSessionAt: number | null = null;
   /** When each automatic attempt of this page was scheduled, for RESUME_PAGE_CAP. */
   private attemptLog: number[] = [];
   private lastBound: ResumeBound | null = null;
@@ -231,10 +263,20 @@ export class SessionLifecycle {
    * to resume (no character, a deliberate logout) or the budget is spent —
    * then show the Disconnected screen.
    */
-  nextResumeDelay(opts: { unreachable?: boolean; now?: number } = {}): number | null {
+  nextResumeDelay(opts: { unreachable?: boolean; silentRelogin?: boolean; now?: number } = {}): number | null {
     const now = opts.now ?? Date.now();
     const resumable = this.chargenResume || this.charSelectResume || (this.lastEnteredGuid !== null && !this.manualLogout);
     this.lastBound = null;
+    // BUG.ac1999-relogin-resume-pingpong — the session a resume brought back went silent again, on a
+    // server that ends a session silently when the account logs in elsewhere: that is the account
+    // taken over again, not a blip. No new resume (it would take the account back): the Disconnected
+    // screen, as retail. Only a new resume (an attempt of one under way goes on).
+    if (resumable && !this.resuming && opts.silentRelogin && this.resumedSessionAt !== null
+      && now - this.resumedSessionAt < RESUME_SILENT_AGAIN_WINDOW_MS) {
+      this.endResume();
+      this.lastBound = 'silent_again';
+      return null;
+    }
     // BUG.resume-loop-unbounded — a new resume soon after the last one succeeded continues its budget.
     if (resumable && !this.resuming) {
       if (this.restoredAt !== null && now - this.restoredAt < RESUME_HEALTHY_MS) {
@@ -284,7 +326,10 @@ export class SessionLifecycle {
    * BUG.resume-loop-unbounded — why the last nextResumeDelay() refused a resume
    * that had something to resume: 'chain' (the drop came within
    * RESUME_HEALTHY_MS of a resume that had already used the whole budget),
-   * 'page_cap' (RESUME_PAGE_CAP attempts in RESUME_PAGE_CAP_WINDOW_MS); null
+   * 'page_cap' (RESUME_PAGE_CAP attempts in RESUME_PAGE_CAP_WINDOW_MS),
+   * 'silent_again' (a session a resume brought back went silent within
+   * RESUME_SILENT_AGAIN_WINDOW_MS on a server that kills a session silently on
+   * a re-login: BUG.ac1999-relogin-resume-pingpong); null
    * otherwise (an attempt was granted, the budget of the resume under way ran
    * out, or nothing to resume).
    */
@@ -308,6 +353,12 @@ export class SessionLifecycle {
     this.clearResume();
     this.restoredAttempts = used;
     this.restoredAt = now;
+    this.resumedSessionAt = now;
+  }
+
+  /** BUG.ac1999-relogin-resume-pingpong — when an automatic resume brought the live session back (null: the player's own). */
+  get resumedSessionSince(): number | null {
+    return this.resumedSessionAt;
   }
 
   /**
@@ -336,6 +387,7 @@ export class SessionLifecycle {
     this.clearResume();
     this.restoredAttempts = 0;
     this.restoredAt = null;
+    this.resumedSessionAt = null;
     this.attemptLog = [];
   }
 

@@ -19,6 +19,22 @@
  */
 import type { SessionLifecycle } from './SessionLifecycle.js';
 
+/**
+ * BUG.ac1999-relogin-resume-pingpong — the session ended because the server
+ * went silent (the connection's own 'server_silent', or the page's 40 s link
+ * check, 'link_dead'), on a server that ends a session silently when its
+ * account logs in elsewhere (EraProfile.reloginKillsSilently): the drop may be
+ * the account taken over, so a session a resume brought back is not resumed
+ * again soon after (SessionLifecycle.nextResumeDelay `silentRelogin`).
+ * Everything else keeps the usual resume: a socket close (a bridge drain's hard
+ * cut, 1006, a network outage), our own stalled thread ('client_suspended'),
+ * a server's own Disconnect or NetError, and every era whose server refuses in
+ * words.
+ */
+export function silentReloginDrop(endCause: string | null | undefined, era: { reloginKillsSilently?: boolean }): boolean {
+  return era.reloginKillsSilently === true && (endCause === 'server_silent' || endCause === 'link_dead');
+}
+
 export interface UnexpectedDropHost {
   lifecycle: SessionLifecycle;
   /** world_left with the drop's cause and diagnostics (WorldReporter.left: once per world session). */

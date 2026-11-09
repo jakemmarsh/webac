@@ -127,6 +127,10 @@ jobs:
       - run: npm ci
 
       - name: Type check
+        # tsc -b ran out of Node 20's default heap on the runner from 2026-11-08 (exit 134, every main
+        # run red at this step); a clean build fits in 4 GB.
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
         run: npm run build
 
       - name: Run tests

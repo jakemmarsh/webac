@@ -406,11 +406,11 @@ import { packSlotCounts } from './agent/packCounts.js';
 import { ItemShortcutRestorer, toolbarObjectMoved as toolbarObjectMovedOnBar, isShortcutEligible, shortcutDropRefusal1999, shortcutDropIntoContainer1999, type ShortcutTarget, type ShortcutItemInfo } from './network/itemShortcutRestore.js';
 import { tradeItemEntryFor } from './ui/tradeItemEntry.js';
 import { decidePositionCorrection, blendStep } from './world/PositionCorrection.js';
-import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid, RESUME_HEALTHY_MS, RESUME_PAGE_CAP, RESUME_PAGE_CAP_WINDOW_MS } from './session/SessionLifecycle.js';
+import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid, RESUME_HEALTHY_MS, RESUME_PAGE_CAP, RESUME_PAGE_CAP_WINDOW_MS, RESUME_SILENT_AGAIN_WINDOW_MS } from './session/SessionLifecycle.js';
 import { LoginRefusalMemory } from './session/LoginRefusalMemory.js';
 import { ProvenLoginRetry, firstTimeLoginRetryAllowed, type LoginCredentials } from './session/ProvenLoginRetry.js';
 import { LoginCaseFallback, LoginCaseMemory, passwordCaseFor, CASE_VERBATIM_RETRY_DELAY_MS } from './session/LoginCredentialCase.js';
-import { armDropResume, handleUnexpectedDrop, resumeAttemptRefusalIsFinal } from './session/UnexpectedDrop.js';
+import { armDropResume, handleUnexpectedDrop, resumeAttemptRefusalIsFinal, silentReloginDrop } from './session/UnexpectedDrop.js';
 import { SessionLiveness, sessionDropped, liveSessionSocketFailed, characterListRole } from './session/SessionLiveness.js';
 import { ChargenDraftStore, decideChargenDraft, CHARGEN_DRAFT_OFFER_TEXT, type ChargenDraftOwner } from './session/ChargenResume.js';
 import { DrainHandover } from './session/DrainHandover.js';
@@ -6080,7 +6080,7 @@ async function main() {
           },
           // Closes the dead socket itself (a deliberate close: its
           // 'disconnected' reports and schedules nothing more).
-          scheduleResume,
+          scheduleResume: () => scheduleResume({ silentRelogin: silentReloginDrop(cause, activeEra) }),
           raiseServerDied: () => raiseServerDied(undefined, cause, net),
           // UX.charselect-resume — the tick outlives a logout: a dead session at character select
           // (or in chargen, or Entering World) resumes as the socket's own close does.
@@ -8939,10 +8939,15 @@ async function main() {
     online: windowOnlineSource(window),
     log: (text) => console.log(text),
   });
-  const scheduleResume = (opts: { unreachable?: boolean } = {}): boolean => {
+  /**
+   * BUG.ac1999-relogin-resume-pingpong — `silentRelogin`: the drop was server silence on a server
+   * that kills a session silently when its account logs in elsewhere (UnexpectedDrop.silentReloginDrop):
+   * a session a resume brought back is then not resumed again within RESUME_SILENT_AGAIN_WINDOW_MS.
+   */
+  const scheduleResume = (opts: { unreachable?: boolean; silentRelogin?: boolean } = {}): boolean => {
     const wasResuming = sessionLifecycle.resumingAfterDrop;
     const givenBack = sessionLifecycle.resumeAttemptsGivenBack;
-    const delay = sessionLifecycle.nextResumeDelay({ unreachable: opts.unreachable });
+    const delay = sessionLifecycle.nextResumeDelay({ unreachable: opts.unreachable, silentRelogin: opts.silentRelogin });
     if (delay === null) {
       resumeRunner.cancel();
       // BUG.resume-outage-fast-fail — a resume whose attempts ran out, and how many it gave back to the outage.
@@ -8950,7 +8955,12 @@ async function main() {
       // BUG.resume-loop-unbounded — a drop soon after a resume came back (or too many resumes in
       // ten minutes): no fresh budget, the Disconnected screen, and the reason in telemetry.
       const bound = sessionLifecycle.resumeBound;
-      if (bound) {
+      if (bound === 'silent_again') {
+        // BUG.ac1999-relogin-resume-pingpong — the account was most likely taken over again by a
+        // login elsewhere: resuming would take it back and the two would trade it forever.
+        console.warn(`[AC] ACE: the server went silent again within ${RESUME_SILENT_AGAIN_WINDOW_MS / 60_000} min of a resume (this server ends a session silently when the account logs in elsewhere): no more automatic reconnects`);
+        preworldReporter?.resumeEnded('silent_again');
+      } else if (bound) {
         console.warn(`[AC] ACE: connection lost again — ${bound === 'chain' ? `within ${RESUME_HEALTHY_MS / 1000} s of a resume that used every attempt` : `${RESUME_PAGE_CAP} resume attempts in ${RESUME_PAGE_CAP_WINDOW_MS / 60_000} min`}: no more automatic reconnects`);
         preworldReporter?.resumeEnded(bound === 'chain' ? 'loop_chain_spent' : 'loop_page_cap');
       }
@@ -9165,7 +9175,7 @@ async function main() {
     // From the world: the Disconnected screen; before it, the OK dialog over the launcher.
     // BUG.second-tab-login-refusal sweep — retail's text, then which window took the account (not
     // the hint to close "any other window": this browser knows it was one of its own tabs).
-    raiseAccountRefusal(stoodDownForOtherTabText(characterErrorNotice(CharacterError.Logon).text.split('\n\n')[0]));
+    raiseAccountRefusal(stoodDownForOtherTabText(characterErrorNotice(CharacterError.Logon).text.split('\n\n')[0]), 'other_tab');
   };
   /**
    * BUG.second-tab-in-world-refusal — the player, in another tab of this
@@ -9181,7 +9191,9 @@ async function main() {
     if (launcherActive || gameUI.disconnectedScreenShown) return;
     // BUG.second-tab-login-refusal — for another tab's login this tab may be at character select or
     // in chargen: the same route closes the session (the OK dialog before the world).
-    raiseAccountRefusal(reason === 'login' ? LOGGED_OUT_FOR_LOGIN_TEXT : LOGGED_OUT_FOR_OTHER_TAB_TEXT);
+    // OBS.other-tab-takeover-no-resume: world_left says another tab took the account (endCause
+    // 'other_tab'), so the monitor doesn't read the designed stand-down as a drop with no resume.
+    raiseAccountRefusal(reason === 'login' ? LOGGED_OUT_FOR_LOGIN_TEXT : LOGGED_OUT_FOR_OTHER_TAB_TEXT, 'other_tab');
   };
   /**
    * A client-side connection failure (ID_ConnectionError_* / ID_NetError_*):
@@ -19684,7 +19696,7 @@ async function main() {
             // Before the world (a resume attempt's session counts: its world_left already went out).
             if (!wasInWorld) preworldReporter?.dropped(event.closeCode ?? null, event.endCause ?? null, dropNet);
             // In the world (or mid-resume): reconnect and re-enter on our own first.
-            if (droppedInWorld && scheduleResume()) {
+            if (droppedInWorld && scheduleResume({ silentRelogin: silentReloginDrop(event.endCause, activeEra) })) {
               if (sessionLifecycle.resumingWorld) { worldResumePending = true; drainHandover.onSessionDropped(); }
               break;
             }

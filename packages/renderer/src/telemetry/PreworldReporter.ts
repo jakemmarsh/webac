@@ -836,8 +836,13 @@ export class PreworldReporter {
    * (the Disconnected screen), with `count` = the attempts it gave back while
    * the network was out (SessionLifecycle.resumeAttemptsGivenBack): 0 means
    * every failure was counted.
+   *
+   * BUG.ac1999-relogin-resume-pingpong — 'silent_again': a session a resume
+   * brought back went silent again within RESUME_SILENT_AGAIN_WINDOW_MS on a
+   * server that kills a session silently when its account logs in elsewhere
+   * (the AC1999 server): no new resume, the Disconnected screen.
    */
-  resumeEnded(reason: 'character_gone' | 'charselect_restored' | 'loop_chain_spent' | 'loop_page_cap' | 'budget_spent' | ChargenResumeToken, count?: number): void {
+  resumeEnded(reason: 'character_gone' | 'charselect_restored' | 'loop_chain_spent' | 'loop_page_cap' | 'budget_spent' | 'silent_again' | ChargenResumeToken, count?: number): void {
     this.report('resume_ended', { token: reason, ...(count !== undefined ? { count } : {}) });
   }
 
