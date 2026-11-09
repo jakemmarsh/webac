@@ -35,8 +35,8 @@ export const PLUGIN_WINDOWS = [
 ] as const;
 export const ROUTINE_DRIVERS = ['player', 'agent'] as const;
 export const ROUTINE_KINDS = ['macro', 'meta', 'rules'] as const;
-export const ROUTINE_STOP_REASONS = ['player', 'agent', 'died', 'rule', 'replaced'] as const;
-export const ROUTINE_ERROR_PLACES = ['rule', 'loot', 'macro'] as const;
+export const ROUTINE_STOP_REASONS = ['player', 'agent', 'died', 'rule', 'replaced', 'fault'] as const;
+export const ROUTINE_ERROR_PLACES = ['rule', 'loot', 'macro', 'tick'] as const;
 export const IMPORT_OUTCOMES = ['ok', 'partial', 'failed'] as const;
 export const IMPORT_KINDS = ['met', 'nav', 'utl', 'usd', 'af', 'other'] as const;
 export const AUTOMATION_EXITS = ['closed_tab', 'logout', 'disconnected'] as const;

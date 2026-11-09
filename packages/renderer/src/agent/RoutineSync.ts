@@ -6,7 +6,7 @@
  * the account itself: the token decides whose routines these are.
  */
 import type { RoutinesGrant } from '@ac/network';
-import { emptyRoutineDoc, upgradeStoredLootRules, validateRoutineDoc, type RoutineDoc } from '@ac/shared';
+import { emptyRoutineDoc, normalizeRoutineDoc, upgradeStoredLootRules, validateRoutineDoc, type RoutineDoc } from '@ac/shared';
 
 /** Browser storage for a bridge that keeps no routines: one document per server + account, in this browser only. */
 export interface RoutineLocalStore { getItem(key: string): string | null; setItem(key: string, value: string): void }
@@ -133,10 +133,14 @@ export class RoutineSync {
     return { ok: false, message: 'the bridge refused the token' };
   }
 
-  /** The account's routine document (an empty one when none is stored). */
+  /**
+   * The account's routine document (an empty one when none is stored). What comes back was validated when it was
+   * written, but is read as stored: each profile is made complete here (normalizeRoutineProfile), so a profile
+   * missing a list never reaches the windows or the engine's frame tick (BUG.routine-partial-profile-crash).
+   */
   async load(): Promise<RoutineSyncResult> {
     const r = await this.call('GET') as RoutineSyncResult;
-    if (r.ok) upgradeStoredLootRules(r.doc); // rules stored by an older importer (vtank.ts)
+    if (r.ok) { upgradeStoredLootRules(r.doc); normalizeRoutineDoc(r.doc); } // rules stored by an older importer (vtank.ts); every profile complete
     return r;
   }
 
@@ -147,7 +151,7 @@ export class RoutineSync {
    */
   async check(since: string): Promise<RoutineCheckResult> {
     const r = await this.call('GET', undefined, since);
-    if (r.ok && !('unchanged' in r)) upgradeStoredLootRules(r.doc);
+    if (r.ok && !('unchanged' in r)) { upgradeStoredLootRules(r.doc); normalizeRoutineDoc(r.doc); }
     return r;
   }
 

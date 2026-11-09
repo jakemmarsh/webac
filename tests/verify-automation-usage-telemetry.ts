@@ -212,7 +212,7 @@ describe('AutomationReporter — the session summary', () => {
       outcome: 'automation_summary', era: 'dm', server: 'harvestgain', trace: 'feedc0de12345678', build: 'abc1234', eid: expect.any(String),
       exit: 'disconnected', sessionMs: g.clock.t - enteredAt, offered: true, preview: true,
       barShown: true, barToggles: 1, barClicks: 3, windows: ['vtank', 'hotkeys', 'ub-dungeon'],
-      starts: { player: 1, agent: 0 }, stops: { player: 0, agent: 0, died: 0, rule: 0, replaced: 0 }, kinds: ['macro'],
+      starts: { player: 1, agent: 0 }, stops: { player: 0, agent: 0, died: 0, rule: 0, replaced: 0, fault: 0 }, kinds: ['macro'],
       runMs: 600_000, running: true, errors: 0,
       imports: { ok: 0, partial: 1, failed: 0 }, importKinds: ['met', 'nav'],
       goarrow: Object.fromEntries(GOARROW_REPLIES.map((k) => [k, 0])) as AutomationSummaryEvent['goarrow'],
@@ -307,7 +307,7 @@ describe('sanitizeClientAutomation', () => {
     expect(sum).toMatchObject({
       exit: null, sessionMs: 1000, offered: null, barShown: true, barClicks: null,
       windows: ['vtank'], kinds: null, importKinds: ['met'],
-      starts: { player: 2, agent: 0 }, stops: { player: 0, agent: 0, died: 1, rule: 0, replaced: 0 }, imports: null,
+      starts: { player: 2, agent: 0 }, stops: { player: 0, agent: 0, died: 1, rule: 0, replaced: 0, fault: 0 }, imports: null,
     });
     expect(JSON.stringify(sum)).not.toMatch(/Bob|img|evil|exe/);
     expect(Object.keys((sum as { starts: object }).starts)).toEqual(['player', 'agent']);

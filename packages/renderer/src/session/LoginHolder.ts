@@ -48,8 +48,12 @@
  * account is held, so the same offer applies over the running resends. Yes
  * logs that tab out and logs in afresh (a full 40 s resend budget, which the
  * server answers once that session is gone); No ends the login with the
- * NetError form's No text. No tab: nothing changes, so a server that is down
- * still reads as down (the timeout dialog).
+ * NetError form's No text. No tab: the resends and their 40 s timeout go
+ * on unchanged. UX.gdl-silent-login-hint: on a GDL / GDLE world (the ones
+ * that ignore such a login, worldDirectory silentAccountOnlineWorld) that
+ * timeout's next-step line then names the likely cause, the account logged
+ * in from another browser or device (silentUnansweredNoTab); elsewhere a
+ * server that is down still reads as down (the timeout dialog).
  * Never during a resume of our own dropped session (SessionLifecycle: that
  * refusal is our own session still logging out), and never without the
  * player's Yes.
@@ -201,6 +205,11 @@ export class LoginHolderWait {
   /** The tabs were asked about a "Client logon failed" this connect cycle (once a cycle). */
   private logonFailedAsked = false;
   private held = false;
+  /**
+   * UX.gdl-silent-login-hint — this login went unanswered and no tab of this
+   * browser holds its account (login_held 'silent_none').
+   */
+  private silentNone = false;
   /** What this connect cycle's holder query heard (telemetry), null when none ran. */
   private lastQuery: Omit<AccountHolderQuery, 'holders'> & { holders: number } | null = null;
 
@@ -217,6 +226,17 @@ export class LoginHolderWait {
    * connect cycle (telemetry: heldByTab on login_refused / login_retry).
    */
   get heldByTab(): boolean { return this.held; }
+
+  /**
+   * UX.gdl-silent-login-hint — this login went unanswered at its 2nd resend
+   * and this browser's tabs were asked: none holds the account (the
+   * 'silent-none' report). On a server that ignores a login for an account
+   * online from another endpoint (launcher/worldDirectory.ts
+   * silentAccountOnlineWorld), the timeout that follows most likely means
+   * the account is in use in another browser or device (loginFailureText).
+   * Cleared by the next unanswered login, cancel() and end().
+   */
+  get silentUnansweredNoTab(): boolean { return this.silentNone; }
 
   /**
    * OBS.login-refusal-identity — the tab fields for a login_refused /
@@ -286,6 +306,7 @@ export class LoginHolderWait {
    */
   onUnanswered(retailText: string): void {
     if (this.deps.resuming() || this.retrying || this.asking || this.closeOffer) return;
+    this.silentNone = false;
     this.ask(retailText, true);
   }
 
@@ -301,6 +322,7 @@ export class LoginHolderWait {
     this.kind = 'in-use';
     this.logonFailedAsked = false;
     this.held = false;
+    this.silentNone = false;
     this.lastQuery = null;
     this.closeOffer?.();
     this.closeOffer = null;
@@ -334,6 +356,7 @@ export class LoginHolderWait {
       }
       if (!holder) {
         this.deps.report?.(silent ? 'silent-none' : 'none');
+        if (silent) this.silentNone = true;
         // Silent: no tab holds it, so the resends and their timeout go on as before.
         if (!silent) this.deps.refuse(null);
         return;

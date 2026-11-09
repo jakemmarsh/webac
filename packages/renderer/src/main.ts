@@ -389,7 +389,7 @@ import {
 import { deliverWeenieError, ATTEMPT_FAILED_NAME_TEMPLATED, abortRepeatAttackOnFailure } from './ui/WeenieErrorNotices.js';
 import { SocialRefusalMemo } from './ui/SocialRefusalLines1999.js';
 import { connectionLostText, characterErrorNotice, connectionFailureNotice, linkDeadCause, linkSampleIsDead, NET_ERROR_STRING_TABLE, REQUEST_TIMEOUT_S, type ConnectionNotice } from './ui/ConnectionNotices.js';
-import { accountRefusalRoute, characterErrorRoute, disconnectedQuitAction, staleSessionWaitText, type DisconnectedCause } from './session/RefusalRoute.js';
+import { accountEndCause, accountRefusalRoute, characterErrorRoute, disconnectedQuitAction, staleSessionWaitText, type AccountEndCause, type DisconnectedCause } from './session/RefusalRoute.js';
 import { characterRestoreRefusalText } from './session/CharacterRestore.js';
 import { CharacterError, runExpr } from '@ac/shared';
 import { ac1999LightCaps, DatLightBudget, lightPoolRanksFromOwner, deviceLightLimit, DEFAULT_FILLER_STEP } from './effects/DatLightBudget.js';
@@ -8903,6 +8903,9 @@ async function main() {
     cancelProvenLoginRetry();
     serverDiedShown = false;
     sessionLifecycle.noteDisconnected();
+    // TELEMETRY.account-taken-endcause — our own deliberate disconnect (a world still up here ends
+    // by our hand, not a drop); a no-op when the session already ended.
+    worldReporter?.left('disconnected', { endCause: 'local' });
     if (gameStarted || gameplayUi.isShown) teardownWorldState();
     aceConnection.disconnect();
     gameUI.hideDisconnectedScreen();
@@ -9060,7 +9063,7 @@ async function main() {
    * and with OK relaunching the connect cycle for a URL login, as the
    * Disconnected screen's button did (session/RefusalRoute.ts).
    */
-  const raiseAccountRefusal = (text: string, endCause?: WorldEndCause): void => {
+  const raiseAccountRefusal = (text: string, endCause: AccountEndCause): void => {
     const route = accountRefusalRoute({
       inWorld: gameStarted || sessionLifecycle.inWorld,
       resuming: sessionLifecycle.resumingAfterDrop,
@@ -9175,7 +9178,7 @@ async function main() {
     // From the world: the Disconnected screen; before it, the OK dialog over the launcher.
     // BUG.second-tab-login-refusal sweep — retail's text, then which window took the account (not
     // the hint to close "any other window": this browser knows it was one of its own tabs).
-    raiseAccountRefusal(stoodDownForOtherTabText(characterErrorNotice(CharacterError.Logon).text.split('\n\n')[0]), 'other_tab');
+    raiseAccountRefusal(stoodDownForOtherTabText(characterErrorNotice(CharacterError.Logon).text.split('\n\n')[0]), accountEndCause({ kind: 'other_tab' }));
   };
   /**
    * BUG.second-tab-in-world-refusal — the player, in another tab of this
@@ -9191,9 +9194,7 @@ async function main() {
     if (launcherActive || gameUI.disconnectedScreenShown) return;
     // BUG.second-tab-login-refusal — for another tab's login this tab may be at character select or
     // in chargen: the same route closes the session (the OK dialog before the world).
-    // OBS.other-tab-takeover-no-resume: world_left says another tab took the account (endCause
-    // 'other_tab'), so the monitor doesn't read the designed stand-down as a drop with no resume.
-    raiseAccountRefusal(reason === 'login' ? LOGGED_OUT_FOR_LOGIN_TEXT : LOGGED_OUT_FOR_OTHER_TAB_TEXT, 'other_tab');
+    raiseAccountRefusal(reason === 'login' ? LOGGED_OUT_FOR_LOGIN_TEXT : LOGGED_OUT_FOR_OTHER_TAB_TEXT, accountEndCause({ kind: 'other_tab' }));
   };
   /**
    * A client-side connection failure (ID_ConnectionError_* / ID_NetError_*):
@@ -9209,7 +9210,10 @@ async function main() {
     // link. On an auto-create world STR_LOGIN_FAILED is a wrong password for a
     // name someone already owns: say that instead. (textOverride: the whole
     // text, e.g. "Player already logged on" naming this browser's other tab.)
-    const text = textOverride ?? loginFailureText(notice, launcherWorld, gameStarted, aceAccount, activeEra.id);
+    // UX.gdl-silent-login-hint — a timeout of a login a GDL / GDLE world left unanswered with no tab of
+    // this browser holding the account: the next step names the account online elsewhere.
+    const text = textOverride ?? loginFailureText(notice, launcherWorld, gameStarted, aceAccount, activeEra.id,
+      { silentUnansweredNoTab: loginHolderWait.silentUnansweredNoTab });
     if (connectionFailureRecovery({ inWorld: gameStarted, launcherLogin: !urlLogin.autoLogin }) === 'launcher') {
       returnToLauncher(text);
       return;
@@ -13384,7 +13388,7 @@ async function main() {
         if (!gameStarted) preworldReporter?.accountBoot(data.reason);
         // From the world: the Disconnected screen; before it, the OK dialog
         // (over the launcher for a launcher login) — session/RefusalRoute.ts.
-        raiseAccountRefusal(text, 'server_boot');
+        raiseAccountRefusal(text, accountEndCause({ kind: 'boot' }));
       },
       onAccountBanned: (data) => {
         // CPlayerSystem::Handle_AccountBanned @ 00562bd0: retail's own ban
@@ -13394,7 +13398,7 @@ async function main() {
         const text = accountBannedText(data.secondsUntilExpiry, data.reason, Date.now());
         console.warn(`[AC] AccountBanned: ${text}`);
         if (!gameStarted) preworldReporter?.accountBanned(data.secondsUntilExpiry);
-        raiseAccountRefusal(text, 'server_boot');
+        raiseAccountRefusal(text, accountEndCause({ kind: 'banned' }));
       },
       onCharacterDelete: () => {
         // ASSESS — 0xF655 S2C is ACE's delete ACK (CharacterHandler.cs:312):
@@ -18890,7 +18894,15 @@ async function main() {
       // The agent's steering tick rides the frame step (the rAF frame, or the background beat when the
       // browser stops frames), not a page timer that a covered window throttles to once a second.
       // UtilityBelt's timers, AutoVendor-on-open, game events and login quest read run only where /ub does.
-      agentFrameTick = (mark) => timedAgentTick({ agent: agentApi, ub: ubRuntime, ubOn: gameUI.automationAvailable, mag: magTools }, mark);
+      // A part that throws never leaves the frame step (BUG.routine-partial-profile-crash): it goes to the page's error
+      // reporter (which sends each distinct error once and counts repeats) and the frame carries on.
+      const agentTickFault = (part: string, e: unknown): void => {
+        const err = e as Error | null;
+        errorReporter?.report('error', `automation ${part} tick: ${String(err?.message ?? e)}`, { stack: err?.stack ?? null });
+      };
+      agentFrameTick = (mark) => timedAgentTick({ agent: agentApi, ub: ubRuntime, ubOn: gameUI.automationAvailable, mag: magTools }, mark, agentTickFault);
+      // The routine engine catches its own step's faults (it stops the run and says why in chat); reported the same way.
+      agentApi.routine.onFault = (e) => agentTickFault('routine', e);
       // AGENT.automation-panel — the player's surface over the same engine: the Automation panel
       // (/automation, or the HUD strip while a routine runs). Reports print as System chat.
       // Dev / URL-override builds only (automationUiEnabled); the agent API itself runs everywhere.
@@ -19797,7 +19809,8 @@ async function main() {
             const notice = charError.notice;
             if (!gameStarted) preworldReporter?.connectionError(event, notice.token || null);
             if (charError.route === 'account') {
-              raiseAccountRefusal(charError.text);
+              // TELEMETRY.account-taken-endcause — Logon in the world = the account logged in elsewhere.
+              raiseAccountRefusal(charError.text, accountEndCause({ kind: 'character_error', code }));
             } else if (charError.route === 'charselect') {
               // BUG.second-tab-in-world-refusal — the 0x0D budget spent: retail's text and the line for the tab seen in the world.
               const charSelectText = inWorldVerdict === 'dialog'

@@ -951,6 +951,12 @@ const PLACE_KINDS = new Set<AgentObjectKind>(['npc', 'vendor', 'portal', 'lifest
  * age is unknown.
  */
 interface PlaceRecord { name: string; kind: AgentObjectKind; cell: number; x: number; y: number; z: number; t?: number; at?: number }
+/** A remembered place as read back from browser storage: only one with every field the per-look readers use. */
+export function isPlaceRecord(v: unknown): v is PlaceRecord {
+  if (!v || typeof v !== 'object') return false;
+  const p = v as Record<string, unknown>;
+  return typeof p.name === 'string' && typeof p.kind === 'string' && [p.cell, p.x, p.y, p.z].every((n) => typeof n === 'number' && Number.isFinite(n));
+}
 
 /** A carried item as a use's before / after reads it (AgentApi.packMark). */
 interface PackMark { name: string; stack: number; worn: boolean; stackable?: boolean }
@@ -15564,7 +15570,14 @@ export class AgentApi {
       this.placesLoadedFor = key;
       try {
         const raw = globalThis.localStorage?.getItem(key);
-        if (raw) for (const [g, v] of JSON.parse(raw) as Array<[number, PlaceRecord]>) if (!this.places.has(g)) this.places.set(g, v);
+        // Only well-formed entries (BUG.routine-partial-profile-crash sweep): rememberedPlaces and the walk / use checks read
+        // these every look, and an entry from storage is whatever an older page (or a hand edit) wrote.
+        const rows: unknown = raw ? JSON.parse(raw) : [];
+        if (Array.isArray(rows)) for (const row of rows) {
+          if (!Array.isArray(row)) continue;
+          const [g, v] = row as [unknown, unknown];
+          if (typeof g === 'number' && isPlaceRecord(v) && !this.places.has(g)) this.places.set(g, v);
+        }
       } catch { /* storage blocked: memory only */ }
     }
     return { n: 0 };

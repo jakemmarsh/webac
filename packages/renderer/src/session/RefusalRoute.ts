@@ -102,6 +102,37 @@ export function characterErrorRoute(code: number, ctx: { inWorld: boolean; conne
 }
 
 /**
+ * TELEMETRY.account-taken-endcause — the world telemetry's endCause for an
+ * account-level end (WorldReporter WORLD_END_CAUSES). Every one of them is a
+ * deliberate stop (no automatic resume), and the monitor's resume check needs
+ * to tell it from a drop that should have resumed: prod 2026-11-01..08, ten
+ * in-world `world_left` disconnects with no resume all came from here and
+ * carried no endCause.
+ *  - 'other_tab': AccountTabGuard (another tab of this browser took the
+ *    account, or the player chose "log this tab out" there).
+ *  - 'account_taken': CharacterError.Logon, which ACE sends to the old session
+ *    when the account logs in elsewhere (AuthenticationHandler.cs:189).
+ *  - 'server_boot': AccountBoot / AccountBanned, and every other
+ *    account-level CharacterError (ACE's AccountLogin on a failed save,
+ *    ServerCrash, AccountInvalid, …).
+ */
+export type AccountEndCause = 'account_taken' | 'other_tab' | 'server_boot';
+
+export type AccountEndSource =
+  | { kind: 'other_tab' }
+  | { kind: 'boot' }
+  | { kind: 'banned' }
+  | { kind: 'character_error'; code: number };
+
+export function accountEndCause(source: AccountEndSource): AccountEndCause {
+  switch (source.kind) {
+    case 'other_tab': return 'other_tab';
+    case 'character_error': return source.code === CharacterError.Logon ? 'account_taken' : 'server_boot';
+    default: return 'server_boot';
+  }
+}
+
+/**
  * Why the Disconnected screen is up: 'connection_lost' (retail's ServerDied: a
  * drop the automatic resume could not bring back) or 'account' (the server or
  * another login ended this account's session: ACE's in-world

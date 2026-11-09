@@ -65,11 +65,11 @@ export type RoutineDriver = typeof ROUTINE_DRIVERS[number];
 /** A profile's kind: VirindiTank's macro (macro: true), a meta (ruleFiring 'once'), or plain rules. */
 export const ROUTINE_KINDS = ['macro', 'meta', 'rules'] as const;
 export type RoutineKind = typeof ROUTINE_KINDS[number];
-/** Why a run ended (RoutineEngine.stop): the player, the agent API, StopMacroOnDeath, its own Stop rule, or another start. */
-export const ROUTINE_STOP_REASONS = ['player', 'agent', 'died', 'rule', 'replaced'] as const;
+/** Why a run ended (RoutineEngine.stop): the player, the agent API, StopMacroOnDeath, its own Stop rule, another start, or a fault in its step (tickFault). */
+export const ROUTINE_STOP_REASONS = ['player', 'agent', 'died', 'rule', 'replaced', 'fault'] as const;
 export type RoutineStopReason = typeof ROUTINE_STOP_REASONS[number];
-/** Where a run's action failed (RoutineEngine): a rule's actions, Loot this Container, the macro's own steps. */
-export const ROUTINE_ERROR_PLACES = ['rule', 'loot', 'macro'] as const;
+/** Where a run's action failed (RoutineEngine): a rule's actions, Loot this Container, the macro's own steps, the engine's own step (tick). */
+export const ROUTINE_ERROR_PLACES = ['rule', 'loot', 'macro', 'tick'] as const;
 export type RoutineErrorPlace = typeof ROUTINE_ERROR_PLACES[number];
 /**
  * BUG.vtank-nav-stands-still (2026-11-07) — why a run with navigation on has not moved for NAV_IDLE_MS (RoutineEngine's
@@ -205,7 +205,7 @@ function safe<T>(f: () => T, fallback: T): T {
 }
 
 const zeroStarts = (): Record<RoutineDriver, number> => ({ player: 0, agent: 0 });
-const zeroStops = (): Record<RoutineStopReason, number> => ({ player: 0, agent: 0, died: 0, rule: 0, replaced: 0 });
+const zeroStops = (): Record<RoutineStopReason, number> => ({ player: 0, agent: 0, died: 0, rule: 0, replaced: 0, fault: 0 });
 const zeroImports = (): Record<ImportOutcome, number> => ({ ok: 0, partial: 0, failed: 0 });
 const zeroGoArrow = (): Record<GoArrowReply, number> => Object.fromEntries(GOARROW_REPLIES.map((k) => [k, 0])) as Record<GoArrowReply, number>;
 

@@ -52,11 +52,14 @@ export type GpuClass = typeof GPU_CLASSES[number];
  * BUG.hidden-tab-session-drop — what ended a dropped session, closed set: the
  * connection's ConnectionEvent.endCause (@ac/network DisconnectCause), or the
  * page's own verdicts: 'link_dead' = the 40 s DISCONNECT_TIME link check
- * (main.ts link tick), 'server_boot' = an AccountBoot / AccountBanned, 'other_tab' = another tab of
- * this browser took the account (it logged in or entered there and this tab stood down or was logged
- * out at that player's choice: AccountTabGuard), so no resume follows by design.
+ * (main.ts link tick), 'server_boot' = an AccountBoot / AccountBanned or an
+ * account-level CharacterError other than Logon. TELEMETRY.account-taken-endcause
+ * (session/RefusalRoute.ts accountEndCause): 'account_taken' = the server ended
+ * the session because the account logged in elsewhere (CharacterError.Logon),
+ * 'other_tab' = another tab of this browser took the account
+ * (AccountTabGuard). These three never resume, by design.
  */
-export const WORLD_END_CAUSES = ['socket_closed', 'server_disconnect', 'server_net_error', 'server_silent', 'client_suspended', 'local', 'link_dead', 'server_boot', 'other_tab'] as const;
+export const WORLD_END_CAUSES = ['socket_closed', 'server_disconnect', 'server_net_error', 'server_silent', 'client_suspended', 'local', 'link_dead', 'server_boot', 'account_taken', 'other_tab'] as const;
 export type WorldEndCause = typeof WORLD_END_CAUSES[number];
 
 /** A drop's detail, from the 'disconnected' event (exit 'disconnected' only). */

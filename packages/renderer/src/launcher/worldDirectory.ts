@@ -447,6 +447,50 @@ export function ac1999AccountNameProblem(account: string): string | null {
 const AC1999_NAME_REFUSAL_TOKENS: ReadonlySet<string> = new Set(['ID_ConnectionError_ClientLogOnFailed', 'ID_ConnectionError_BadCryptoKey']);
 
 /**
+ * UX.gdl-silent-login-hint — emulators whose server ignores a login for an
+ * account already online from another endpoint: no reply at all, so the
+ * login ends in ID_ConnectionError_ClientTimedOutServer after the 40 s
+ * resend budget. GDLE / ClassicDereth: CNetwork::AcceptClientLogin
+ * (Network.cpp:544-557) returns without a word when FindClientByAccount
+ * finds a client (its STR_LOGIN_ACCOUNT_ONLINE arm compares a
+ * network-order port with 9000 and so never runs). GDL: live Seedsow
+ * (production 2026-11-09, Dark Majesty: two browsers on an account in the
+ * world each timed out twice; the first logged out and the next login went
+ * straight in), though the reference source kicks the old client
+ * (Network.cpp:643-651). Not ACE / ClassicACE (CharacterError.Logon and a
+ * boot of the old session), not the AC1999 server (kills the old session,
+ * lets the new one in: EraProfile.reloginKillsSilently): a timeout there is
+ * a server that never answered.
+ */
+export const SILENT_ACCOUNT_ONLINE_EMUS: ReadonlySet<string> = new Set(['GDL', 'GDLE']);
+
+/** Whether `world`'s server ignores a login for an account online elsewhere (SILENT_ACCOUNT_ONLINE_EMUS). */
+export function silentAccountOnlineWorld(world: Partial<Pick<World, 'emu'>> | null | undefined): boolean {
+  return !!world?.emu && SILENT_ACCOUNT_ONLINE_EMUS.has(world.emu.toUpperCase());
+}
+
+/**
+ * UX.gdl-silent-login-hint — the next-step line under "Client timed out the
+ * connection" when the login went unanswered on such a world and no tab of
+ * this browser holds the account (LoginHolderWait.silentUnansweredNoTab).
+ * It replaces RETRY_OR_OTHER_WORLD_HINT, which sent the player elsewhere
+ * while their own other browser held the account. The last sentence keeps
+ * the other cause (the server down) in view.
+ */
+export const ACCOUNT_ONLINE_ELSEWHERE_HINT =
+  'This account may still be logged in somewhere else (another browser or device). Log out there, or wait for it to time out, then try again. '
+  + "If it isn't, the server may be down: try again in a minute, or pick another world.";
+
+/** What the login knew when it failed (loginFailureText). */
+export interface LoginFailureContext {
+  /**
+   * UX.gdl-silent-login-hint — the login went unanswered and no tab of this
+   * browser holds its account (LoginHolderWait.silentUnansweredNoTab).
+   */
+  readonly silentUnansweredNoTab?: boolean;
+}
+
+/**
  * The text of a connection-failure dialog (ConnectionNotices'
  * netErrorNotice / serverNetErrorNotice) for a login to `world`: a refused
  * login before entering the world (LOGIN_REFUSED_TOKENS: the timeout, or
@@ -460,14 +504,19 @@ const AC1999_NAME_REFUSAL_TOKENS: ReadonlySet<string> = new Set(['ID_ConnectionE
  * (NET_ERROR_NEXT_STEP: "Server Full" → wait or pick another world, the
  * version mismatch → reload the page) after one blank line. In a session of
  * the 1999 era (`eraId`), a refusal of an account name that server can
- * never accept (`account`, ac1999AccountNameProblem) says why instead.
+ * never accept (`account`, ac1999AccountNameProblem) says why instead. A
+ * timeout of a login unanswered on a world that ignores a login for an
+ * account online elsewhere (silentAccountOnlineWorld), with no tab of this
+ * browser holding it (`context.silentUnansweredNoTab`), carries
+ * ACCOUNT_ONLINE_ELSEWHERE_HINT (UX.gdl-silent-login-hint).
  */
 export function loginFailureText(
   notice: { readonly token: string; readonly text: string },
-  world: (Pick<World, 'name' | 'registration' | 'registrationUrl'> & Partial<Pick<World, 'kind' | 'bridgeUrl' | 'perIpLimits' | 'emu'>>) | null,
+  world: (Pick<World, 'name' | 'registration' | 'registrationUrl'> & Partial<Pick<World, 'kind' | 'bridgeUrl' | 'perIpLimits' | 'emu' | 'online'>>) | null,
   inWorld: boolean,
   account?: string | null,
   eraId?: string | null,
+  context: LoginFailureContext = {},
 ): string {
   // A Custom… world's bridge that never answered: say that, not retail's
   // "make sure you have a working network" (listed worlds keep retail's text).
@@ -496,6 +545,11 @@ export function loginFailureText(
   }
   if (inWorld || !LOGIN_REFUSED_TOKENS.has(notice.token)) return withNextStep(notice.text, NET_ERROR_NEXT_STEP[notice.token]);
   if (world && worldRegistrationText(world)) return loginTimeoutText(notice.text, world);
+  // UX.gdl-silent-login-hint — not on a world the directory knows is down (online false).
+  if (notice.token === 'ID_ConnectionError_ClientTimedOutServer' && context.silentUnansweredNoTab
+    && world && world.online !== false && silentAccountOnlineWorld(world)) {
+    return `${notice.text}\n\n${ACCOUNT_ONLINE_ELSEWHERE_HINT}`;
+  }
   return notice.token === 'ID_ConnectionError_ClientLogOnFailed' ? `${notice.text}\n\n${LOGON_FAILED_HINT}` : withNextStep(notice.text, NET_ERROR_NEXT_STEP[notice.token]);
 }
 

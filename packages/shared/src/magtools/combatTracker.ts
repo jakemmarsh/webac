@@ -432,7 +432,13 @@ export class MtCombatTracker {
   }
   restore(s: MtCombatSnapshot): void {
     this.clear();
-    for (const i of s.infos) this.infos.set(`${i.source}\u0000${i.target}`, JSON.parse(JSON.stringify(i)) as MtCombatInfo);
-    this.order = [...s.order];
+    // Stored by an earlier page: only a well-formed snapshot is taken, whole (BUG.routine-partial-profile-crash sweep;
+    // a record with no `order` used to leave the records restored and the order empty).
+    if (!s || !Array.isArray(s.infos) || !Array.isArray(s.order)) return;
+    for (const i of s.infos) {
+      if (!i || typeof i !== 'object' || typeof i.source !== 'string' || typeof i.target !== 'string') continue;
+      this.infos.set(`${i.source}\u0000${i.target}`, JSON.parse(JSON.stringify(i)) as MtCombatInfo);
+    }
+    this.order = s.order.filter((k): k is string => typeof k === 'string');
   }
 }

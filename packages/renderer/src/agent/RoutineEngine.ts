@@ -12,7 +12,7 @@
  * live game before turning it on.
  */
 import {
-  itemTypeLabel, parseMetaView, SALVAGE_COMBINE_DEFAULTS, VT_DAMAGE, vtCanonicalName, vtDefaults, type MetaView, type MetaViewButton, type SalvageCombine,
+  itemTypeLabel, normalizeRoutineProfile, parseMetaView, SALVAGE_COMBINE_DEFAULTS, VT_DAMAGE, vtCanonicalName, vtDefaults, type MetaView, type MetaViewButton, type SalvageCombine,
   type LootRule, type PropTest, type Route, type RoutineAction, type RoutineCondition, type RoutineProfile, type RoutineRule, type VtVcsCategory,
 } from '@ac/shared';
 import { AgentApi, MAP_COORD_ORIGIN, parseMapCoords, type LootDecision } from './AgentApi.ts';
@@ -483,7 +483,9 @@ export class RoutineEngine {
    * Run `profile`. `driver`: who asked, for the usage report — the agent API by default; the player's
    * own windows and /vt commands say 'player' (main.ts). A run already going ends as 'replaced'.
    */
-  start(profile: RoutineProfile, driver: RoutineDriver = 'agent'): AgentResult {
+  start(given: RoutineProfile, driver: RoutineDriver = 'agent'): AgentResult {
+    // A profile from storage or the relay, complete (BUG.routine-partial-profile-crash: one with no states threw every tick).
+    const profile = normalizeRoutineProfile(given);
     if (this.profile) this.lifecycle({ type: 'stop', reason: 'replaced' });
     // A copy: the panel's module switches change this run, not the stored document.
     this.profile = { ...profile, modules: { ...profile.modules } };
@@ -840,8 +842,9 @@ export class RoutineEngine {
    * loaded route, stats, module switches and settings (those change through
    * setSetting, as the window and the meta's Set VT Option do).
    */
-  update(profile: RoutineProfile): AgentResult {
+  update(given: RoutineProfile): AgentResult {
     if (!this.profile) return { ok: false, message: 'no routine is running' };
+    const profile = normalizeRoutineProfile(given);
     if (profile.name !== this.profile.name) return { ok: false, message: `"${profile.name}" is not the running routine` };
     const modules = this.profile.modules;
     const before = this.profile.lootSet;
@@ -1177,7 +1180,9 @@ export class RoutineEngine {
    * initial state's), each with whether it would fire and why; the first
    * `fires` is the one that runs. Acts on nothing.
    */
-  dryRun(other?: RoutineProfile): Array<{ rule: string; fires: boolean; enabled: boolean; off?: boolean; why: string[] }> {
+  dryRun(given?: RoutineProfile): Array<{ rule: string; fires: boolean; enabled: boolean; off?: boolean; why: string[] }> {
+    // Another profile (the relay's ac_routine dryrun) is checked complete; the running one already is (start / update).
+    const other = given && given !== this.profile ? normalizeRoutineProfile(given) : given;
     const p = other ?? this.profile;
     if (!p) return [];
     const obs = this.api.look({ max: 60, radius: RULE_SIGHT_M });
@@ -1224,8 +1229,39 @@ export class RoutineEngine {
     if (m) { this.busy = true; void m.run().then((r) => this.note(`${m.label}: ${RoutineEngine.resultLine(r)}`)).finally(() => { this.busy = false; }); }
   }
 
-  /** Called from the agent API's tick (~10 Hz); evaluates at most every half second. */
+  /**
+   * A tick that threw (BUG.routine-partial-profile-crash): main.ts sends it to the page's error reporter. Called once
+   * per distinct message a page.
+   */
+  onFault: ((e: unknown) => void) | null = null;
+  private faultsSaid = new Set<string>();
+
+  /**
+   * Called from the agent API's tick (~10 Hz); evaluates at most every half second. Never throws: a fault in the
+   * run's own step stops the run, said in chat and the run's log, and is reported once (tickFault). Before 2026-11-09
+   * a throw here left the page's frame step every tick, skipping the rest of that frame (the world's step and draw).
+   */
   tick(): void {
+    try { this.tickStep(); } catch (e) { this.tickFault(e); }
+  }
+
+  private tickFault(e: unknown): void {
+    const msg = String((e as Error)?.message ?? e);
+    if (!this.faultsSaid.has(msg)) {
+      this.faultsSaid.add(msg);
+      try { this.onFault?.(e); } catch { /* the reporter's fault stays its own */ }
+    }
+    // Whatever was marked as acting didn't start.
+    this.busy = false;
+    this.acting = null;
+    const p = this.profile;
+    if (!p) return; // the stand-by upkeep: reported, and tried again at its next step
+    this.failed('tick', e);
+    this.report(`Stopped "${p.name}": it hit an error (${msg}). Check the profile in the VirindiTank window, then start it again.`, 'Errors');
+    try { this.stop(`stopped: error (${msg})`, 'fault'); } catch { this.profile = null; }
+  }
+
+  private tickStep(): void {
     const p = this.profile;
     if (!p) {
       if (this.busy) return;
@@ -1235,7 +1271,8 @@ export class RoutineEngine {
       const t = this.now();
       if (t - this.standbyAt < STEP_MS) return;
       this.standbyAt = t;
-      const sb = this.standby?.() ?? null;
+      const got = this.standby?.() ?? null;
+      const sb = got ? normalizeRoutineProfile(got) : null;
       if (sb) this.offUpkeep(sb, standbySettings(sb));
       return;
     }

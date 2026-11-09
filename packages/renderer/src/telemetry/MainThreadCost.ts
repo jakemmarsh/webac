@@ -63,10 +63,17 @@ export class FramePhaseTimer {
   }
 }
 
+/** Which part of the automation tick threw (timedAgentTick's `fault`). */
+export type AgentTickPart = 'agent' | 'ub' | 'mag';
+
 /**
  * The frame's automation tick (main.ts agentFrameTick), each part marked into its own phase: the agent API's tick
  * ('agent', with the routine engine's share inside it as 'routine'), UtilityBelt's ('ub', only where /ub runs) and
  * Mag-Tools' ('mag'). Time before the call is marked by the caller.
+ *
+ * A part that throws is handed to `fault` and the next part still runs; nothing leaves this call. Before
+ * BUG.routine-partial-profile-crash (2026-11-09) a throw here left frameStep, so every tick that threw skipped the
+ * rest of its frame: the world's step and draw.
  */
 export function timedAgentTick(
   parts: {
@@ -76,12 +83,16 @@ export function timedAgentTick(
     mag?: { tick(): void } | null;
   },
   mark: (phase: number) => void,
+  fault: (part: AgentTickPart, e: unknown) => void = () => {},
 ): void {
-  parts.agent.tick({ routineStart: () => mark(PHASE.agent), routineEnd: () => mark(PHASE.routine) });
+  const guard = (part: AgentTickPart, f: () => void): void => {
+    try { f(); } catch (e) { try { fault(part, e); } catch { /* the reporter's fault stays its own */ } }
+  };
+  guard('agent', () => parts.agent.tick({ routineStart: () => mark(PHASE.agent), routineEnd: () => mark(PHASE.routine) }));
   mark(PHASE.agent);
-  if (parts.ubOn) parts.ub?.tick();
+  if (parts.ubOn) guard('ub', () => parts.ub?.tick());
   mark(PHASE.ub);
-  parts.mag?.tick();
+  guard('mag', () => parts.mag?.tick());
   mark(PHASE.mag);
 }
 

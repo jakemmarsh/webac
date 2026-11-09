@@ -85,18 +85,27 @@ const OBJECT_CLASS: Partial<Record<AgentObjectKind, number>> = {
 const coordsOf = (x: number, y: number, z: number): ExprCoords => ({ kind: 'coords', ew: x / 240 - 101.95, ns: y / 240 - 101.95, z: z / 240 });
 
 /** Persistent variable stores (browser storage; memory only when it's unavailable). */
-function store(key: string): { get(): Record<string, ExprValue>; set(v: Record<string, ExprValue>): void } {
+export function exprVarStore(key: string): { get(): Record<string, ExprValue>; set(v: Record<string, ExprValue>): void } {
   let mem: Record<string, ExprValue> = {};
   return {
-    get: () => { try { const raw = globalThis.localStorage?.getItem(key); if (raw) mem = JSON.parse(raw) as Record<string, ExprValue>; } catch { /* storage blocked */ } return mem; },
+    get: () => {
+      try {
+        const raw = globalThis.localStorage?.getItem(key);
+        const v: unknown = raw ? JSON.parse(raw) : null;
+        // Only an object of variables (BUG.routine-partial-profile-crash sweep): stored `null` or a list made every
+        // expression that reads a persistent variable throw, in the routine's every step.
+        if (v && typeof v === 'object' && !Array.isArray(v)) mem = v as Record<string, ExprValue>;
+      } catch { /* storage blocked or unreadable */ }
+      return mem;
+    },
     set: (v) => { mem = v; try { globalThis.localStorage?.setItem(key, JSON.stringify(v)); } catch { /* storage blocked */ } },
   };
 }
 
 export function vtankExprHost(api: AgentApi, engine: RoutineEngine, print: (text: string) => void, game: MetaGame = {}): ExprHost {
   const runVars = new Map<string, ExprValue>();
-  const gvars = store('acjs.vtank.gvar');
-  const pvarsFor = () => store(`acjs.vtank.pvar.${api.self()?.name ?? '?'}`);
+  const gvars = exprVarStore('acjs.vtank.gvar');
+  const pvarsFor = () => exprVarStore(`acjs.vtank.pvar.${api.self()?.name ?? '?'}`);
   const scopeGet = (scope: VarScope, name: string): ExprValue | undefined => {
     if (scope === 'var') return runVars.get(name);
     const s = scope === 'gvar' ? gvars.get() : pvarsFor().get();
