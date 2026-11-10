@@ -173,7 +173,13 @@ function wireLikeMain(conn: { on(cb: (e: ConnectionEvent) => void): void }, r: P
 function expectClean(h: Harness): void {
   for (const s of h.sent) {
     // BUG.resume-outage-fast-fail — a connect_failed from a socket that never opened carries its cause.
-    const optional = s.body.outcome === 'connect_failed' && s.body.why === 'open_failed' ? ['why'] : [];
+    const optional = s.body.outcome === 'connect_failed' && s.body.why === 'open_failed' ? ['why', 'openMs'] : [];
+    // OBS.upgrade-aborted — every connect_failed says whether the page was hidden; one from a socket says how long its open took.
+    if (s.body.outcome === 'connect_failed') {
+      expect(typeof s.body.hidden).toBe('boolean');
+      optional.push('hidden');
+      if (s.body.why === 'open_failed') expect(typeof s.body.openMs).toBe('number');
+    }
     expect(Object.keys(s.body).filter((k) => !optional.includes(k)).sort()).toEqual(SCHEMA_KEYS);
     expect(s.raw).not.toContain(ACCOUNT);
     expect(s.raw).not.toContain(PASSWORD);

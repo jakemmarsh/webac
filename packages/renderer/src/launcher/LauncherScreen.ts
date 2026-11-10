@@ -33,6 +33,7 @@ import {
   type World, type WorldDirectory, connectUrlFor, parseCustomBridge, probeCustomBridge, worldEnterBlock, worldRegistrationText,
 } from './worldDirectory.js';
 import { matchUrlWorld } from './urlLogin.js';
+import type { VisibilitySource } from '../session/ResumeRunner.js';
 import { loadFavoriteWorlds, loadRememberedLogin, saveFavoriteWorlds, saveRememberedLogin, worldKeyOf, type RememberedLogin } from './launcherStorage.js';
 
 export const CHARSEL_LAYOUT = 0x21000004;
@@ -227,6 +228,11 @@ export interface LauncherOptions {
   /** Background retry period while the error shows (default WORLD_LIST_BACKGROUND_RETRY_MS). */
   backgroundRetryMs?: number;
   /**
+   * OBS.upgrade-aborted sweep — while a background retry waits, the page coming back into view
+   * (hidden → visible) runs it at once: the player is looking at the error. Absent: never.
+   */
+  visibility?: VisibilitySource;
+  /**
    * Every quiet attempt failed and the error is now shown (once per load:
    * the first, and each Retry; not the background retries). main.ts sends
    * the web-origin report (telemetry/WebReport.ts).
@@ -405,9 +411,13 @@ export class LauncherScreen {
   private loadGen = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
+  private unsubscribeVisible: (() => void) | null = null;
+
   private clearRetryTimer(): void {
     if (this.retryTimer !== null) clearTimeout(this.retryTimer);
     this.retryTimer = null;
+    this.unsubscribeVisible?.();
+    this.unsubscribeVisible = null;
   }
 
   /** Load the world list again now (the error's Retry link), with the quiet retries. */
@@ -454,8 +464,9 @@ export class LauncherScreen {
 
   /** While the error shows: try again every backgroundRetryMs, silently; a success replaces the error with the list. */
   private scheduleBackgroundRetry(gen: number): void {
-    this.retryTimer = setTimeout(() => {
-      this.retryTimer = null;
+    // Each background attempt runs once: by its timer, or sooner when the page comes into view.
+    const run = (): void => {
+      this.clearRetryTimer();
       if (gen !== this.loadGen || this.done) return;
       this.loaded = this.opts.loadDirectory().then(
         (dir) => {
@@ -467,7 +478,9 @@ export class LauncherScreen {
           this.scheduleBackgroundRetry(gen);
         },
       );
-    }, this.opts.backgroundRetryMs ?? WORLD_LIST_BACKGROUND_RETRY_MS);
+    };
+    this.retryTimer = setTimeout(run, this.opts.backgroundRetryMs ?? WORLD_LIST_BACKGROUND_RETRY_MS);
+    if (this.opts.visibility) this.unsubscribeVisible = this.opts.visibility.onVisible(run);
   }
 
   /** Take a loaded directory in; returns the `?world=` link's world to select, if any. */

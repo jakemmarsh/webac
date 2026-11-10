@@ -265,7 +265,10 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
   // BUG.telemetry-duplicate-resend — a page resends an event whose send failed after delivery
   // (TelemetryOutbox); each event id is logged once.
   const recentEventIds = new RecentEventIds(now);
-  const sweepTimer = setInterval(() => { connectRate.sweep(); clientErrorRate.sweep(); clientPreworldRate.sweep(); clientAutomationRate.sweep(); clientPortalRate.sweep(); clientRefusalRate.sweep(); }, limits.connectRateWindowMs);
+  // OBS.upgrade-aborted — an admitted upgrade that never opened a session logs one line; a client
+  // hammering half-open upgrades gets 10 lines a minute per address, no more.
+  const upgradeAbortRate = new SlidingWindowCounter(10, 60_000, now);
+  const sweepTimer = setInterval(() => { connectRate.sweep(); upgradeAbortRate.sweep(); clientErrorRate.sweep(); clientPreworldRate.sweep(); clientAutomationRate.sweep(); clientPortalRate.sweep(); clientRefusalRate.sweep(); }, limits.connectRateWindowMs);
   sweepTimer.unref?.();
   const sessions = new Set<Session>();
   /** Admitted-but-not-yet-open upgrades count against the global cap too. */
@@ -563,8 +566,26 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
     socket.destroy();
   }
 
+  /**
+   * OBS.upgrade-aborted (2026-11-10: two hidden-tab resumes whose sockets failed left no bridge line,
+   * so "never reached the bridge" read the same as "reached it and the handshake died"). One warn line
+   * per admitted upgrade that never reached openSession, rate-limited per address.
+   */
+  type UpgradeAbortReason = 'socket_destroyed_after_admit' | 'closed_before_open' | 'handshake_error';
+  function logUpgradeAborted(ip: string, req: http.IncomingMessage, reason: UpgradeAbortReason, startedAt: number, server: string | null, error?: unknown): void {
+    if (!upgradeAbortRate.hit(ip)) return;
+    const trace = traceFromUrl(req.url);
+    log('warn', 'upgrade_aborted', {
+      // server=null: a probe-only socket (the monitor's filter drops those, as for session_open).
+      ip, reason, ms: now() - startedAt, server,
+      ...(trace ? { trace } : {}),
+      ...(error !== undefined ? { error: String((error as Error)?.message ?? error) } : {}),
+    });
+  }
+
   httpServer.on('upgrade', (req: http.IncomingMessage, socket: Duplex, head: Buffer) => {
     socket.on('error', () => { /* client vanished mid-handshake */ });
+    const upgradeAt = now();
     const ip = clientIp(req.socket.remoteAddress, req.headers, config.trustProxyHops, config.clientIpHeader);
     void admit(req, ip).then((a) => {
       if (!a.ok) {
@@ -581,13 +602,36 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
         rejectUpgrade(socket, a.status, a.message);
         return;
       }
-      if (socket.destroyed) { a.release(); return; }
+      const serverKey = a.target?.key ?? null;
+      if (socket.destroyed) {
+        logUpgradeAborted(ip, req, 'socket_destroyed_after_admit', upgradeAt, serverKey);
+        a.release();
+        return;
+      }
       // An upgrade that never completes (ws aborts it on a bad request) frees what admission took,
       // the egress slot included; once the session opened, its cleanup does (release is idempotent).
       socket.once('close', a.release);
       const proxy = { address: req.socket.localAddress ?? '', port: req.socket.localPort ?? 0 };
       const trace = traceFromUrl(req.url);
-      wss.handleUpgrade(req, socket, head, (ws) => openSession(ws, ip, proxy, a.target, a.protocol, a.release, trace, a.egress, a.handover));
+      // ws runs the callback synchronously (no verifyClient), so `opened` is settled when handleUpgrade
+      // returns. A client that already half-closed (FIN) is destroyed by ws's completeUpgrade; a bad
+      // request gets ws's HTTP 4xx answer. Neither reaches openSession.
+      const clientGone = !socket.readable || !socket.writable;
+      let opened = false;
+      try {
+        wss.handleUpgrade(req, socket, head, (ws) => {
+          opened = true;
+          openSession(ws, ip, proxy, a.target, a.protocol, a.release, trace, a.egress, a.handover);
+        });
+      } catch (err) {
+        if (!opened) {
+          logUpgradeAborted(ip, req, 'handshake_error', upgradeAt, serverKey, err);
+          rejectUpgrade(socket, 500, 'Internal error');
+          a.release();
+        }
+        return;
+      }
+      if (!opened) logUpgradeAborted(ip, req, clientGone ? 'closed_before_open' : 'handshake_error', upgradeAt, serverKey);
     }, (err) => {
       metrics.reject('internal');
       log('error', 'admit_failed', { ip, error: err as Error });

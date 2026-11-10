@@ -35,7 +35,7 @@ import {
 } from '../packages/renderer/src/session/SessionLifecycle.js';
 import { ResumeRunner, attemptFoundNoNetwork, type OnlineSource } from '../packages/renderer/src/session/ResumeRunner.js';
 import { PreworldReporter, type PreworldEvent } from '../packages/renderer/src/telemetry/PreworldReporter.js';
-import { sanitizeClientPreworld } from '../services/ws-tcp-bridge/src/clientPreworld.js';
+import { sanitizeClientPreworld, MAX_OPEN_MS } from '../services/ws-tcp-bridge/src/clientPreworld.js';
 
 /** How the network treats a new socket: fails it fast, lets it hang, or opens it. */
 type NetMode = 'fast' | 'hang' | 'up';
@@ -95,7 +95,7 @@ class FakeOnline implements OnlineSource {
 type Kind = 'eor' | 'ac1999';
 
 /** The page's resume, as main.ts wires it (scheduleResume + the resume-attempt failure branch). */
-function page(kind: Kind) {
+function page(kind: Kind, opts: { hidden?: () => boolean } = {}) {
   const conn = kind === 'eor'
     ? new ClientConnection('ws://bridge/?server=w')
     : new Connection1999('ws://bridge/?server=w', { loginProfile: { ...EOR_LOGIN_PROFILE, protocol: 'ac1999' } });
@@ -105,7 +105,7 @@ function page(kind: Kind) {
   const sent: PreworldEvent[] = [];
   const reporter = new PreworldReporter({
     endpoint: 'https://bridge.example/client-preworld', build: 'abc1234', era: () => kind, server: () => 'w',
-    screen: () => 'resuming', now: () => Date.now(), trace: 'feedc0de12345678',
+    screen: () => 'resuming', now: () => Date.now(), trace: 'feedc0de12345678', hidden: opts.hidden,
     send: (_u, raw) => { sent.push(JSON.parse(raw) as PreworldEvent); },
   });
   const state = { disconnectedScreen: false, connected: 0, events: [] as ConnectionEvent[] };
@@ -216,7 +216,26 @@ for (const kind of ['eor', 'ac1999'] as const) {
       const gaps = starts.slice(1).map((t, i) => t - starts[i]);
       expect(gaps).toEqual(Array(4).fill(WS_OPEN_TIMEOUT_MS + RESUME_DELAYS_MS[0]));
       expect(p.sent.filter((e) => e.outcome === 'connect_failed').every((e) => e.why === 'open_timeout')).toBe(true);
+      // OBS.upgrade-aborted — each says how long the open took (the whole timeout).
+      expect(p.sent.filter((e) => e.outcome === 'connect_failed').every((e) => e.openMs === WS_OPEN_TIMEOUT_MS)).toBe(true);
       expect(p.state.disconnectedScreen).toBe(false);
+    });
+
+    it('OBS.upgrade-aborted: a connect_failed carries openMs and whether the page was hidden, and the bridge keeps both', () => {
+      let hidden = true;
+      const p = page(kind, { hidden: () => hidden });
+      netMode = 'fast';
+      p.dropAtCharSelect();
+      vi.advanceTimersByTime(RESUME_DELAYS_MS[0] + FAST_FAIL_MS);
+      hidden = false;
+      vi.advanceTimersByTime(30_000);
+      const fails = p.sent.filter((e) => e.outcome === 'connect_failed');
+      expect(fails.length).toBeGreaterThanOrEqual(2);
+      expect(fails[0]).toMatchObject({ why: 'open_failed', openMs: FAST_FAIL_MS, hidden: true });
+      expect(fails[1]).toMatchObject({ why: 'open_failed', openMs: FAST_FAIL_MS, hidden: false });
+      expect(sanitizeClientPreworld(fails[0])).toMatchObject({ outcome: 'connect_failed', why: 'open_failed', openMs: FAST_FAIL_MS, hidden: true });
+      // The error event itself carries openMs.
+      expect(p.state.events.find((e) => e.openFailed)?.openMs).toBe(FAST_FAIL_MS);
     });
   });
 }
@@ -299,5 +318,24 @@ describe('what still counts', () => {
     expect(life.resumingAfterDrop).toBe(false);
     expect(life.nextResumeDelay({ unreachable: true })).toBeNull();
     expect(life.resumeBound).toBeNull();
+  });
+});
+
+describe('OBS.upgrade-aborted: the bridge bounds connect_failed openMs / hidden', () => {
+  const base = { outcome: 'connect_failed', why: 'open_failed' };
+  it('keeps valid values, rounds and clamps openMs, drops malformed ones', () => {
+    expect(sanitizeClientPreworld({ ...base, openMs: 412, hidden: true })).toMatchObject({ openMs: 412, hidden: true });
+    expect(sanitizeClientPreworld({ ...base, openMs: 12.6, hidden: false })).toMatchObject({ openMs: 13, hidden: false });
+    expect(sanitizeClientPreworld({ ...base, openMs: 1e12 })!.openMs).toBe(MAX_OPEN_MS);
+    const bad = sanitizeClientPreworld({ ...base, openMs: -1, hidden: 'yes' })!;
+    expect('openMs' in bad).toBe(false);
+    expect('hidden' in bad).toBe(false);
+    expect('openMs' in sanitizeClientPreworld({ ...base, openMs: Number.NaN })!).toBe(false);
+    expect('openMs' in sanitizeClientPreworld({ ...base, openMs: '400' })!).toBe(false);
+  });
+  it('only on connect_failed', () => {
+    const ev = sanitizeClientPreworld({ outcome: 'dropped', openMs: 400, hidden: true })!;
+    expect('openMs' in ev).toBe(false);
+    expect('hidden' in ev).toBe(false);
   });
 });

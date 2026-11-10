@@ -284,6 +284,11 @@ export interface ConnectionEvent {
    * A 'disconnected' follows.
    */
   openFailed?: boolean;
+  /**
+   * OBS.upgrade-aborted — on an openFailed / openTimedOut error: ms from the
+   * socket's creation to its failure (a fast refusal vs a slow give-up).
+   */
+  openMs?: number;
 }
 
 /** A NetError optional header's payload (`NetError::UnPack @ 004114a0`: u32 m_stringID, u32 m_tableID). */
@@ -651,6 +656,8 @@ export class ClientConnection {
   datIterations: { portal: number; cell: number; language: number } = { portal: 0, cell: 0, language: 0 };
 
   private wsEverOpened: boolean = false;
+  /** When connect() created the current socket (Date.now()): an open failure's openMs counts from it. */
+  private socketCreatedAt = 0;
   /** CORE.17.k.b — set by disconnect() before closing so the onclose event reports deliberate:true. */
   private deliberateClose: boolean = false;
 
@@ -933,6 +940,7 @@ export class ClientConnection {
     this.wsEverOpened = false;
     this.deliberateClose = false;
     const socket = new WebSocket(this.url);
+    this.socketCreatedAt = Date.now();
     this.ws = socket;
     this.ws.binaryType = 'arraybuffer';
     this.stopOpenTimeout();
@@ -972,7 +980,7 @@ export class ClientConnection {
     socket.onclose = null;
     socket.onerror = null;
     try { socket.close(); } catch { /* still connecting */ }
-    this.emit({ type: 'error', error: 'WebSocket open timed out', netErrorId: 'ID_NetError_CantSocket', openTimedOut: true });
+    this.emit({ type: 'error', error: 'WebSocket open timed out', netErrorId: 'ID_NetError_CantSocket', openTimedOut: true, openMs: Date.now() - this.socketCreatedAt });
     this.handleSocketEnded(socket, 'socket_closed');
   }
 
@@ -1000,7 +1008,7 @@ export class ClientConnection {
         console.warn(`[AC:NET] Bridge not reachable at ${this.url} — start: npx tsx services/ws-tcp-bridge/src/bridge.ts`);
         // CORE.17.k.b — the browser client's local socket layer could not be
         // opened: retail ClientNet::InitAddresses' ID_NetError_CantSocket.
-        this.emit({ type: 'error', error: 'WebSocket error', netErrorId: 'ID_NetError_CantSocket', openFailed: true });
+        this.emit({ type: 'error', error: 'WebSocket error', netErrorId: 'ID_NetError_CantSocket', openFailed: true, openMs: Date.now() - this.socketCreatedAt });
         return;
       }
       this.emit({ type: 'error', error: 'WebSocket error' });

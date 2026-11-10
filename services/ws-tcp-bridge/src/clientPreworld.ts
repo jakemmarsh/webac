@@ -201,6 +201,12 @@ export interface ClientPreworldEvent {
   /** 'connect_failed' only: the network was out (CONNECT_FAILED_CAUSES). */
   why?: typeof CONNECT_FAILED_CAUSES[number];
   /**
+   * OBS.upgrade-aborted — 'connect_failed' only: ms from the socket's creation to its failure
+   * (clamped to MAX_OPEN_MS), and whether the page was hidden when it failed.
+   */
+  openMs?: number;
+  hidden?: boolean;
+  /**
    * OBS.login-after-refusal — 'char_list' only: a login to the same world was
    * refused earlier on the page within 10 min (renderer
    * session/LoginRefusalMemory.ts). Whether this login used the same account
@@ -304,6 +310,7 @@ export function sanitizeClientPreworld(body: unknown): ClientPreworldEvent | nul
     ...(IDENTITY_OUTCOMES.has(outcome) ? identityFields(b) : {}),
     ...(outcome === 'char_list' ? afterRefusalField(b.afterRefusal) : {}),
     ...(outcome === 'connect_failed' ? connectFailedWhyField(b.why) : {}),
+    ...(outcome === 'connect_failed' ? connectFailedOpenFields(b) : {}),
     ...(outcome === 'chargen_ok' || outcome === 'chargen_refused' ? heritageField(b.heritage) : {}),
   };
 }
@@ -401,4 +408,19 @@ function handoverFields(b: Record<string, unknown>): Pick<ClientPreworldEvent, '
   const path = pick(b.path, HANDOVER_PATHS);
   const yielded = uint(b.yieldedMs, 24 * 3600_000);
   return { ...(ms !== null ? { handoverMs: ms } : {}), ...(reason ? { reason } : {}), ...(path ? { path } : {}), ...(yielded !== null ? { yieldedMs: yielded } : {}) };
+}
+
+/** The longest openMs kept; a longer one is clamped (an OS connect gives up within ~2 min; ours at 15 s). */
+export const MAX_OPEN_MS = 10 * 60_000;
+
+/**
+ * OBS.upgrade-aborted — `{ openMs, hidden }` from a connect_failed body: openMs a finite
+ * non-negative number (rounded, clamped to MAX_OPEN_MS), hidden a boolean; each dropped when malformed.
+ */
+export function connectFailedOpenFields(b: Record<string, unknown>): Pick<ClientPreworldEvent, 'openMs' | 'hidden'> {
+  const ms = b.openMs;
+  return {
+    ...(typeof ms === 'number' && Number.isFinite(ms) && ms >= 0 ? { openMs: Math.min(Math.round(ms), MAX_OPEN_MS) } : {}),
+    ...(typeof b.hidden === 'boolean' ? { hidden: b.hidden } : {}),
+  };
 }

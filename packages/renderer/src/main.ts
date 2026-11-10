@@ -414,7 +414,7 @@ import { armDropResume, handleUnexpectedDrop, resumeAttemptRefusalIsFinal, silen
 import { SessionLiveness, sessionDropped, liveSessionSocketFailed, characterListRole } from './session/SessionLiveness.js';
 import { ChargenDraftStore, decideChargenDraft, CHARGEN_DRAFT_OFFER_TEXT, type ChargenDraftOwner } from './session/ChargenResume.js';
 import { DrainHandover } from './session/DrainHandover.js';
-import { ResumeRunner, attemptFoundNoNetwork, windowOnlineSource } from './session/ResumeRunner.js';
+import { ResumeRunner, attemptFoundNoNetwork, documentVisibilitySource, windowOnlineSource } from './session/ResumeRunner.js';
 import { AccountTabGuard, accountSessionKey, openSessionChannel, type LogoutReason } from './session/AccountTabGuard.js';
 import { InWorldEnterWait, LOGGED_OUT_FOR_OTHER_TAB_TEXT } from './session/InWorldHolder.js';
 import { LoginHolderWait, LOGGED_OUT_FOR_LOGIN_TEXT, stoodDownForOtherTabText } from './session/LoginHolder.js';
@@ -8607,6 +8607,8 @@ async function main() {
         sourceUrl: runtimeConfig.sourceUrl,
         siteLinks: runtimeConfig.siteLinks,
         linkedWorld,
+        // OBS.upgrade-aborted sweep — a failed world list's background retry runs when the player looks back.
+        visibility: documentVisibilitySource(document),
       });
       linkedWorld = null;
       launcherActive = false;
@@ -8958,6 +8960,8 @@ async function main() {
       aceConnection.connect(aceAccount, acePassword);
     },
     online: windowOnlineSource(window),
+    // OBS.upgrade-aborted — a background tab's pending attempt runs as soon as the player looks at it.
+    visibility: documentVisibilitySource(document),
     log: (text) => console.log(text),
   });
   /**

@@ -410,6 +410,13 @@ export interface PreworldEvent {
    * Absent on any other client-side failure (a login that timed out).
    */
   why?: 'open_timeout' | 'offline' | 'open_failed';
+  /**
+   * OBS.upgrade-aborted — 'connect_failed' only: ms from the socket's creation
+   * to its failure (ConnectionEvent.openMs), and whether the page was hidden
+   * when it failed (2026-11-10: two hidden-tab resumes whose opens failed).
+   */
+  openMs?: number;
+  hidden?: boolean;
 }
 
 export interface PreworldReporterOptions {
@@ -431,6 +438,8 @@ export interface PreworldReporterOptions {
    * counts BOOT_SLOW_MS from when the page was shown.
    */
   prerendering?: () => boolean;
+  /** Whether the page is hidden now (default document.visibilityState === 'hidden'); on connect_failed. */
+  hidden?: () => boolean;
   /** A random id for this page load; generated when absent. */
   trace?: string;
   /**
@@ -875,7 +884,7 @@ export class PreworldReporter {
    * account, on the login_refused it makes.
    */
   connectionError(
-    event: Pick<ConnectionEvent, 'characterError' | 'serverNetError' | 'netErrorId' | 'openTimedOut' | 'openFailed'>, token: string | null = null,
+    event: Pick<ConnectionEvent, 'characterError' | 'serverNetError' | 'netErrorId' | 'openTimedOut' | 'openFailed' | 'openMs'>, token: string | null = null,
     opts: LoginHolderTelemetry = {},
   ): void {
     const held = { ...(opts.heldByTab === true ? { heldByTab: true as const } : {}), ...holderFields(opts) };
@@ -906,7 +915,10 @@ export class PreworldReporter {
       if (SERVER_REFUSAL_NET_ERRORS.has(event.netErrorId)) { this.report('login_refused', { token: safeToken(event.netErrorId) }); return; }
       const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
       const why = event.openTimedOut ? 'open_timeout' : offline ? 'offline' : event.openFailed ? 'open_failed' : undefined;
-      this.report('connect_failed', { token: safeToken(event.netErrorId), ...(why ? { why } : {}) });
+      const openMs = typeof event.openMs === 'number' && Number.isFinite(event.openMs) && event.openMs >= 0 ? Math.round(event.openMs) : null;
+      this.report('connect_failed', {
+        token: safeToken(event.netErrorId), ...(why ? { why } : {}), ...(openMs !== null ? { openMs } : {}), hidden: this.pageHiddenNow(),
+      });
     }
   }
 
@@ -1031,6 +1043,13 @@ export class PreworldReporter {
     this.report('boot_slow', {});
   }
 
+  private pageHiddenNow(): boolean {
+    try {
+      if (this.opts.hidden) return this.opts.hidden();
+      return typeof document !== 'undefined' && document.visibilityState === 'hidden';
+    } catch { return false; }
+  }
+
   private isPrerendering(): boolean {
     try {
       if (this.opts.prerendering) return this.opts.prerendering();
@@ -1120,7 +1139,7 @@ export class PreworldReporter {
 
   // ── Transport ────────────────────────────────────────────────────────
 
-  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'heritage' | 'handoverMs' | 'reason' | 'path' | 'yieldedMs' | 'retry' | 'why' | 'afterRefusal' | 'heldByTab' | 'holderQuery' | 'holders' | 'tabs' | 'holdersClosed'>>, withStream = false): void {
+  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'heritage' | 'handoverMs' | 'reason' | 'path' | 'yieldedMs' | 'retry' | 'why' | 'openMs' | 'hidden' | 'afterRefusal' | 'heldByTab' | 'holderQuery' | 'holders' | 'tabs' | 'holdersClosed'>>, withStream = false): void {
     // OBS.login-after-refusal — every refused attempt, sent or not. A case retry's refusal
     // (case_verbatim / case_lower, LoginCaseFallback) is the page trying the password's other
     // case, not the server refusing what the player typed, so it is not counted.
@@ -1169,6 +1188,8 @@ export class PreworldReporter {
         ...(this.tabId ? { tab: this.tabId } : {}),
       } : {}),
       ...(outcome === 'connect_failed' && f.why ? { why: f.why } : {}),
+      ...(outcome === 'connect_failed' && f.openMs !== undefined ? { openMs: f.openMs } : {}),
+      ...(outcome === 'connect_failed' && f.hidden !== undefined ? { hidden: f.hidden } : {}),
       ...(outcome === 'char_list' && f.afterRefusal ? { afterRefusal: {
         sameAccount: f.afterRefusal.sameAccount === true,
         samePassword: f.afterRefusal.samePassword === true,

@@ -203,6 +203,8 @@ export class Connection1999 implements NetConnection {
   private enterWorldGranted = false;
   private deliberate = false;
   private everOpened = false;
+  /** When connect() created the current socket (Date.now()): an open failure's openMs counts from it. */
+  private socketCreatedAt = 0;
   private dddFiles: DatPatch1999[] = [];
   private dddExpected = 0;
   private dddBytes = 0;
@@ -361,6 +363,7 @@ export class Connection1999 implements NetConnection {
     // ?proto=ac1999 tells the bridge this session speaks the 1999 protocol (one port, its own
     // disconnect) even where it can't tell from the world (a Custom… bridge pinned to end of retail).
     const ws = new WebSocket(withProto1999(this.url));
+    this.socketCreatedAt = Date.now();
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
     // BUG.resume-hung-socket — as ClientConnection: a socket still CONNECTING after
@@ -374,7 +377,7 @@ export class Connection1999 implements NetConnection {
       ws.onclose = null;
       ws.onerror = null;
       try { ws.close(); } catch { /* still connecting */ }
-      this.emit({ type: 'error', error: 'Bridge connection timed out', netErrorId: 'ID_NetError_CantSocket', openTimedOut: true });
+      this.emit({ type: 'error', error: 'Bridge connection timed out', netErrorId: 'ID_NetError_CantSocket', openTimedOut: true, openMs: Date.now() - this.socketCreatedAt });
       // The page may have left the socket from the error (disconnect(), which reported the end itself).
       if (ws === this.ws) this.ended();
     });
@@ -433,7 +436,7 @@ export class Connection1999 implements NetConnection {
       this.stopOpenTimeout();
       // A socket that never opened is retail ClientNet::InitAddresses' ID_NetError_CantSocket, as on
       // ClientConnection: without it the page kept "Please Wait" up forever (an unreachable Custom… bridge).
-      if (!this.everOpened) { this.emit({ type: 'error', error: 'Bridge connection error', netErrorId: 'ID_NetError_CantSocket', openFailed: true }); return; }
+      if (!this.everOpened) { this.emit({ type: 'error', error: 'Bridge connection error', netErrorId: 'ID_NetError_CantSocket', openFailed: true, openMs: Date.now() - this.socketCreatedAt }); return; }
       this.emit({ type: 'error', error: 'Bridge connection error' });
     };
     ws.onclose = (ev: CloseEvent) => {
