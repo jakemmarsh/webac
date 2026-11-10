@@ -39,7 +39,7 @@ import { dirname, join } from 'node:path';
 import { chromium, type Page } from 'playwright';
 import { DEFAULT_VIEWPORT, GPU_ARGS, REMOTE_CHROMIUM, REPO, SWIFTSHADER_ARGS, createCharacterIfNeeded, waitForWorld } from './lib/game-session.ts';
 import { createRunProfile } from './lib/temp-profile.ts';
-import { regressionSteps, withRegressionSteps } from './lib/playthrough-regressions.ts';
+import { acquiredLedgerPath, fileLedger, recordAcquired, regressionSteps, withRegressionSteps } from './lib/playthrough-regressions.ts';
 import {
   type ClientProbe, type MagicFacts, type Place, type PlaythroughDriver, type Signals, type VendorStockRow, loadGiveTables, loadVendorSpots, emptySignals, exitCode, freshState, loadCreatureFacts,
   parsePlaythroughArgs, playthroughSteps, playthroughUrl, renderReport, runPlaythrough, selectSteps,
@@ -238,13 +238,20 @@ async function main(): Promise<number> {
   };
 
   const state = freshState();
+  // What this account's runs bought, looted or kept, remembered across runs: the next run's pack-space drops it first.
+  const ledgerPath = acquiredLedgerPath(args.era.key, args.bridge, args.account);
+  const stepCtx = { driver, era: args.era, facts: loaded?.facts ?? null, vendorSpots, giveTables, state, log, acquired: fileLedger(ledgerPath) };
   let res;
   try {
-    res = await runPlaythrough(steps, { driver, era: args.era, facts: loaded?.facts ?? null, vendorSpots, giveTables, state, log }, { log });
+    res = await runPlaythrough(steps, stepCtx, { log });
   } finally {
     // Never leave the character standing in the world (docs/agent-play.md, idle logout).
     const p = await driver.probe().catch(() => null);
-    if (p?.screen === 'world') { await driver.call('logout').catch(() => undefined); await driver.sleep(4000); }
+    if (p?.screen === 'world') {
+      const got = await recordAcquired(stepCtx).catch((e: Error) => { log(`   acquired ledger: not recorded (${e.message})`); return []; });
+      if (got.length) log(`   acquired ledger: this run kept ${got.length} new item(s) (${got.map((g) => g.name).join(', ')}); ${ledgerPath}`);
+      await driver.call('logout').catch(() => undefined); await driver.sleep(4000);
+    }
   }
   const finished = new Date();
   writeFileSync(join(out, 'report.md'), renderReport(res, { era: args.era, url, account: args.account, character: state.character, started, finished, planned: plan }));

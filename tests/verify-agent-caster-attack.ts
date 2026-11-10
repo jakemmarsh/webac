@@ -115,6 +115,16 @@ describe('a caster attacks with spells', () => {
     expect(events('target-died').map((e) => e.guid)).toEqual([GOLEM]);
   });
 
+  it('faces the target before each bolt: the turn reads its guid as the object, not as degrees (2026-11-10)', async () => {
+    // Due east. Before, turn(0x80003001) faced 0x80003001 mod 360 = 177°, due south.
+    host.objs.get(GOLEM)!.x = 90; host.objs.get(GOLEM)!.y = 20;
+    make();
+    expect(api.attack('Sparring Golem').ok).toBe(true);
+    await step(1500);
+    expect(host.sent.filter((s) => s.startsWith('cast ')).length).toBeGreaterThan(0);
+    expect(Math.abs(api.self()!.heading - 90)).toBeLessThan(1);
+  });
+
   it('a higher War Magic skill picks the higher bolt the macro would', async () => {
     warBuffed = 100;
     make();

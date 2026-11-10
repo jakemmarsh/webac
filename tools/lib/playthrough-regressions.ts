@@ -32,9 +32,12 @@
 import type { AgentResult } from '../../packages/renderer/src/agent/types.ts';
 import { capacityBarFraction, structureBarFraction } from '../../packages/renderer/src/ui/structureBar.ts';
 import { type HeldPose, heldPoseDifferences } from '../../packages/renderer/src/models/HeldPose.ts';
-import { compassPoint } from '../../packages/renderer/src/agent/format.ts';
+import { INVENTORY_KINDS, compassPoint } from '../../packages/renderer/src/agent/format.ts';
 import { shortcutDropRefusal1999 } from '../../packages/renderer/src/network/itemShortcutRestore.ts';
-import { type EraPlan, type Step, type StepContext, type StepOutcome, fail, ok, settle, skip } from './playthrough.ts';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { type AcquiredEntry, type AcquiredLedger, type EraPlan, type Step, type StepContext, type StepOutcome, fail, ok, settle, skip } from './playthrough.ts';
 
 // ── Geometry ────────────────────────────────────────────────────────────────
 
@@ -506,9 +509,125 @@ export function mainPackFree(h: Pick<HeldState, 'packs' | 'items' | 'mainCapacit
   return Math.max(0, (h.mainCapacity ?? 0) - inMain);
 }
 
+// ── What earlier runs left in the pack ─────────────────────────────────────
+
 /**
- * Right after entering the world: free main-pack slots, dropping regression filler an earlier run left (the Crude
- * Lockpicks pack-scroll-sort spawns) until PACK_SPACE_WANTED are free. Its own drops only; anything else stays.
+ * The ledger of what play-throughs on one server + account acquired: a JSON file under ~/.cache/acjs/playthrough-acquired
+ * (ACJS_PLAYTHROUGH_LEDGER_DIR overrides). The live gate's accounts keep their character from run to run, and every
+ * run's purchases and loot stayed in the pack until pack-space failed (lgate99, 2026-11-10: "8 of 102 main-pack slots
+ * free, 15 wanted").
+ */
+export function acquiredLedgerPath(eraKey: string, bridge: string, account: string): string {
+  const slug = (x: string) => x.replace(/^[a-z]+:\/\//i, '').replace(/[^a-z0-9.-]+/gi, '_');
+  const dir = process.env.ACJS_PLAYTHROUGH_LEDGER_DIR || join(homedir(), '.cache', 'acjs', 'playthrough-acquired');
+  return join(dir, `${slug(eraKey)}--${slug(bridge)}--${slug(account)}.json`);
+}
+
+export function fileLedger(path: string): AcquiredLedger {
+  return {
+    load() {
+      try {
+        const v: unknown = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : [];
+        return Array.isArray(v) ? v.filter((e): e is AcquiredEntry => Number.isFinite(e?.guid) && Number.isFinite(e?.wcid)) : [];
+      } catch { return []; }
+    },
+    save(entries) {
+      mkdirSync(dirname(path), { recursive: true });
+      const tmp = `${path}.${process.pid}.tmp`;
+      writeFileSync(tmp, `${JSON.stringify(entries, null, 2)}\n`);
+      renameSync(tmp, path);
+    },
+  };
+}
+
+/** What the character held when the pack-space step finished (every guid: packs, pack contents, worn). */
+const HELD_AT_START = new WeakMap<StepContext['state'], Set<number>>();
+const allGuids = (h: Pick<HeldState, 'packs' | 'items' | 'equipped'>): Set<number> =>
+  new Set([...h.packs, ...h.items.map((i) => i.guid), ...h.equipped.map((i) => i.guid)]);
+/** Money (Money 0x40, PromissoryNote 0x40000) and packs (Container 0x200): never recorded, never dropped here. */
+const KEPT_TYPES = 0x40 | 0x40000 | 0x200;
+const asAgentItem = (i: Pick<HeldItem, 'name' | 'itemType'>) => ({ guid: 0, where: 'pack', name: i.name, itemType: i.itemType }) as Parameters<(typeof INVENTORY_KINDS)['food']>[0];
+
+/** A kind the later steps use (vendor-supplies buys one only when none is held): a caster, a healing kit, food, a scroll. */
+export function isSupplyKind(i: Pick<HeldItem, 'name' | 'itemType'>): boolean {
+  const it = asAgentItem(i);
+  return ((i.itemType ?? 0) & 0x8000) !== 0 || (INVENTORY_KINDS.kit(it) && /heal/i.test(i.name)) || INVENTORY_KINDS.food(it) || INVENTORY_KINDS.scroll(it);
+}
+
+/** Food and ammunition, the vendor-buy step's cheapest buys (Arrow, Water, Bread). */
+export function isConsumable(i: Pick<HeldItem, 'name' | 'itemType'>): boolean {
+  return INVENTORY_KINDS.food(asAgentItem(i)) || (((i.itemType ?? 0) & 0x100) !== 0 && /\b(arrows?|bolts?|darts?|quarrels?)\b/i.test(i.name));
+}
+
+/**
+ * At the run's end (the CLI, before the logout): add what the character holds now and did not hold when pack-space
+ * finished (bought, looted, spawns kept with --keep-spawned) to the ledger, and forget entries no longer held. Money
+ * and packs are not recorded. Returns the new entries. A run whose pack-space step didn't finish records nothing.
+ */
+export async function recordAcquired(ctx: StepContext): Promise<AcquiredEntry[]> {
+  const before = HELD_AT_START.get(ctx.state);
+  if (!ctx.acquired || !before) return [];
+  const h = await held(ctx);
+  if (!h) return [];
+  const now = [...h.items, ...h.equipped];
+  const byGuid = new Map(now.map((i) => [i.guid, i]));
+  const kept = ctx.acquired.load().filter((e) => byGuid.get(e.guid)?.wcid === e.wcid);
+  const known = new Set(kept.map((e) => e.guid));
+  const packs = new Set(h.packs);
+  const fresh = now.filter((i) => !before.has(i.guid) && !known.has(i.guid) && !packs.has(i.guid) && ((i.itemType ?? 0) & KEPT_TYPES) === 0)
+    .map((i) => ({ guid: i.guid, wcid: i.wcid, name: i.name }));
+  ctx.acquired.save([...kept, ...fresh]);
+  return fresh;
+}
+
+/** One pick of the pack-space step: the item and why it may go. */
+export interface PackSpaceDrop { guid: number; name: string; why: 'filler' | 'earlier-run' | 'surplus' | 'earlier-run-supply' }
+
+/**
+ * What pack-space may drop from the main pack, in this order, `need` at most: regression filler (the Crude Lockpicks
+ * pack-scroll-sort spawns); what earlier runs bought or looted (the ledger, guid and weenie class both matching) of a
+ * kind the later steps don't use; spare objects of a food or ammunition kind held as more than one object (the buys of
+ * runs before the ledger existed: a 1999 Arrow bought is a new object each run; the oldest of each weenie class, the
+ * lowest guid, stays); then the earlier runs' supplies (caster, kit, food, scroll: vendor-supplies buys one again).
+ * Never a side pack, money, anything worn or inside a side pack, or anything else the character holds.
+ */
+export function packSpaceDrops(h: Pick<HeldState, 'packs' | 'items'>, ledger: AcquiredEntry[], need: number): PackSpaceDrop[] {
+  if (need <= 0) return [];
+  const main = h.packs[0];
+  const packs = new Set(h.packs);
+  const inMain = h.items.filter((i) => i.container === main && !packs.has(i.guid) && ((i.itemType ?? 0) & KEPT_TYPES) === 0);
+  const fromRuns = new Map(ledger.map((e) => [e.guid, e.wcid]));
+  const mine = (i: HeldItem) => fromRuns.get(i.guid) === i.wcid;
+  const byWcid = new Map<number, HeldItem[]>();
+  for (const i of inMain) if (isConsumable(i) && !mine(i)) byWcid.set(i.wcid, [...(byWcid.get(i.wcid) ?? []), i]);
+  const surplus = [...byWcid.values()].flatMap((g) => g.sort((a, b) => a.guid - b.guid).slice(1));
+  const pick = (why: PackSpaceDrop['why']) => (i: HeldItem): PackSpaceDrop => ({ guid: i.guid, name: i.name, why });
+  return [
+    ...inMain.filter((i) => i.wcid === REGRESSION_WCIDS.filler && !mine(i)).map(pick('filler')),
+    ...inMain.filter((i) => mine(i) && !isSupplyKind(i)).map(pick('earlier-run')),
+    ...surplus.map(pick('surplus')),
+    ...inMain.filter((i) => mine(i) && isSupplyKind(i)).map(pick('earlier-run-supply')),
+  ].slice(0, need);
+}
+
+/** "Arrow ×3, Bread": names with counts, in first-seen order. */
+function namesCounted(names: string[]): string {
+  const n = new Map<string, number>();
+  for (const x of names) n.set(x, (n.get(x) ?? 0) + 1);
+  return [...n].map(([k, c]) => (c > 1 ? `${k} ×${c}` : k)).join(', ');
+}
+
+const DROP_WHY: Record<PackSpaceDrop['why'], string> = {
+  filler: 'regression filler earlier runs spawned',
+  'earlier-run': 'bought or looted by earlier runs',
+  surplus: 'spare food / ammunition (more than one object of a kind)',
+  'earlier-run-supply': 'supplies earlier runs bought',
+};
+
+/**
+ * Right after entering the world: free main-pack slots until PACK_SPACE_WANTED are free, dropping only the
+ * play-through's own leftovers (packSpaceDrops); the character's starting gear and anything else stays. It also notes
+ * what the character holds, so the run's end records what this run acquired (recordAcquired) for the next one.
  */
 export function packSpaceStep(): Step {
   return {
@@ -517,15 +636,28 @@ export function packSpaceStep(): Step {
       const h = await held(ctx);
       if (!h || !h.mainCapacity) return skip('the client lists no main pack capacity');
       let free = mainPackFree(h);
-      if (free >= PACK_SPACE_WANTED) return ok(`${free} of ${h.mainCapacity} main-pack slots free`);
-      const filler = h.items.filter((i) => i.wcid === REGRESSION_WCIDS.filler && i.container === h.packs[0]).map((i) => i.guid);
-      const want = Math.min(filler.length, PACK_SPACE_WANTED - free);
-      const left = await dropSpawned(ctx, filler.slice(0, want));
-      const after = await held(ctx);
-      free = after ? mainPackFree(after) : free;
-      const what = `dropped ${want - left.length} leftover Crude Lockpick(s) from earlier runs; ${free} of ${h.mainCapacity} main-pack slots free`;
+      if (free >= PACK_SPACE_WANTED) {
+        HELD_AT_START.set(ctx.state, allGuids(h));
+        return ok(`${free} of ${h.mainCapacity} main-pack slots free`);
+      }
+      const ledger = ctx.acquired?.load() ?? [];
+      const picks = packSpaceDrops(h, ledger, PACK_SPACE_WANTED - free);
+      const left = await dropSpawned(ctx, picks.map((p) => p.guid));
+      const after = (await held(ctx)) ?? h;
+      const still = allGuids(after);
+      HELD_AT_START.set(ctx.state, still);
+      const gone = picks.filter((p) => !still.has(p.guid));
+      if (ctx.acquired && gone.some((p) => p.why.startsWith('earlier-run'))) {
+        const goneSet = new Set(gone.map((p) => p.guid));
+        ctx.acquired.save(ledger.filter((e) => !goneSet.has(e.guid)));
+      }
+      free = mainPackFree(after);
+      const groups = (Object.keys(DROP_WHY) as Array<PackSpaceDrop['why']>)
+        .map((w) => ({ w, names: gone.filter((p) => p.why === w).map((p) => p.name) })).filter((g) => g.names.length)
+        .map((g) => `${g.names.length} ${DROP_WHY[g.w]} (${namesCounted(g.names)})`);
+      const what = `${groups.length ? `dropped ${groups.join('; ')}` : 'none of the play-through\'s own leftovers to drop'}; ${free} of ${h.mainCapacity} main-pack slots free`;
       if (free >= PACK_SPACE_WANTED) return ok(what, { allow: [/drop|dropped/i] });
-      return fail(`${what}, ${PACK_SPACE_WANTED} wanted: the pack is full of the character's own things (or the drops failed: ${left.join(', ') || 'none'})`, { allow: [/drop|dropped/i] });
+      return fail(`${what}, ${PACK_SPACE_WANTED} wanted: the rest of the pack is the character's own things (or the drops failed: ${left.join(', ') || 'none'})`, { allow: [/drop|dropped/i] });
     },
   };
 }

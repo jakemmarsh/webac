@@ -1,7 +1,10 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { HeldPose } from '../packages/renderer/src/models/HeldPose.ts';
 import {
-  type ClientProbe, type PlaythroughDriver, type Step, type Signals, type StepContext, emptySignals, eraPlan, freshState, playthroughSteps,
+  type AcquiredEntry, type ClientProbe, type PlaythroughDriver, type Step, type Signals, type StepContext, emptySignals, eraPlan, freshState, playthroughSteps,
   renderReport, runPlaythrough, selectSteps,
 } from '../tools/lib/playthrough.ts';
 import {
@@ -11,7 +14,7 @@ import {
   regressionSteps, rowOf, scrollTargetFor, shieldRelogStep, structureBarFraction, usedTool, sidePackFiller, visibleRowsOf, withRegressionSteps,
   WALK_SHORT_METRES, WALK_SHORT_MIN_MOVED, WALK_BEARINGS, judgeWalk, pointAlong, walkPlan, walkShortStep, shortcutTrayRefusal,
   type KeysState, judgeKeysState, readyForKeys, runningJumpCoastStep,
-  PACK_SPACE_WANTED, leavesNoTrace, mainPackFree, packSpaceStep, spawnHeld,
+  PACK_SPACE_WANTED, leavesNoTrace, mainPackFree, packSpaceStep, spawnHeld, acquiredLedgerPath, fileLedger, packSpaceDrops, recordAcquired,
 } from '../tools/lib/playthrough-regressions.ts';
 
 // The week's player-reported regressions as play-through steps (2026-11-07): the step order, --only, the report,
@@ -562,7 +565,99 @@ describe('a step leaves the character as it found it', () => {
     const full = { packs: [MAIN], items: Array.from({ length: 100 }, (_, i) => hi(100 + i, 999)), equipped: [], mainCapacity: 102 };
     const r2 = await packSpaceStep().run(ctxOf(heldDriver(full).d, 'eor'));
     expect(r2.status).toBe('fail');
-    expect(r2.detail).toContain('the pack is full of the character\'s own things');
+    expect(r2.detail).toContain('none of the play-through\'s own leftovers to drop');
+    expect(r2.detail).toContain('the rest of the pack is the character\'s own things');
+  });
+
+  // lgate99 (2026-11-10): "8 of 102 main-pack slots free, 15 wanted": earlier runs' Arrows, Water and loot filled it.
+  const named = (guid: number, wcid: number, name: string, itemType: number, container = MAIN): HI => ({ guid, name, wcid, container, itemType, validLocations: 0 });
+  const memLedger = (entries: AcquiredEntry[]) => {
+    const box = { entries };
+    return { box, ledger: { load: () => box.entries.map((e) => ({ ...e })), save: (e: AcquiredEntry[]) => { box.entries = e.map((x) => ({ ...x })); } } };
+  };
+
+  it('pack-space drops earlier runs\' purchases and loot (the ledger), then spare food / ammo; starting gear, money, packs and worn things stay', async () => {
+    const SACK = 0x50000002;
+    const starter = [
+      named(10, 300, 'Bread', 0x20), named(11, 301, 'Water', 0x20), named(12, 302, 'Arrow', 0x100), named(13, 303, 'Practice Shortsword', 0x1),
+      named(14, 628, 'Crude Healing Kit', 0x80), named(15, 273, 'Pyreal', 0x40), named(SACK, 166, 'Sack', 0x200), named(16, 304, 'Lead Scarab', 0x1000),
+      named(17, 304, 'Lead Scarab', 0x1000), // a second starter component stack: not food or ammo, so never "surplus"
+    ];
+    const inSack = Array.from({ length: 5 }, (_, i) => named(40 + i, 302, 'Arrow', 0x100, SACK));
+    const own = Array.from({ length: 75 }, (_, i) => named(1000 + i, 999, `Thing ${i}`, 0x80));
+    // Before the ledger: each run's bought Arrow / Water a new object (oldest one of each stays).
+    const spareArrows = Array.from({ length: 4 }, (_, i) => named(200 + i, 302, 'Arrow', 0x100));
+    const spareWater = [named(210, 301, 'Water', 0x20), named(211, 301, 'Water', 0x20)];
+    // The ledger's: a looted sword, a bought dagger, a bought healing kit (a supply, dropped last), a stale entry (wcid changed).
+    const looted = named(300, 400, 'Rusty Sword', 0x1);
+    const bought = named(301, 401, 'Dagger', 0x1);
+    const supply = named(302, 628, 'Crude Healing Kit', 0x80);
+    const reused = named(303, 999, 'Thing reused', 0x80);
+    const worn = named(304, 402, 'Leather Cap', 0x2);
+    const state = { packs: [MAIN, SACK], items: [...starter, ...inSack, ...own, ...spareArrows, ...spareWater, looted, bought, supply, reused], equipped: [worn], mainCapacity: 102 };
+    expect(mainPackFree(state as never)).toBe(9);
+    const { box, ledger } = memLedger([
+      { guid: 300, wcid: 400, name: 'Rusty Sword' }, { guid: 301, wcid: 401, name: 'Dagger' }, { guid: 302, wcid: 628, name: 'Crude Healing Kit' },
+      { guid: 303, wcid: 123, name: 'Was something else' }, { guid: 304, wcid: 402, name: 'Leather Cap' }, { guid: 41, wcid: 302, name: 'Arrow' },
+    ]);
+    const { d, dropped } = heldDriver(state);
+    const ctx = { ...ctxOf(d), acquired: ledger };
+    const r = await packSpaceStep().run(ctx);
+    expect(r.status).toBe('ok');
+    // 9 free, 6 more wanted: the two ledger non-supplies first, then spare Water and Arrows (the oldest of each stays).
+    expect(dropped).toEqual([300, 301, 210, 211, 200, 201]);
+    expect(mainPackFree(state as never)).toBe(PACK_SPACE_WANTED);
+    for (const g of [10, 11, 12, 13, 14, 15, 16, 17, SACK, 302, 303, 304, 40, 41]) expect(dropped).not.toContain(g);
+    expect(r.detail).toBe('dropped 2 bought or looted by earlier runs (Rusty Sword, Dagger); 4 spare food / ammunition (more than one object of a kind) (Water ×2, Arrow ×2); 15 of 102 main-pack slots free');
+    // The dropped ledger entries are forgotten; the rest stay for the run's end to prune.
+    expect(box.entries.map((e) => e.guid)).toEqual([302, 303, 304, 41]);
+  });
+
+  it('pack-space orders its picks: filler, earlier runs\' non-supplies, spare food / ammo, then earlier runs\' supplies', () => {
+    const h = {
+      packs: [MAIN],
+      items: [named(1, 302, 'Arrow', 0x100), named(2, 302, 'Arrow', 0x100), named(3, 301, 'Water', 0x20), named(4, 301, 'Water', 0x20),
+        named(5, 628, 'Crude Healing Kit', 0x80), named(6, 400, 'Rusty Sword', 0x1), named(7, 511, 'Crude Lockpick', 0x4000), named(8, 301, 'Water', 0x20)],
+    };
+    const ledger = [{ guid: 5, wcid: 628, name: 'Crude Healing Kit' }, { guid: 6, wcid: 400, name: 'Rusty Sword' }, { guid: 8, wcid: 301, name: 'Water' }];
+    expect(packSpaceDrops(h as never, ledger, 99).map((p) => [p.guid, p.why])).toEqual([
+      [7, 'filler'], [6, 'earlier-run'], [2, 'surplus'], [4, 'surplus'], [5, 'earlier-run-supply'], [8, 'earlier-run-supply'],
+    ]);
+    expect(packSpaceDrops(h as never, ledger, 2).map((p) => p.guid)).toEqual([7, 6]);
+    expect(packSpaceDrops(h as never, ledger, 0)).toEqual([]);
+    // No ledger: only filler and spare food / ammo; a lone kind, a weapon, a kit stay.
+    expect(packSpaceDrops(h as never, [], 99).map((p) => p.guid)).toEqual([7, 2, 4, 8]);
+  });
+
+  it('the run\'s end records what the run acquired after pack-space (not money or packs) and forgets what is gone', async () => {
+    const state = { packs: [MAIN], items: [named(10, 300, 'Bread', 0x20), named(11, 999, 'Thing', 0x80)], equipped: [] as HI[], mainCapacity: 102 };
+    const { box, ledger } = memLedger([{ guid: 500, wcid: 1, name: 'Sold since' }, { guid: 11, wcid: 999, name: 'Thing' }]);
+    const { d } = heldDriver(state);
+    const ctx = { ...ctxOf(d), acquired: ledger };
+    expect(await recordAcquired(ctx)).toEqual([]); // pack-space never ran: nothing recorded
+    expect((await packSpaceStep().run(ctx)).status).toBe('ok');
+    state.items.push(named(20, 302, 'Arrow', 0x100), named(21, 273, 'Pyreal', 0x40), named(22, 166, 'Sack', 0x200), named(23, 400, 'Rusty Sword', 0x1));
+    state.equipped.push(named(24, 402, 'Leather Cap', 0x2));
+    const got = await recordAcquired(ctx);
+    expect(got.map((g) => g.guid)).toEqual([20, 23, 24]);
+    expect(box.entries.map((e) => e.guid)).toEqual([11, 20, 23, 24]);
+  });
+
+  it('the ledger file round-trips, keyed by era, bridge and account; a missing or broken file reads as empty', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acjs-ledger-'));
+    try {
+      const prev = process.env.ACJS_PLAYTHROUGH_LEDGER_DIR;
+      process.env.ACJS_PLAYTHROUGH_LEDGER_DIR = dir;
+      const p = acquiredLedgerPath('ac1999-retail', 'ws://localhost:9093', 'lgate99');
+      if (prev === undefined) delete process.env.ACJS_PLAYTHROUGH_LEDGER_DIR; else process.env.ACJS_PLAYTHROUGH_LEDGER_DIR = prev;
+      expect(p).toBe(join(dir, 'ac1999-retail--localhost_9093--lgate99.json'));
+      const l = fileLedger(p);
+      expect(l.load()).toEqual([]);
+      l.save([{ guid: 1, wcid: 2, name: 'Arrow' }]);
+      expect(fileLedger(p).load()).toEqual([{ guid: 1, wcid: 2, name: 'Arrow' }]);
+      writeFileSync(p, '{not json');
+      expect(l.load()).toEqual([]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
   it('leavesNoTrace drops what the step spawned (a worn shield taken off first; a spawned sack with its filler, the character\'s own item moved out first)', async () => {

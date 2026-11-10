@@ -861,13 +861,15 @@ describe.skipIf(!existsSync(PORTAL))('VirindiTank\'s macro over the real spell t
     });
 
     it('UseBreakableTurnTo (on by default): the macro faces a monster off to the side itself before the bolt', async () => {
-      host.add({ guid: 0x80005001, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 95, y: 20 }); // due east
+      host.add({ guid: 0x80005001, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 69.4, y: 9.4 }); // 15 m south-west
       serverAnswers();
       api.routine.start(vt({}));
       await step(2500);
       expect(api.routine.history().some((h) => /turning to face Drudge Skulker/.test(h))).toBe(true);
       expect(host.sent).toContain(`cast ${id('Flame Bolt I')} 80005001`);
-      expect(Math.abs(api.self()!.heading - 90)).toBeLessThan(3);
+      // South-west, not 89°: the turn took the monster's guid for degrees (0x80005001 mod 360 = 89), and with the
+      // Skulker due east this passed by luck until 2026-11-10 (ac_turn toward=#7a9b0006 faced 358°).
+      expect(Math.abs(api.self()!.heading - 225)).toBeLessThan(3);
       api.routine.stop();
       // Off: no turn of ours (the cast's own turn does it).
       host.me.yaw = 0;

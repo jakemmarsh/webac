@@ -7244,6 +7244,11 @@ export class AgentApi {
     return { ok: true, message: `switching to ${m} mode` };
   }
 
+  /** A number turn() reads as an object id, not degrees: an integer above 0xFFFF (no AC guid is smaller). */
+  static isObjectId(n: number): boolean {
+    return Number.isInteger(n) && n > 0xffff && n <= 0xffffffff;
+  }
+
   turn(toward: number | string): AgentResult {
     const me = this.me();
     if (!me) return { ok: false, message: 'not in world' };
@@ -7251,7 +7256,11 @@ export class AgentApi {
     // A compass word ("east", "NE", "NNW"), a bearing ("330°") or your own left / right / back, as walk_to's offsets take them. "turn toward=east"
     // looked for an object named east and answered "object has no position" (Arcanist, Arwic, 2026-10-15).
     const word = typeof toward === 'string' ? parseDirection(toward) : null;
-    if (typeof toward === 'number') deg = toward;
+    // A number is a bearing in degrees, unless it can only be an object id (every AC guid is far above 0xFFFF:
+    // statics 0x7XXXXXXX, players 0x5…, dynamic 0x8…). ac_turn toward=#7a9b0006 reached here as 0x7a9b0006 and was
+    // taken for 2056978438°, i.e. 358°: the agent faced north with the portal due west (GDLE Classic Dereth,
+    // 2026-11-10); the cast-attack's own face-the-target and VTank's UseBreakableTurnTo passed guids the same way.
+    if (typeof toward === 'number' && !AgentApi.isObjectId(toward)) deg = toward;
     else if (word) deg = word.bearing ?? normDeg(me.heading + (word.turn ?? 0));
     else {
       const g = this.need(toward, 'world', 'object');

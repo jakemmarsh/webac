@@ -415,7 +415,16 @@ export interface StepContext {
   giveTables?: GiveTables | null;
   state: RunState;
   log: (msg: string) => void;
+  /**
+   * What earlier runs on this server + account acquired (bought, looted, kept spawns), remembered across runs
+   * (playthrough-regressions fileLedger): the pack-space step drops these first when the pack is short. None: not kept.
+   */
+  acquired?: AcquiredLedger;
 }
+
+/** One thing a play-through acquired, by its guid and weenie class (both must match before it is dropped). */
+export interface AcquiredEntry { guid: number; wcid: number; name: string }
+export interface AcquiredLedger { load(): AcquiredEntry[]; save(entries: AcquiredEntry[]): void }
 
 export interface Step {
   id: string;
