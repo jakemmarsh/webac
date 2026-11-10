@@ -1,7 +1,7 @@
 /**
  * UX.charselect-resume (2026-11-05) — a connection lost at character select
  * reconnects on its own, the same three attempts at 2 / 5 / 10 s as the
- * in-world and chargen resumes (SessionLifecycle.RESUME_DELAYS_MS), behind the
+ * in-world and chargen resumes (RetryPolicy.RESUME_DELAYS_MS), behind the
  * connecting screen, and lands back on character select with the list and the
  * selection, entering nothing. The Disconnected screen only once they fail.
  * Production 2026-11-04/05: an AC1999 tab whose network dropped and an
@@ -14,7 +14,7 @@
  * GameUI character select (happy-dom) and the real PreworldReporter.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { SessionLifecycle, RESUME_DELAYS_MS } from '../packages/renderer/src/session/SessionLifecycle.js';
+import { SessionLifecycle } from '../packages/renderer/src/session/SessionLifecycle.js';
 import {
   armDropResume, handleUnexpectedDrop, resumeAttemptRefusalIsFinal, type DropResumeState,
 } from '../packages/renderer/src/session/UnexpectedDrop.js';
@@ -27,6 +27,7 @@ import { sanitizeClientPreworld } from '../services/ws-tcp-bridge/src/clientPrew
 import { connectionFailureNotice } from '../packages/renderer/src/ui/ConnectionNotices.js';
 import { loadDomWindow, installDomGlobals, restoreDomGlobals } from './_harness/dom.js';
 import type { CharacterSlot } from '../packages/renderer/src/ui/CharacterSelect.js';
+import { RESUME_DELAYS_MS } from '../packages/renderer/src/session/RetryPolicy.js';
 
 const GUID = 0x50000001;
 const OTHER = 0x50000002;
@@ -47,7 +48,7 @@ const OUR_CLOSE = { everOpened: true, deliberate: true };
 function state(lifecycle: SessionLifecycle, over: Partial<DropResumeState> & { event?: typeof DROP } = {}): DropResumeState {
   const { event = DROP, ...rest } = over;
   return {
-    unexpected: sessionDropped(event, true),
+    unexpected: sessionDropped(event),
     wasInWorld: lifecycle.inWorld,
     enterPending: lifecycle.enterWorldPending,
     screen: screenOf(),

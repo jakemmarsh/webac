@@ -1553,6 +1553,14 @@ export class EgressManager {
     if (!unlock) return null;
     const out = { released: 0, adopted: 0, forgotten: 0, errors: 0 };
     try {
+      // What each slot's record names before the listing: one that is gone by the slot's turn
+      // was given back by its holder meanwhile (the grace timer, under the slot lock we wait for),
+      // so the listing's entry for it is stale and must not be detached again.
+      const recordedBefore = new Map<string, string>();
+      for (const slot of this.recordedSlots()) {
+        const held = this.readAddr(slot);
+        if (held) recordedBefore.set(slot, held.allocationId);
+      }
       const listedAt = this.now();
       let tagged: TaggedAddress[];
       try {
@@ -1564,7 +1572,7 @@ export class EgressManager {
       const slotsSeen = this.spentFirst(new Set<string>([...tagged.map((t) => t.slot).filter(Boolean), ...this.recordedSlots()]));
       for (const slot of slotsSeen) {
         try {
-          await this.withLock(this.slotLockName(slot), SLOT_LOCK, () => this.reconcileSlot(slot, tagged, listedAt, out));
+          await this.withLock(this.slotLockName(slot), SLOT_LOCK, () => this.reconcileSlot(slot, tagged, listedAt, recordedBefore.get(slot) ?? null, out));
         } catch (err) {
           out.errors++;
           this.log('warn', 'egress_reconcile', { slot, ok: false, reason: `aws:${awsErrorCode(err)}` });
@@ -1577,7 +1585,7 @@ export class EgressManager {
     }
   }
 
-  private async reconcileSlot(slot: string, tagged: TaggedAddress[], listedAt: number, out: { released: number; adopted: number; forgotten: number }): Promise<void> {
+  private async reconcileSlot(slot: string, tagged: TaggedAddress[], listedAt: number, recordedBefore: string | null, out: { released: number; adopted: number; forgotten: number }): Promise<void> {
     const live = this.liveSessions().some((s) => s.slot === slot);
     const idle = this.now() - (mtimeOf(this.activeFile(slot)) ?? 0) >= this.graceMs;
     let held = this.readAddr(slot);
@@ -1597,6 +1605,8 @@ export class EgressManager {
     }
     for (const t of tagged.filter((x) => x.slot === slot)) {
       if (held && t.allocationId === held.allocationId) continue;
+      // Recorded before the listing and no longer: its holder released it after we listed.
+      if (t.allocationId === recordedBefore) continue;
       if (!held && live && t.associationId) {
         // Live sessions use an address the record lost: keep it.
         held = { allocationId: t.allocationId, associationId: t.associationId, publicIp: t.publicIp, at: this.now() };

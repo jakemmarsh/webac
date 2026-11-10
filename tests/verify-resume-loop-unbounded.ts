@@ -24,10 +24,11 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  SessionLifecycle, RESUME_DELAYS_MS, RESUME_HEALTHY_MS, RESUME_PAGE_CAP, RESUME_PAGE_CAP_WINDOW_MS,
+  SessionLifecycle,
 } from '../packages/renderer/src/session/SessionLifecycle.js';
 import { armDropResume, handleUnexpectedDrop, type DropResumeKind } from '../packages/renderer/src/session/UnexpectedDrop.js';
 import { sessionDropped } from '../packages/renderer/src/session/SessionLiveness.js';
+import { RESUME_DELAYS_MS, RESUME_HEALTHY_MS, RESUME_PAGE_CAP, RESUME_PAGE_CAP_WINDOW_MS } from '../packages/renderer/src/session/RetryPolicy.js';
 
 const GUID = 0x50000001;
 const SLOTS = [{ id: String(GUID) }];
@@ -50,7 +51,7 @@ class Page {
   /** The connection ended (main.ts 'disconnected'): arm, note, schedule, or the Disconnected screen. */
   drop(event = DROP): 'resuming' | 'disconnected' {
     const kind = armDropResume(this.lc, {
-      unexpected: sessionDropped(event, true),
+      unexpected: sessionDropped(event),
       wasInWorld: this.lc.inWorld,
       enterPending: this.lc.enterWorldPending,
       screen: this.screen === 'world' ? 'in-world' : this.screen,

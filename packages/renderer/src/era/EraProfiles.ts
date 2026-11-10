@@ -104,7 +104,7 @@ export interface EraProfile {
    * live session without a word when the account logs in from another
    * endpoint, so that session sees only silence (server_silent / link_dead).
    * A session an automatic resume brought back that goes silent again soon
-   * after is then not resumed (SessionLifecycle.RESUME_SILENT_AGAIN_WINDOW_MS):
+   * after is then not resumed (RetryPolicy.RESUME_SILENT_AGAIN_WINDOW_MS):
    * the resume would take the account back and the two sides would take it
    * from each other forever. The AC1999 server: Network.cpp
    * CNetwork::AcceptClientLogin ("Re-connect for account … dropping stale

@@ -9,11 +9,11 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  DrainHandover, handoverBlocker, HANDOVER_COMBAT_QUIET_MS, HANDOVER_POLL_MS, HANDOVER_RETRY_MS, HANDOVER_SAFE_HOLD_MS,
-  type HandoverSafety,
+  DrainHandover, handoverBlocker, HANDOVER_COMBAT_QUIET_MS, HANDOVER_POLL_MS, HANDOVER_SAFE_HOLD_MS, type HandoverSafety,
 } from '../packages/renderer/src/session/DrainHandover';
 import { PreworldReporter } from '../packages/renderer/src/telemetry/PreworldReporter';
 import { sanitizeClientPreworld } from '../services/ws-tcp-bridge/src/clientPreworld';
+import { HANDOVER_RETRY_MS } from '../packages/renderer/src/session/RetryPolicy';
 
 const calm = (): HandoverSafety => ({
   inWorld: true, entering: false, combatStance: false, dead: false, portalSpace: false,

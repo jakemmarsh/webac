@@ -26,10 +26,11 @@ import {
   InWorldEnterWait, otherAccountStatus, sameAccountStatus,
 } from '../packages/renderer/src/session/InWorldHolder';
 import {
-  SessionLifecycle, RESUME_IN_WORLD_RETRY_DELAYS_MS, IN_WORLD_RETRY_DELAY_MS, IN_WORLD_RETRY_BUDGET,
+  SessionLifecycle,
 } from '../packages/renderer/src/session/SessionLifecycle';
 import { characterErrorNotice, IN_WORLD_ELSEWHERE_HINT } from '../packages/renderer/src/ui/ConnectionNotices';
 import { loadDomWindow, installDomGlobals, restoreDomGlobals } from './_harness/dom.js';
+import { IN_WORLD_RETRY_BUDGET, IN_WORLD_RETRY_DELAY_MS, RESUME_IN_WORLD_RETRY_DELAYS_MS } from '../packages/renderer/src/session/RetryPolicy';
 
 /** BroadcastChannel semantics: every other channel on the hub gets the message (not the sender). */
 class FakeChannelHub {

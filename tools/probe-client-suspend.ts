@@ -135,7 +135,7 @@ async function main(): Promise<void> {
   }
 }
 
-/** The resume's three attempts land about 2, 7 and 17 s after the drop (SessionLifecycle.RESUME_DELAYS_MS). */
+/** The resume's three attempts land about 2, 7 and 17 s after the drop (RetryPolicy.RESUME_DELAYS_MS). */
 const RESUME_GIVES_UP_AFTER_S = 2 + 5 + 10;
 
 /**

@@ -49,7 +49,6 @@ function connected(kind: 'eor' | 'ac1999'): { conn: Conn; events: ConnectionEven
   const conn: Conn = kind === 'eor'
     ? new ClientConnection('ws://bridge/?server=w')
     : new Connection1999('ws://bridge/?server=w', { loginProfile: { ...EOR_LOGIN_PROFILE, protocol: 'ac1999' } });
-  conn.autoReconnect = false;
   const events: ConnectionEvent[] = [];
   conn.on((e) => events.push(e));
   conn.connect('enkarta', 'pw');

@@ -18,6 +18,7 @@
  */
 import type { AgentCallFrame, PairingReply, RelayLinkNotice } from '@ac/network';
 import { parseAgentCall, parsePairingReply, WS_CONNECTING, WS_OPEN_TIMEOUT_MS } from '@ac/network';
+import { RELINK_DELAYS_MS } from '../session/RetryPolicy.js';
 
 /** The few WebSocket members the link uses (a browser WebSocket fits; tests pass a fake). */
 export interface LinkSocket {
@@ -31,8 +32,6 @@ export interface LinkSocket {
 }
 
 const OPEN = 1;
-/** Retry delays while the game's bridge still drains and the link is down (the last one repeats). */
-export const RELINK_DELAYS_MS = [2_000, 5_000, 10_000, 30_000];
 
 /** The link's URL: the game's bridge URL without a server (a relay link forwards no game traffic). */
 export function relayLinkUrl(gameUrl: string): string {

@@ -128,7 +128,6 @@ afterEach(() => {
 /** A GDLE-shaped session on a ClientConnection, past the handshake. */
 function session() {
   const conn = new ClientConnection('ws://sim');
-  conn.autoReconnect = false;
   const events: ConnectionEvent[] = [];
   conn.on((e) => events.push(e));
   conn.connect('acct', 'pw');
@@ -232,7 +231,6 @@ describe('OBS.dm-stall-diagnostics — ClientConnection.getDiagnostics', () => {
     vi.advanceTimersByTime(100);
     expect(s.conn.getDiagnostics().tickGapMaxMs).toBeGreaterThanOrEqual(25_000);
     s.conn.disconnect();
-    s.conn.autoReconnect = false;
     s.conn.connect('acct', 'pw');
     const d = s.conn.getDiagnostics();
     expect(d).toMatchObject({ tickGapMaxMs: 0, rxPkts: 0, rxAgoMs: null, rxOpcode: null, naks: 0, resent: 0 });
@@ -261,7 +259,6 @@ describe('OBS.dm-stall-diagnostics — the page reads the worker\'s diagnostics'
     const p = pipe();
     try {
       const client = new NetWorkerClient(p.endpoint, 'ws://sim');
-      client.autoReconnect = false;
       expect(client.getDiagnostics()).toMatchObject({ rxPkts: 0, txPkts: 0, rxAgoMs: null });
       client.connect('acct', 'pw');
       const ws = FakeWebSocket.last!;

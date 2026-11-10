@@ -181,7 +181,6 @@ describe('ClientConnection.getPacketLossPercentage — retail counters on the li
 
   it('a clean session reports 0; resending a NAKed packet raises it to 2 × retransmits / (received + sent)', () => {
     const conn = new ClientConnection('ws://sim');
-    conn.autoReconnect = false;
     conn.connect('acct', 'pw');
     const ws = FakeWebSocket.last!;
     ws.open();

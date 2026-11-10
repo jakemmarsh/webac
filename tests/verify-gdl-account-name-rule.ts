@@ -83,7 +83,6 @@ function gdleRefusal(error: number): Uint8Array {
 /** A Seedsow-style login (auth type 1, "account:password") refused with STR_LOGIN_FAILED; returns the LoginRequest and the shown text. */
 function refusedLogin(account: string, world: W | null): { login: Uint8Array; text: string } {
   const conn = new ClientConnection('ws://bridge', { loginProfile: { clientVersion: '1802', authStyle: 'account-colon-password' } });
-  conn.autoReconnect = false;
   const events: ConnectionEvent[] = [];
   conn.on((e) => events.push(e));
   conn.connect(account, 'hunter2');

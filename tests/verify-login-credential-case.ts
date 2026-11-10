@@ -136,7 +136,6 @@ function read1999Login(packet: Uint8Array): { account: string; password: string 
 function loginBytes(kind: 'eor' | '1999', profile: LoginProfile, account: string, password: string): { account: string; password: string } {
   FakeSocket.sockets = [];
   const conn = kind === 'eor' ? new ClientConnection('ws://bridge', { loginProfile: profile }) : new Connection1999('ws://bridge', { loginProfile: profile });
-  if (conn instanceof ClientConnection) conn.autoReconnect = false;
   conn.connect(account, password);
   const sock = FakeSocket.sockets[0];
   sock.onopen?.();
@@ -272,7 +271,6 @@ async function drive(lane: Lane, typed: { account: string; password: string }, a
   const conn = lane.kind === 'eor'
     ? new ClientConnection('ws://bridge', { loginProfile: loginCase.profile(lane.era.login) })
     : new Connection1999('ws://bridge', { loginProfile: loginCase.profile(lane.era.login) });
-  if (conn instanceof ClientConnection) conn.autoReconnect = false;
   const events: ConnectionEvent[] = [];
   conn.on((e) => events.push(e));
   const sync = () => { if (conn.loginProfile.passwordCase !== loginCase.current) conn.loginProfile = loginCase.profile(lane.era.login); };

@@ -110,7 +110,6 @@ function shownFor(events: ConnectionEvent[], world: W | null): string {
 
 function gdleLogin(error: number): ConnectionEvent[] {
   const conn = new ClientConnection('ws://bridge');
-  conn.autoReconnect = false;
   const events: ConnectionEvent[] = [];
   conn.on((e) => events.push(e));
   conn.connect('commonname', 'pw');

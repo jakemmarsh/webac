@@ -8,6 +8,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadDomWindow, installDomGlobals, restoreDomGlobals } from './_harness/dom.js';
 import { isClaudeCallback, type ConnectStatus } from '../packages/renderer/src/launcher/ConnectScreen';
+import { CONNECT_STATUS_MAX_FAILURES } from '../packages/renderer/src/session/RetryPolicy';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const domWindow: any = await loadDomWindow({ innerWidth: 1024, innerHeight: 768 });
@@ -258,12 +259,12 @@ describe('ConnectScreen — an unknown or expired connect link says so', () => {
     const s = setup(['network']);
     await s.flush();
     expect(s.text()).toContain('Can\'t reach the game\'s server; retrying…');
-    for (let k = 1; k < mod.CONNECT_STATUS_MAX_FAILURES; k++) {
+    for (let k = 1; k < CONNECT_STATUS_MAX_FAILURES; k++) {
       expect(s.outcome()).toBeNull();
       await s.step();
     }
     expect(await s.done).toBe('error');
-    expect(s.urls.length).toBe(mod.CONNECT_STATUS_MAX_FAILURES);
+    expect(s.urls.length).toBe(CONNECT_STATUS_MAX_FAILURES);
     expect(s.text()).toContain('Couldn\'t connect Claude');
     expect(s.text()).toContain('didn\'t answer, so this connect link can\'t be checked');
     expect(s.text()).not.toContain('retrying');
@@ -271,12 +272,12 @@ describe('ConnectScreen — an unknown or expired connect link says so', () => {
 
   it('a blip shorter than the limit recovers: the failures count resets on an answer', async () => {
     const answers: Answer[] = [];
-    for (let k = 0; k < mod.CONNECT_STATUS_MAX_FAILURES - 1; k++) answers.push('network');
+    for (let k = 0; k < CONNECT_STATUS_MAX_FAILURES - 1; k++) answers.push('network');
     answers.push(json({ state: 'waiting', client: 'Claude', code: 'HRCBN3' }));
-    for (let k = 0; k < mod.CONNECT_STATUS_MAX_FAILURES - 1; k++) answers.push('network');
+    for (let k = 0; k < CONNECT_STATUS_MAX_FAILURES - 1; k++) answers.push('network');
     answers.push(json({ state: 'waiting', client: 'Claude', code: 'HRCBN3' }));
     const s = setup(answers);
-    for (let k = 0; k < 2 * mod.CONNECT_STATUS_MAX_FAILURES; k++) await s.step();
+    for (let k = 0; k < 2 * CONNECT_STATUS_MAX_FAILURES; k++) await s.step();
     expect(s.outcome()).toBeNull();
     expect(s.text()).toContain('/automation pair HRC-BN3');
     expect(s.text()).not.toContain('retrying');

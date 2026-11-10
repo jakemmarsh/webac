@@ -35,8 +35,9 @@ import {
 import { firstTimeLoginRetryAllowed } from '../packages/renderer/src/session/ProvenLoginRetry';
 import { InWorldEnterWait, IN_WORLD_WAIT_STATUS, otherAccountStatus } from '../packages/renderer/src/session/InWorldHolder';
 import type { WorldHolder } from '../packages/renderer/src/session/AccountTabGuard';
-import { SessionLifecycle, IN_WORLD_RETRY_DELAY_MS } from '../packages/renderer/src/session/SessionLifecycle';
+import { SessionLifecycle } from '../packages/renderer/src/session/SessionLifecycle';
 import { characterErrorNotice, netErrorNotice } from '../packages/renderer/src/ui/ConnectionNotices';
+import { IN_WORLD_RETRY_DELAY_MS } from '../packages/renderer/src/session/RetryPolicy';
 
 const DW_ID = '1f069f0d-1b2a-421b-a723-297486a82cd7';
 const DW_ENTRY: ServerEntry = { id: DW_ID, name: 'DreamWeave', emu: 'ACE', host: 'dreamweave.example', port: 9000, source: 'list' };

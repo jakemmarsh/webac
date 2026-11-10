@@ -12,7 +12,8 @@
  * 'disconnected' handler treats it (noteDisconnected, nothing else).
  */
 import { describe, it, expect } from 'vitest';
-import { SessionLifecycle, RESUME_DELAYS_MS } from '@ac/renderer/session/SessionLifecycle.js';
+import { SessionLifecycle } from '@ac/renderer/session/SessionLifecycle.js';
+import { RESUME_DELAYS_MS } from '@ac/renderer/session/RetryPolicy.js';
 import { handleUnexpectedDrop } from '../packages/renderer/src/session/UnexpectedDrop.js';
 
 const GUID = 0x50000001;

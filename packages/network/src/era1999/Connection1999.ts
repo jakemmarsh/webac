@@ -129,7 +129,6 @@ export function withProto1999(url: string): string {
 }
 
 export class Connection1999 implements NetConnection {
-  autoReconnect = false;
   datIterations = { portal: 0, cell: 0, language: 0 };
   loginProfile: LoginProfile;
 

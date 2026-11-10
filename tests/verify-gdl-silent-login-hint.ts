@@ -123,7 +123,6 @@ async function silentLogin(opts: { holderTab: boolean }) {
   makeGuard(hub, 'tab-other', { name: 'Someone' }).claim(accountSessionKey(SEEDSOW_URL, 'someone'));
   const { wait, out } = makeWait(makeGuard(hub, 'tab-b'), key);
   const conn = new ClientConnection(SEEDSOW_URL);
-  conn.autoReconnect = false;
   const events: ConnectionEvent[] = [];
   conn.on((e) => { events.push(e); if (e.type === 'loginUnanswered') wait.onUnanswered(IN_USE_RETAIL); });
   conn.connect('jake', 'pw');

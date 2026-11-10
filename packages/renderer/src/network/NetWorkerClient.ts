@@ -37,7 +37,6 @@ export class NetWorkerClient implements NetConnection {
   private listeners: ConnectionListener[] = [];
   private snap: NetSnapshot = { connected: false, link: { connected: false, secondsSinceLastPacket: 0 }, at: 0, loss: 0 };
   private url: string;
-  private _autoReconnect = true;
   private _datIterations = { portal: 0, cell: 0, language: 0 };
   private _loginProfile: LoginProfile;
 
@@ -63,9 +62,6 @@ export class NetWorkerClient implements NetConnection {
       }
     }
   }
-
-  get autoReconnect(): boolean { return this._autoReconnect; }
-  set autoReconnect(v: boolean) { this._autoReconnect = v; this.post({ t: 'set', autoReconnect: v }); }
 
   get datIterations(): NetConnection['datIterations'] { return this._datIterations; }
   set datIterations(v: NetConnection['datIterations']) { this._datIterations = v; this.post({ t: 'set', datIterations: { ...v } }); }

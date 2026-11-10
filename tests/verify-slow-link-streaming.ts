@@ -75,7 +75,11 @@ describe('the portal-space gate counts bytes as they stream, not objects as they
     expect(out).toBeNull(); // past 90 s, still holding: bytes kept arriving
     expect(store.stats.netReceivedBytes).toBeGreaterThanOrEqual(100_000);
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(out).toMatchObject({ ok: true });
+    // The landing (fetch, decompress, store) is real async work fake timers don't drive: under a
+    // loaded full suite it can still be under way here (ci-local on a 4-core sandbox, 2026-11-10).
+    // Real time finishes it; the gate's own timeout is a fake timer, so it can't fire meanwhile.
+    vi.useRealTimers();
+    await vi.waitFor(() => expect(out).toMatchObject({ ok: true }), { timeout: 15_000 });
     expect(store.isBundleResident(0xA9B4)).toBe(true);
   });
 

@@ -50,7 +50,7 @@ afterEach(() => { FakeSocket.sockets = []; });
 
 type Conn = {
   connect(a: string, p: string): void; disconnect(): void; setUrl(u: string): void;
-  on(l: (e: ConnectionEvent) => void): void; autoReconnect?: boolean;
+  on(l: (e: ConnectionEvent) => void): void;
 };
 const lanes: Array<[string, () => Conn]> = [
   ['end of retail / Dark Majesty (ClientConnection)', () => new ClientConnection('ws://bridge/?server=world')],
@@ -69,7 +69,6 @@ for (const [lane, make] of lanes) {
   describe(`${lane}: a socket that never opens`, () => {
     it('on a fresh page is CantSocket, not a silent wait or a drop', () => {
       const conn = make();
-      conn.autoReconnect = false;
       const events: ConnectionEvent[] = [];
       conn.on(e => events.push(e));
       conn.setUrl('wss://nothing.invalid/');
@@ -80,7 +79,6 @@ for (const [lane, make] of lanes) {
 
     it('after leaving a live char select for the launcher is CantSocket, not the Disconnected screen', () => {
       const conn = make();
-      conn.autoReconnect = false;
       const events: ConnectionEvent[] = [];
       conn.on(e => events.push(e));
       conn.connect('bael', 'pw');
@@ -100,7 +98,6 @@ for (const [lane, make] of lanes) {
 
     it('a socket that opened and then dropped is still a drop (no CantSocket)', () => {
       const conn = make();
-      conn.autoReconnect = false;
       const events: ConnectionEvent[] = [];
       conn.on(e => events.push(e));
       conn.connect('bael', 'pw');

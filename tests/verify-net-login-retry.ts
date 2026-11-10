@@ -114,12 +114,9 @@ describe('ClientConnection — stale-session login retry', () => {
     expect(RecordingWebSocket.instances[0].url).toBe('ws://test-not-connected');
   });
 
-  it('schedules the retry even when autoReconnect is disabled (initial-login path)', () => {
+  it('schedules the retry on the initial login (the one reconnect the connection makes on its own)', () => {
     vi.useFakeTimers();
     const { conn, events } = makeConn();
-    // The app disables autoReconnect at startup to avoid cascading sessions;
-    // the stale-session login retry must still fire.
-    conn.autoReconnect = false;
     (conn as unknown as { handlePacket(p: Uint8Array): void }).handlePacket(
       buildOpcodePacket(2, CHARACTER_ERROR, 0, ERR_LOGON),
     );

@@ -67,12 +67,12 @@ const netRefusal = (r: PreworldReporter): void => {
 const LANES: Lane[] = [
   {
     name: 'end of retail (ACE, ClientConnection: a wrong password is an AccountBoot)', era: 'end-of-retail',
-    make: () => { const c = new ClientConnection('ws://bridge'); c.autoReconnect = false; return c; },
+    make: () => new ClientConnection('ws://bridge'),
     refuse: (r) => r.accountBoot('Account password mismatch'),
   },
   {
     name: 'Dark Majesty (GDL / GDLE, ClientConnection)', era: 'classic-dereth-1-0',
-    make: () => { const c = new ClientConnection('ws://bridge'); c.autoReconnect = false; return c; },
+    make: () => new ClientConnection('ws://bridge'),
     refuse: netRefusal,
   },
   { name: 'AC1999 (Connection1999)', era: 'ac1999', make: () => new Connection1999('ws://bridge'), refuse: netRefusal },

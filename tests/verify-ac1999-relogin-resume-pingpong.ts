@@ -22,11 +22,12 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  SessionLifecycle, RESUME_DELAYS_MS, RESUME_HEALTHY_MS, RESUME_SILENT_AGAIN_WINDOW_MS,
+  SessionLifecycle,
 } from '../packages/renderer/src/session/SessionLifecycle.js';
 import { armDropResume, handleUnexpectedDrop, silentReloginDrop } from '../packages/renderer/src/session/UnexpectedDrop.js';
 import { sessionDropped } from '../packages/renderer/src/session/SessionLiveness.js';
 import { ERA_PROFILES, EOR_ERA_ID, type EraProfile } from '../packages/renderer/src/era/EraProfiles.js';
+import { RESUME_DELAYS_MS, RESUME_HEALTHY_MS, RESUME_SILENT_AGAIN_WINDOW_MS } from '../packages/renderer/src/session/RetryPolicy.js';
 
 const GUID = 0x50000001;
 const SLOTS = [{ id: String(GUID) }];
@@ -48,7 +49,7 @@ class Page {
   /** main.ts 'disconnected' (or the link check's handleUnexpectedDrop): arm, note, schedule, or the Disconnected screen. */
   drop(endCause: EndCause): 'resuming' | 'disconnected' {
     const kind = armDropResume(this.lc, {
-      unexpected: sessionDropped({ everOpened: true, deliberate: false }, true),
+      unexpected: sessionDropped({ everOpened: true, deliberate: false }),
       wasInWorld: this.lc.inWorld,
       enterPending: this.lc.enterWorldPending,
       screen: this.screen === 'world' ? 'in-world' : this.screen,

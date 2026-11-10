@@ -80,7 +80,6 @@ const log = (s: string) => { console.log(s); writeFileSync(join(out, 'log.txt'),
 
 async function run(): Promise<void> {
   const conn = new ClientConnection(`${bridge}/connect?server=${server}`, { loginProfile: { clientVersion: '1802', authStyle: 'account-colon-password' } });
-  conn.autoReconnect = false;
   conn.datIterations = { portal: portal.totalIterations, cell: cell.totalIterations, language: 994 };
   log(`iterations portal ${portal.totalIterations} cell ${cell.totalIterations}; skill table ${table.skills.size} skills (max id ${Math.max(...table.skills.keys())})`);
   let accountName = account;

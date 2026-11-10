@@ -36,10 +36,11 @@ import {
 import { buildDirectory } from '../services/ws-tcp-bridge/src/serverDirectory.js';
 import { AC1999_PUBLIC_SERVER, AC1999_LOCAL_ID } from '../services/ws-tcp-bridge/src/serverList.js';
 import {
-  SessionLifecycle, IN_WORLD_RETRY_BUDGET, IN_WORLD_RETRY_DELAY_MS,
+  SessionLifecycle,
 } from '../packages/renderer/src/session/SessionLifecycle.js';
 import { acStringHash } from '../packages/dat-parser/src/file-types/LayoutDesc.js';
 import { CharacterError } from '../packages/shared/src/index.js';
+import { IN_WORLD_RETRY_BUDGET, IN_WORLD_RETRY_DELAY_MS } from '../packages/renderer/src/session/RetryPolicy.js';
 
 // reference/ac1999/Server/Source/NetworkDefs.h:100, 137-142
 const BT_NETERROR = 0x00100000;

@@ -222,7 +222,6 @@ function connectHarness(): Harness {
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'log').mockImplementation(() => {});
   const conn = new ClientConnection('ws://sim');
-  conn.autoReconnect = false;
   const tags: number[] = [];
   const events: ConnectionEvent[] = [];
   conn.on(e => {
@@ -738,7 +737,6 @@ describe('CONN.charlist-wait-timeout — cs_ConnectionRequestAcked until the ser
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const conn = new ClientConnection('ws://sim');
-    conn.autoReconnect = false;
     const events: ConnectionEvent[] = [];
     conn.on(e => events.push(e));
     conn.connect('acct', 'pw');

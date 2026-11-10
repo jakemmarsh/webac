@@ -133,7 +133,6 @@ export function parseRoutinesGrant(text: string): { grant: RoutinesGrant | null;
 export type ConnectionEventType =
   | 'connected'
   | 'disconnected'
-  | 'reconnecting'
   | 'error'
   | 'handshakeComplete'
   | 'characterList'
@@ -216,7 +215,7 @@ export interface ConnectionEvent {
   type: ConnectionEventType;
   data?: unknown;
   error?: string;
-  /** FAITHFUL.269 — populated on type==='reconnecting' only. */
+  /** On type==='loginRetry': the retry's number, the budget and the wait (ClientConnection.LOGIN_REJECT_RETRY_MS). */
   reconnectAttempt?: number;
   reconnectMax?: number;
   reconnectDelaySec?: number;
@@ -458,15 +457,10 @@ export class ClientConnection {
    * ancestor; BUG.ac1999-enter-world-retry-hangs).
    */
   private enterWorldGranted = false;
-  private reconnectAttempts: number = 0;
-  private maxReconnectAttempts: number = 5;
-  private reconnectDelay: number = 2000; // ms, doubles each attempt
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   /** BUG.resume-hung-socket — disarms the open timeout of the socket connect() opened (WsOpenTimeout.ts). */
   private disarmOpenTimeout: (() => void) | null = null;
   private lastAccount: string = '';
   private lastPassword: string = '';
-  autoReconnect: boolean = true;
   /** Post-handshake receiver service tick (ACK/NAK, fragment unstick, dead-server). */
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -841,7 +835,6 @@ export class ClientConnection {
   connect(account: string, password: string): void {
     this.lastAccount = account;
     this.lastPassword = password;
-    this.reconnectAttempts = 0;
     this.doConnect(account, password);
   }
 
@@ -877,10 +870,10 @@ export class ClientConnection {
    * budget runs out.
    */
   private scheduleLoginRetryAfterReject(): boolean {
-    // NB: deliberately NOT gated on autoReconnect — the app disables
-    // autoReconnect at startup to avoid cascading duplicate sessions, but
-    // the stale-session login retry is the initial-login recovery path and
-    // must still run. disconnect() clears loginRejectRetryTimer explicitly.
+    // The one reconnect this connection makes on its own: the stale-session
+    // login retry is the initial-login recovery path (a resume's attempt meets
+    // it too); every other reconnect is the page's resume (docs/reconnect.md).
+    // disconnect() clears loginRejectRetryTimer explicitly.
     if (this.loginRejectRetryTimer) return true;
     if (this.loginRejectRetryAttempts >= ClientConnection.MAX_LOGIN_REJECT_RETRIES) {
       console.warn('[AC:NET] Giving up on stale-session login retries — reload the page to try again.');
@@ -952,7 +945,6 @@ export class ClientConnection {
     this.ws.onopen = () => {
       this.stopOpenTimeout();
       this.wsEverOpened = true;
-      this.reconnectAttempts = 0;
       this.emit({ type: 'connected' });
       this.sendLoginRequest(account, password);
       this.startLoginRetry(account, password);
@@ -1117,7 +1109,6 @@ export class ClientConnection {
       ...(endCause === 'socket_closed' && typeof closeCode === 'number' ? { closeCode } : {}),
     });
     if (this.ws === socket) this.ws = null;
-    this.attemptReconnect();
   }
 
   /**
@@ -1206,33 +1197,6 @@ export class ClientConnection {
     try { socket.close(); } catch { /* already closing */ }
   }
 
-  /** Attempt auto-reconnect with exponential backoff. */
-  private attemptReconnect(): void {
-    if (!this.autoReconnect) return;
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      this.emit({ type: 'error', error: 'Max reconnection attempts reached', netErrorId: 'ID_ConnectionError_ClientTimedOutServer' });
-      return;
-    }
-
-    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts);
-    this.reconnectAttempts++;
-    // FAITHFUL.269 — auto-reconnect is recovery, not an error. Emit a
-    // structured 'reconnecting' event so the renderer can color it as a
-    // benign System message rather than a red ACE-error chat line.
-    this.emit({
-      type: 'reconnecting',
-      reconnectAttempt: this.reconnectAttempts,
-      reconnectMax: this.maxReconnectAttempts,
-      reconnectDelaySec: Math.round(delay / 1000),
-    });
-
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      console.log(`[AC:NET] Auto-reconnect attempt ${this.reconnectAttempts}: opening a new session socket`);
-      this.doConnect(this.lastAccount, this.lastPassword);
-    }, delay);
-  }
-
   /** Start LoginRequest retry timer — retries if no ConnectRequest received. */
   private startLoginRetry(account: string, password: string): void {
     this.loginRetryCount = 0;
@@ -1305,11 +1269,6 @@ export class ClientConnection {
   disconnect(): void {
     this.cancelHandover();
     this.stopOpenTimeout();
-    this.autoReconnect = false;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
     if (this.loginRejectRetryTimer) {
       clearTimeout(this.loginRejectRetryTimer);
       this.loginRejectRetryTimer = null;

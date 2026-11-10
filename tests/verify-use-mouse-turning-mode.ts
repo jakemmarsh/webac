@@ -233,3 +233,124 @@ describe('Use Mouse Turning — the turn speed on the wire', () => {
     expect(moveToStates()[2].turnCommand).toBe(0);
   });
 });
+
+/**
+ * Production telemetry 2026-11-10 19:05Z (AC1999): `move_limiter limiter="repeat"
+ * sources=[…, mouse_left ×6]` — every plain left click in the world sent an
+ * identical MoveToState. HandleSelectLeft @ 006b3630 moves and sends ONLY with
+ * Use Mouse Turning on and mouse-look active; ToggleMouseLook @ 00457490 sends
+ * one movement event per change while Use Mouse Turning is on. Real DOM
+ * events → the real CameraController → the real MovementSync, as main.ts wires
+ * them (onMovementEvent → sendMovementEventNow). This input path is shared by
+ * all three eras (no era rule touches it).
+ */
+describe('left clicks and mouse-look toggles: MoveToStates only where retail sends them', () => {
+  const saved: Record<string, unknown> = {};
+  const GLOBALS = ['window', 'document', 'HTMLElement', 'Event'] as const;
+  const pos: PlayerPosition = {
+    worldX: 100.5, worldZ: 200.5, groundY: 10, playerYaw: 0, landblock: 0, localX: 0, localY: 0, localZ: 0,
+    inDungeon: false, onGround: true,
+  };
+  let c: CameraController;
+  let canvas: HTMLElement;
+  let sent: Uint8Array[];
+  let clock = 1000;
+  afterAll(() => { restoreDomGlobals(GLOBALS, saved); });
+  afterEach(() => { CameraController.setUseMouseTurning(false); });
+  beforeEach(() => {
+    const g = globalThis as Record<string, unknown>;
+    for (const key of GLOBALS) { if (!(key in saved)) saved[key] = g[key]; g[key] = key === 'window' ? domWindow : domWindow[key]; }
+    // A fresh root each test: controllers bound in earlier tests keep their listeners on it.
+    domWindow.document.body.innerHTML = '<div id="root"><canvas></canvas></div>';
+    canvas = domWindow.document.querySelector('canvas');
+    c = new CameraController(new THREE.PerspectiveCamera());
+    c.bind(domWindow.document.getElementById('root'));
+    const out: Uint8Array[] = [];
+    sent = out;
+    let seq = 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const sync = new MovementSync({ sendMessage: (b: Uint8Array) => { out.push(b); } } as any, () => ++seq);
+    const stateOf = (): MovementState => ({
+      forward: c.isMovingForward, backward: c.isMovingBackward, turnLeft: c.isTurningLeft, turnRight: c.isTurningRight,
+      strafeLeft: c.isStrafingLeft, strafeRight: c.isStrafingRight, running: c.isRunning, forwardHoldRun: c.rawForwardHoldRun,
+      runToggle: c.runToggle, serverControlled: c.controlledByServer, movementEvent: c.movementEvents,
+    });
+    c.onMovementEvent = () => { clock += 50; sync.sendMovementEventNow(stateOf(), pos, clock); };
+  });
+  const press = (type: 'mousedown' | 'mouseup', b: number) =>
+    canvas.dispatchEvent(new domWindow.MouseEvent(type, { button: b, bubbles: true, cancelable: true }));
+  /** The forward command of each MoveToState sent (0 = none). */
+  const forwards = () => sent
+    .filter((m) => new DataView(m.buffer, m.byteOffset).getUint32(8, true) === GameActionType.MoveToState)
+    .map((m) => parseMoveToStatePayload(m.subarray(12)).motion.forwardCommand & 0xffff);
+
+  it('Use Mouse Turning off: six left clicks send no MoveToState and move nothing', () => {
+    for (let i = 0; i < 6; i++) {
+      press('mousedown', 0);
+      expect(c.isMovingForward).toBe(false);
+      press('mouseup', 0);
+    }
+    expect(forwards()).toEqual([]);
+    expect(c.movementEvents).toBe(0);
+  });
+
+  it('Use Mouse Turning on, mouse-look off: a left click sends nothing either', () => {
+    CameraController.setUseMouseTurning(true);
+    press('mousedown', 0);
+    press('mouseup', 0);
+    expect(forwards()).toEqual([]);
+  });
+
+  it('under mouse-look the press runs forward and the release stops, one MoveToState each', () => {
+    CameraController.setUseMouseTurning(true);
+    press('mousedown', 2); // mouse-look on: ToggleMouseLook's one event
+    expect(forwards()).toEqual([0]);
+    press('mousedown', 0);
+    expect(c.isMovingForward).toBe(true);
+    expect(forwards()).toEqual([0, 5]); // WalkForward 0x45000005
+    press('mouseup', 0);
+    expect(c.isMovingForward).toBe(false);
+    expect(forwards()).toEqual([0, 5, 0]);
+  });
+
+  it('pressed under mouse-look, released after it ends: the stop goes out as mouse-look ends; the release sends nothing', () => {
+    CameraController.setUseMouseTurning(true);
+    press('mousedown', 2);
+    press('mousedown', 0);
+    press('mouseup', 2); // ToggleMouseLook(0): one event, the run stops
+    expect(c.isMovingForward).toBe(false);
+    expect(forwards()).toEqual([0, 5, 0]);
+    press('mouseup', 0);
+    expect(forwards()).toEqual([0, 5, 0]);
+    expect(c.isMovingForward).toBe(false);
+  });
+
+  it('left held first, then mouse-look: the run starts with the toggle (MovePlayer 0xc0000c1 with mouseleft_down)', () => {
+    CameraController.setUseMouseTurning(true);
+    press('mousedown', 0);
+    expect(forwards()).toEqual([]);
+    press('mousedown', 2);
+    expect(c.isMovingForward).toBe(true);
+    expect(forwards()).toEqual([5]);
+  });
+
+  it('without Use Mouse Turning, mouse-look (middle button / F2) sends no movement event', () => {
+    c.setMouseLook(true);
+    c.setMouseLook(false);
+    expect(c.movementEvents).toBe(0);
+  });
+
+  it('mouse-look ending mid-turn sends ONE event (the turn stop rides on it), not two', () => {
+    CameraController.setUseMouseTurning(true);
+    press('mousedown', 2);
+    const before = c.movementEvents;
+    // A mouse turn under way (CameraSet::Rotate's non-keyboard branch).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (c as any).setMouseTurn({ left: true, speed: 1 });
+    expect(c.movementEvents).toBe(before + 1);
+    press('mouseup', 2);
+    expect(c.isTurningLeft).toBe(false);
+    expect(c.movementEvents).toBe(before + 2);
+    expect(c.recentMovementEventSources.at(-1)).toBe('mouse_look');
+  });
+});

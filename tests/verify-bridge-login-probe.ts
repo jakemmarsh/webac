@@ -52,7 +52,6 @@ function clientLoginRequest(version: string, account: string): Buffer {
   g.WebSocket = FakeWebSocket;
   try {
     const conn = new ClientConnection('ws://bridge.test', { loginProfile: { clientVersion: version, authStyle: 'account-password' } });
-    conn.autoReconnect = false;
     conn.connect(account, '');
     FakeWebSocket.last!.open();
     const first = FakeWebSocket.last!.sent[0];

@@ -111,7 +111,6 @@ function startLogin(): { conn: ClientConnection; events: ConnectionEvent[]; sock
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'log').mockImplementation(() => {});
   const conn = new ClientConnection('ws://bridge');
-  conn.autoReconnect = false;
   const events: ConnectionEvent[] = [];
   conn.on((e) => events.push(e));
   conn.connect('acjsprobe5679', 'pw');

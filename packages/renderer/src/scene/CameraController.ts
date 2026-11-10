@@ -51,7 +51,7 @@ function removeFrom(list: string[], entry: string): void {
 }
 
 /** Where a movement event came from (BUG.movetostate-burst-abuse-close telemetry). */
-export const MOVEMENT_EVENT_SOURCES = ['key_down', 'key_up', 'autorun', 'stop_moving', 'mouse_left', 'mouse_turn'] as const;
+export const MOVEMENT_EVENT_SOURCES = ['key_down', 'key_up', 'autorun', 'stop_moving', 'mouse_left', 'mouse_turn', 'mouse_look'] as const;
 export type MovementEventSource = typeof MOVEMENT_EVENT_SOURCES[number];
 const MOVEMENT_EVENT_SOURCES_KEPT = 8;
 
@@ -1064,18 +1064,27 @@ export class CameraController {
 
   /**
    * CommandInterpreter::HandleSelectLeft @ 006b3630 (UIElement_SmartBoxWrapper
-   * MouseDown / MouseUp, button 7): records mouseleft_down; with Use Mouse
-   * Turning on and mouse-look active it runs forward (MovePlayer 0x45000005)
-   * and returns 1 — the press does not select. Returns whether it was consumed.
+   * MouseDown / MouseUp, button 7): records mouseleft_down; ONLY with Use
+   * Mouse Turning on (s_cidm[0x22]) and mouse-look active (GetMouseLookActive,
+   * cmdinterp +0xd4) does it MovePlayer(0x45000005, down) (+0xa0), send a
+   * movement event (SendMovementEvent, +0x4c) and return 1 — the press does
+   * not select. Otherwise it moves nothing and sends nothing. Returns whether
+   * it was consumed.
    */
   mouseLeftButton(down: boolean): boolean {
-    // CommandInterpreter::mouseleft_down: the run is a MOUSE command in the SubstateList (MovePlayer(…, mouse 1)):
-    // AddCommand replaces the list's previous mouse entry and pushes at the
-    // head; the release removes it (RemoveCommand's mouse branch).
+    // mouseleft_down is kept as the SubstateList's mouse entry whatever the
+    // mode: the getters count it only under Use Mouse Turning's mouse-look,
+    // and ToggleMouseLook's MovePlayer(0xc0000c1, on) runs forward on it when
+    // mouse-look starts with the button already held (@ 006b3f40). A release
+    // outside mouse-look needs no send: ToggleMouseLook(0) already sent the
+    // stop (@ 00457490), as retail.
     removeFrom(this.substateList, MOUSE_FORWARD);
     if (down) this.substateList.unshift(MOUSE_FORWARD);
+    // 2026-11-10 telemetry (AC1999): every plain left click in the world sent
+    // an identical MoveToState until MovementSync's repeat cap dropped them.
+    if (!this.mouseTurningLook) return false;
     this.raiseMovementEvent('mouse_left');
-    return CameraController.useMouseTurning && this.mouseLookActive;
+    return true;
   }
 
   /**
@@ -1103,8 +1112,11 @@ export class CameraController {
     // With Use Mouse Turning, ToggleMouseLook also moves the player
     // (MovePlayer(0xc0000c1, on)): held turn keys become sidesteps and a held
     // left button runs forward while it is on (the getters below); turning it
-    // off stops the mouse turn.
-    if (!active) this.setMouseTurn(null);
+    // off stops the mouse turn. It then sends ONE movement event (+0x4c)
+    // either way (@ 00457490), the mouse turn's stop included.
+    const turning = CameraController.useMouseTurning;
+    if (!active) { if (turning) this.mouseTurn = null; else this.setMouseTurn(null); }
+    if (turning) this.raiseMovementEvent('mouse_look');
     if (active) {
       this.mouseLookExtentX = 0;
       this.mouseLookExtentY = 0;

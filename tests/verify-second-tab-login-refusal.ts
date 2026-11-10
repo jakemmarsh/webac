@@ -29,8 +29,7 @@ import {
   AccountTabGuard, accountSessionKey, type SessionChannelLike, type WorldHolder, type LogoutReason,
 } from '../packages/renderer/src/session/AccountTabGuard';
 import {
-  LoginHolderWait, LOGIN_HOLDER_RETRY_DELAYS_MS, LOGON_FAILED_LOGIN_TOKEN, LOGIN_HOLDER_LEAVING_STATUS, LOGGED_OUT_FOR_LOGIN_TEXT,
-  ACCOUNT_IN_USE_LOGIN_TOKENS, loginHolderOfferText, loginHolderKeptText, stoodDownForOtherTabText, type LoginHolderReport,
+  LoginHolderWait, LOGON_FAILED_LOGIN_TOKEN, LOGIN_HOLDER_LEAVING_STATUS, LOGGED_OUT_FOR_LOGIN_TEXT, ACCOUNT_IN_USE_LOGIN_TOKENS, loginHolderOfferText, loginHolderKeptText, stoodDownForOtherTabText, type LoginHolderReport,
 } from '../packages/renderer/src/session/LoginHolder';
 import { serverNetErrorNotice, characterErrorNotice, ACCOUNT_IN_USE_HINT } from '../packages/renderer/src/ui/ConnectionNotices';
 import { loginFailureText } from '../packages/renderer/src/launcher/worldDirectory';
@@ -38,6 +37,7 @@ import { CharacterError } from '@ac/shared';
 import { PreworldReporter } from '../packages/renderer/src/telemetry/PreworldReporter';
 import { sanitizeClientPreworld } from '../services/ws-tcp-bridge/src/clientPreworld';
 import { loadDomWindow, installDomGlobals, restoreDomGlobals } from './_harness/dom.js';
+import { LOGIN_HOLDER_RETRY_DELAYS_MS } from '../packages/renderer/src/session/RetryPolicy';
 
 // reference/classic/ClassicDereth/Source/NetworkDefs.h, reference/ac1999/Server/Source/NetworkDefs.h
 const BT_NETERROR = 0x00100000;
@@ -174,7 +174,6 @@ describe('BUG.second-tab-login-refusal — a refused login never claims the acco
     a.world = { name: 'Mira' };
     const b = makeTab(hub, 'tab-b');
     const conn = new ClientConnection(REEF);
-    conn.autoReconnect = false;
     const events: ConnectionEvent[] = [];
     conn.on((e) => events.push(e));
     b.guard.watch(conn, () => accountSessionKey(REEF, 'Jake'));
@@ -198,7 +197,6 @@ describe('BUG.second-tab-login-refusal — a refused login never claims the acco
     a.guard.claim(accountSessionKey(REEF, 'jake'));
     const b = makeTab(hub, 'tab-b');
     const conn = new ClientConnection(REEF);
-    conn.autoReconnect = false;
     b.guard.watch(conn, () => accountSessionKey(REEF, 'jake'));
     conn.connect('jake', 'pw');
     FakeSocket.sockets[0].open();
@@ -216,7 +214,6 @@ describe('BUG.second-tab-login-refusal — a refused login never claims the acco
     a.guard.claim(accountSessionKey(REEF, 'jake'));
     const b = makeTab(hub, 'tab-b');
     const conn = new ClientConnection(REEF);
-    conn.autoReconnect = false;
     b.guard.watch(conn, () => accountSessionKey(REEF, 'jake'));
     conn.connect('jake', 'typo');
     FakeSocket.sockets[0].open();
@@ -545,7 +542,6 @@ describe('BUG.second-tab-login-refusal — the silent form (a login the server n
     vi.useFakeTimers();
     quiet();
     const conn = new ClientConnection(REEF);
-    conn.autoReconnect = false;
     const events: ConnectionEvent[] = [];
     conn.on((e) => events.push(e));
     conn.connect('jake', 'pw');
@@ -565,7 +561,6 @@ describe('BUG.second-tab-login-refusal — the silent form (a login the server n
     vi.useFakeTimers();
     quiet();
     const conn = new ClientConnection(REEF);
-    conn.autoReconnect = false;
     const events: ConnectionEvent[] = [];
     conn.on((e) => events.push(e));
     conn.connect('jake', 'pw');
@@ -670,7 +665,6 @@ describe('BUG.second-tab-login-refusal — the silent form (a login the server n
     a.world = { name: 'Gdletab' };
     const b = makeLoginPage(hub);
     const conn = new ClientConnection(REEF);
-    conn.autoReconnect = false;
     b.tab.guard.watch(conn, () => accountSessionKey(REEF, 'jake'));
     conn.on((e) => { if (e.type === 'loginUnanswered') b.wait.onUnanswered(RETAIL); });
     conn.connect('jake', 'pw');
@@ -821,7 +815,6 @@ describe('BUG.held-account-logon-failed — "Client logon failed" while a tab of
     for (const era of ['gdl', 'ac1999'] as const) {
       const { a, b } = seedsow();
       const conn = era === 'gdl' ? new ClientConnection(SEEDSOW) : new Connection1999(SEEDSOW);
-      if (conn instanceof ClientConnection) conn.autoReconnect = false;
       b.tab.guard.watch(conn, () => accountSessionKey(SEEDSOW, 'jake'));
       const events: ConnectionEvent[] = [];
       conn.on((e) => events.push(e));

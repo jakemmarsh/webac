@@ -25,7 +25,7 @@ import { DatDatabase } from '../packages/dat-parser/src/DatDatabase.js';
 import { FileDatBytes } from '../packages/dat-parser/src/node/FileDatBytes.js';
 import { ac1999PortalOverlay } from '../packages/dat-parser/src/era1999/Ac1999Overlay.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { SessionLifecycle, RESUME_DELAYS_MS } from '../packages/renderer/src/session/SessionLifecycle.js';
+import { SessionLifecycle } from '../packages/renderer/src/session/SessionLifecycle.js';
 import {
   ChargenDraftStore, CHARGEN_DRAFT_STORAGE_KEY, CHARGEN_DRAFT_TTL_MS, CHARGEN_RESUME_TOKENS,
   decideChargenDraft, pendingCreateSlot, type ChargenDraft, type ChargenDraftOwner,
@@ -39,6 +39,7 @@ import { PreworldReporter, type PreworldEvent } from '../packages/renderer/src/t
 import { sanitizeClientPreworld } from '../services/ws-tcp-bridge/src/clientPreworld.js';
 import { mountGameUI, type GameUIFixture } from './_harness/gameui.js';
 import { DAT_PATHS, openDat } from './_harness/dat.js';
+import { RESUME_DELAYS_MS } from '../packages/renderer/src/session/RetryPolicy.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 

@@ -4,7 +4,7 @@
  * session dead while the connection itself has not closed.
  *
  * The connection's 'disconnected' event already resumes an in-world drop
- * (SessionLifecycle.RESUME_DELAYS_MS, the named CLAUDE.md exception). The
+ * (RetryPolicy.RESUME_DELAYS_MS, the named CLAUDE.md exception). The
  * link check went straight to retail's Disconnected screen and ended the
  * resume, so a drop it caught first never came back (2026-10-16 production:
  * a Snowreap world_left with endCause link_dead, then a page that sat on the

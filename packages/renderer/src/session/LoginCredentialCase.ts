@@ -46,9 +46,6 @@ export const LOWERCASE_PASSWORD_EMUS: ReadonlySet<string> = new Set(['GDL', 'GDL
 /** The refusal a lowercased password can earn when the account's password has capitals. */
 export const CASE_VERBATIM_REFUSAL_TOKEN = 'ID_ConnectionError_ClientLogOnFailed';
 
-/** The wait before the as-typed retry: the refused socket is done, the bridge needs only a moment. */
-export const CASE_VERBATIM_RETRY_DELAY_MS = 500;
-
 /** The localStorage key of the remembered as-typed logins (UX.login-case-remember). */
 export const LOGIN_CASE_STORAGE_KEY = 'acjs.loginCase.v1';
 /** How many world + account entries are kept (the oldest goes first). */

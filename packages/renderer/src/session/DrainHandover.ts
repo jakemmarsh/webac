@@ -30,6 +30,7 @@
  */
 import type { HandoverResult } from '@ac/network';
 import type { HandoverPath, HandoverReason } from '../telemetry/PreworldReporter.js';
+import { HANDOVER_RETRY_MS } from './RetryPolicy.js';
 
 /** What the page knows about the character's situation right now. */
 export interface HandoverSafety {
@@ -58,8 +59,6 @@ export const HANDOVER_COMBAT_QUIET_MS = 15_000;
 export const HANDOVER_SAFE_HOLD_MS = 2_000;
 /** How often the page looks. */
 export const HANDOVER_POLL_MS = 500;
-/** Waits before another try after an attempt that left the session in place; then the hard cut is the backstop. */
-export const HANDOVER_RETRY_MS: readonly number[] = Object.freeze([5_000, 15_000, 30_000, 60_000, 120_000]);
 /**
  * A running macro holds for the handover for at most this long after the drain notice; after that it carries on, and
  * a session that still finds no safe moment takes the drain's hard cut as before. A calm macro needs the quiet period

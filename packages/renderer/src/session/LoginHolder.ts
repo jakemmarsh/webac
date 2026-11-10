@@ -85,6 +85,7 @@
  */
 
 import type { AccountHolderQuery, WorldHolder } from './AccountTabGuard.js';
+import { LOGIN_HOLDER_RETRY_DELAYS_MS } from './RetryPolicy.js';
 
 /** The login refusals that mean "this account is logged in already" (NetError tokens). */
 export const ACCOUNT_IN_USE_LOGIN_TOKENS: ReadonlySet<string> = new Set([
@@ -97,14 +98,6 @@ export const ACCOUNT_IN_USE_LOGIN_TOKENS: ReadonlySet<string> = new Set([
  * a tab of this browser could explain it.
  */
 export const LOGON_FAILED_LOGIN_TOKEN = 'ID_ConnectionError_ClientLogOnFailed';
-
-/**
- * The fresh logins after the other tab was asked to leave, while the refusal
- * repeats (ms after each refusal; 23 s in all). That tab's Disconnect goes out
- * at once; GDLE frees the account when it drops that client (in the world,
- * after its logout).
- */
-export const LOGIN_HOLDER_RETRY_DELAYS_MS: readonly number[] = Object.freeze([1000, 2000, 2000, 3000, 3000, 4000, 4000, 4000]);
 
 function where(holder: WorldHolder): string {
   if (holder.inWorld === false) return 'at character select';

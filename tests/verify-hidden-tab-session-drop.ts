@@ -126,7 +126,6 @@ function workerSession() {
     addEventListener: (_t, l) => { pageListeners.push(l); },
   };
   const client = new NetWorkerClient(endpoint, 'ws://sim');
-  client.autoReconnect = false;
   const events: ConnectionEvent[] = [];
   client.on((e) => events.push(e));
   client.connect('acct', 'pw');

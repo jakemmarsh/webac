@@ -16,9 +16,10 @@ import { createBridgeServer, DRAINING_FRAME, DRAINING_HANDOVER_FRAME, type Bridg
 import { AgentRelay, accountKey } from '../services/ws-tcp-bridge/src/relay';
 import { OAuthServer, RELAY_TICKET_MS } from '../services/ws-tcp-bridge/src/oauth';
 import { parseRelayLinkNotice } from '../packages/network/src/ClientConnection';
-import { RelayLink, RELINK_DELAYS_MS, relayLinkUrl, type LinkSocket } from '../packages/renderer/src/agent/relayLink';
+import { RelayLink, relayLinkUrl, type LinkSocket } from '../packages/renderer/src/agent/relayLink';
 import { WS_OPEN_TIMEOUT_MS } from '../packages/network/src/WsOpenTimeout';
 import { TabRelay } from '../packages/renderer/src/agent/relayTab';
+import { RELINK_DELAYS_MS } from '../packages/renderer/src/session/RetryPolicy';
 
 function str16(s: string): Buffer {
   const b = Buffer.from(s, 'latin1');

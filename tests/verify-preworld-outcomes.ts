@@ -202,7 +202,6 @@ afterEach(() => { g.WebSocket = savedWs; vi.useRealTimers(); vi.restoreAllMocks(
 describe('end of retail (ACE) — ClientConnection', () => {
   function startAce(h: Harness): { conn: ClientConnection; sock: FakeSocket } {
     const conn = new ClientConnection(h.r.tagUrl('wss://bridge.example/connect?server=coldeve'));
-    conn.autoReconnect = false;
     wireLikeMain(conn, h.r);
     conn.connect(ACCOUNT, PASSWORD);
     const sock = FakeSocket.sockets[0];
@@ -395,7 +394,6 @@ describe('Dark Majesty / GDLE — the NetError login refusal', () => {
     const h = harness();
     h.state.era = 'dark-majesty'; h.state.server = 'gdle-reefcull';
     const conn = new ClientConnection('ws://bridge');
-    conn.autoReconnect = false;
     wireLikeMain(conn, h.r);
     conn.connect(ACCOUNT, PASSWORD);
     const sock = FakeSocket.sockets[0];
@@ -597,7 +595,6 @@ describe('which screen the player is on (preworldScreenFor), and deliberate relo
         era === 'ac1999' ? new Connection1999(h.r.tagUrl('wss://bridge.example/connect?server=ac1999'))
           : new ClientConnection(h.r.tagUrl(`wss://bridge.example/connect?server=${era === 'dm' ? 'classic' : 'coldeve'}`)),
         () => h.r.connectAttempt());
-      conn.autoReconnect = false;
       wireLikeMain(conn, h.r);
       // The first session reaches char select.
       conn.connect(ACCOUNT, PASSWORD);
@@ -624,7 +621,6 @@ describe('which screen the player is on (preworldScreenFor), and deliberate relo
   it('connectAttempt resets only per-session state; an attempt that opens times its login from the open', () => {
     const h = mainLike();
     const conn = reportConnectAttempts(new ClientConnection('wss://bridge.example/connect?server=coldeve'), () => h.r.connectAttempt());
-    conn.autoReconnect = false;
     wireLikeMain(conn, h.r);
     conn.connect(ACCOUNT, PASSWORD);
     FakeSocket.sockets[0].open();
@@ -712,7 +708,6 @@ describe('closing the tab: the screen is the one the player left, not the one th
       era === 'ac1999' ? new Connection1999(r.tagUrl('wss://bridge.example/connect?server=ac1999'))
         : new ClientConnection(r.tagUrl('wss://bridge.example/connect?server=coldeve')),
       () => r.connectAttempt());
-    conn.autoReconnect = false;
     wireLikeMain(conn, r);
     let inWorld = false;
     conn.on((e) => {

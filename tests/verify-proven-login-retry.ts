@@ -23,9 +23,7 @@ import { Connection1999 } from '../packages/network/src/era1999/Connection1999.j
 import { buildPacket1999 } from '../packages/network/src/era1999/Packet1999.js';
 import { connectionFailureNotice, characterErrorNotice, netErrorNotice } from '../packages/renderer/src/ui/ConnectionNotices.js';
 import {
-  ProvenLoginRetry, provenLoginRetryDelay, webCryptoDigest, firstTimeLoginRetryAllowed,
-  PROVEN_LOGIN_RETRY_DELAYS_MS, RETRYABLE_LOGIN_REFUSAL_TOKENS,
-  type LoginCredentials,
+  ProvenLoginRetry, provenLoginRetryDelay, webCryptoDigest, firstTimeLoginRetryAllowed, RETRYABLE_LOGIN_REFUSAL_TOKENS, type LoginCredentials,
 } from '../packages/renderer/src/session/ProvenLoginRetry.js';
 import { PreworldReporter, type PreworldEvent } from '../packages/renderer/src/telemetry/PreworldReporter.js';
 import { sanitizeClientPreworld, PREWORLD_OUTCOMES, LOGIN_RETRY_KINDS } from '../services/ws-tcp-bridge/src/clientPreworld.js';
@@ -35,6 +33,7 @@ import {
   worldFromEntry, loginFailureText, localWorld, LOGON_FAILED_HINT, type World,
 } from '../packages/renderer/src/launcher/worldDirectory.js';
 import { CharacterError } from '../packages/shared/src/index.js';
+import { PROVEN_LOGIN_RETRY_DELAYS_MS } from '../packages/renderer/src/session/RetryPolicy.js';
 
 // NetworkDefs.h (GDLE and the AC1999 server)
 const BT_NETERROR = 0x00100000;
@@ -112,7 +111,7 @@ const GOOD: LoginCredentials = { world: WORLD, account: 'jake', password: 'hunte
 
 type Lane = { name: string; make: () => ClientConnection | Connection1999; refusal: (e: number) => Uint8Array };
 const LANES: Lane[] = [
-  { name: 'GDLE (Dark Majesty, ClientConnection)', make: () => { const c = new ClientConnection('ws://bridge'); c.autoReconnect = false; return c; }, refusal: gdleRefusal },
+  { name: 'GDLE (Dark Majesty, ClientConnection)', make: () => new ClientConnection('ws://bridge'), refusal: gdleRefusal },
   { name: 'AC1999 server (Connection1999)', make: () => new Connection1999('ws://bridge'), refusal: refusal1999 },
 ];
 

@@ -123,7 +123,6 @@ interface Tab {
 /** A page: its connection, its guard, and main.ts's stand-down (close the session, no retry). */
 function makeTab(hub: FakeChannelHub, id: string, account = 'Player1', at?: () => number): Tab {
   const conn = new ClientConnection(URL_COLDEVE);
-  conn.autoReconnect = false;
   const events: ConnectionEvent[] = [];
   conn.on(e => events.push(e));
   const tab: Tab = {

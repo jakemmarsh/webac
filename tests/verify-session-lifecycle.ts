@@ -17,7 +17,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { SessionLifecycle, RESUME_DELAYS_MS, RESUME_HEALTHY_MS, RESUME_IN_WORLD_RETRY_DELAYS_MS, IN_WORLD_RETRY_DELAY_MS, characterSlotIndex, isAutoEnterTargetStillValid } from '@ac/renderer/session/SessionLifecycle.js';
+import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid } from '@ac/renderer/session/SessionLifecycle.js';
+import { RESUME_DELAYS_MS, RESUME_HEALTHY_MS, RESUME_IN_WORLD_RETRY_DELAYS_MS, IN_WORLD_RETRY_DELAY_MS } from '@ac/renderer/session/RetryPolicy.js';
 
 const slots = [
   { id: '1342177280', name: 'First' },                    // 0x50000000

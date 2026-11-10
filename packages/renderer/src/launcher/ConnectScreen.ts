@@ -18,6 +18,7 @@
  */
 import { CHARSEL_LAYOUT, LAUNCHER_TEXT, coverLauncherBakedLabels, launcherPlateButton, wrapLines, type LauncherKit } from './LauncherScreen.js';
 import { descRef } from '../ui/DatTextStyle.js';
+import { CONNECT_RETRY_MS, CONNECT_STATUS_MAX_FAILURES } from '../session/RetryPolicy.js';
 
 const EL_WORLD_BOX = 0x1000039b;
 const EL_LIST = 0x1000039c;
@@ -117,9 +118,6 @@ export function bridgeConnectApi(origin: string, fetchImpl: typeof fetch = fetch
 
 export type ConnectOutcome = 'allowed' | 'denied' | 'expired' | 'error';
 
-/** Unreachable status calls in a row before the page stops retrying (~CONNECT_RETRY_MS apart). */
-export const CONNECT_STATUS_MAX_FAILURES = 5;
-export const CONNECT_RETRY_MS = 3000;
 /** The bridge answered, but has no pairing for this page (connector off, or not a status). */
 export const CONNECT_NO_SERVICE_TEXT = 'This game server doesn\'t recognise this connect link. It may be from an older attempt, or the server may not take Claude connections.';
 /** Status calls kept failing. */

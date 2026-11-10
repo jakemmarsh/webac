@@ -12,16 +12,10 @@
  * whole time. Nothing connects once the resume is over (a deliberate logout,
  * back in the world, given up) or after a newer schedule / cancel.
  *
- * OBS.upgrade-aborted — a hidden tab's attempt waits on throttled timers (2026-11-10: two players
- * whose background tab dropped sat on the resuming screen and reloaded by hand ~60 s later). While an
- * attempt is pending (its delay, or the offline wait), the page coming back into view (hidden →
- * visible) runs it at once: the player is looking at the connecting screen. Only a pending attempt,
- * once; an attempt already connecting is left alone, and the budget and grace are unchanged (the
- * same attempt runs, sooner). Still offline by the browser's word, it keeps waiting for 'online'.
- *
  * Part of the named automatic-reconnect browser-UX exception (CLAUDE.md).
  */
 import type { SessionLifecycle } from './SessionLifecycle.js';
+import { RESUME_ONLINE_SETTLE_MS } from './RetryPolicy.js';
 
 /** The page's view of the network: navigator.onLine and the window's 'online' event. */
 export interface OnlineSource {
@@ -47,27 +41,6 @@ export function windowOnlineSource(w: {
   };
 }
 
-/** The page's visibility: the document's 'visibilitychange' to 'visible'. */
-export interface VisibilitySource {
-  /** Call `fn` each time the page becomes visible (hidden → visible); returns the unsubscribe. */
-  onVisible(fn: () => void): () => void;
-}
-
-/** The VisibilitySource of a document: 'visibilitychange' while visibilityState is 'visible'. */
-export function documentVisibilitySource(d: {
-  readonly visibilityState?: string;
-  addEventListener(type: 'visibilitychange', fn: () => void): void;
-  removeEventListener(type: 'visibilitychange', fn: () => void): void;
-}): VisibilitySource {
-  return {
-    onVisible: (fn) => {
-      const h = () => { if (d.visibilityState === 'visible') fn(); };
-      d.addEventListener('visibilitychange', h);
-      return () => d.removeEventListener('visibilitychange', h);
-    },
-  };
-}
-
 /**
  * BUG.resume-hung-socket / BUG.resume-outage-fast-fail — whether a resume
  * attempt's failure means the network (or the bridge) could not be reached,
@@ -89,16 +62,11 @@ export function attemptFoundNoNetwork(
   return offline || event.openTimedOut === true || event.openFailed === true;
 }
 
-/** After 'online', the wait before connecting: the interface is up, its DNS and routes a moment later. */
-export const RESUME_ONLINE_SETTLE_MS = 1000;
-
 export interface ResumeRunnerOptions {
   lifecycle: Pick<SessionLifecycle, 'resumingAfterDrop' | 'unreachableGraceLeftMs' | 'noteNetworkOut'>;
   /** Open the attempt's connection (NetConnection.connect with the session's credentials). */
   connect(): void;
   online: OnlineSource;
-  /** OBS.upgrade-aborted — the page coming into view runs a pending attempt at once (absent: never). */
-  visibility?: VisibilitySource;
   log?(text: string): void;
   now?(): number;
   setTimer?(fn: () => void, ms: number): unknown;
@@ -108,7 +76,6 @@ export interface ResumeRunnerOptions {
 export class ResumeRunner {
   private timer: unknown = null;
   private unsubscribe: (() => void) | null = null;
-  private unsubscribeVisible: (() => void) | null = null;
   private generation = 0;
   private waiting = false;
 
@@ -124,7 +91,6 @@ export class ResumeRunner {
     this.cancel();
     const gen = this.generation;
     this.arm(delayMs, () => this.due(gen));
-    if (this.o.visibility) this.unsubscribeVisible = this.o.visibility.onVisible(() => this.visibleNow(gen));
   }
 
   /** Drop the pending attempt (and any wait for the network). */
@@ -135,25 +101,6 @@ export class ResumeRunner {
     this.timer = null;
     this.unsubscribe?.();
     this.unsubscribe = null;
-    this.stopWatchingVisible();
-  }
-
-  private stopWatchingVisible(): void {
-    this.unsubscribeVisible?.();
-    this.unsubscribeVisible = null;
-  }
-
-  /** The page came into view while attempt `gen` is pending: run it now, unless the browser is still offline. */
-  private visibleNow(gen: number): void {
-    if (gen !== this.generation || !this.o.lifecycle.resumingAfterDrop) return;
-    if (this.o.online.isOffline()) return; // the offline wait (or the due check) still waits for 'online'
-    this.o.log?.('[AC] ACE: the page is back in view — running the next resume attempt now');
-    if (this.timer !== null) (this.o.clearTimer ?? ((t) => clearTimeout(t as ReturnType<typeof setTimeout>)))(this.timer);
-    this.timer = null;
-    this.unsubscribe?.();
-    this.unsubscribe = null;
-    this.waiting = false;
-    this.fire(gen);
   }
 
   private arm(ms: number, fn: () => void): void {
@@ -165,8 +112,7 @@ export class ResumeRunner {
   }
 
   private due(gen: number): void {
-    if (gen !== this.generation) return;
-    if (!this.o.lifecycle.resumingAfterDrop) { this.stopWatchingVisible(); return; } // gave up or logged out meanwhile
+    if (gen !== this.generation || !this.o.lifecycle.resumingAfterDrop) return; // gave up or logged out meanwhile
     if (!this.o.online.isOffline()) { this.fire(gen); return; }
     this.o.lifecycle.noteNetworkOut(this.now());
     const left = this.o.lifecycle.unreachableGraceLeftMs(this.now());
@@ -190,10 +136,7 @@ export class ResumeRunner {
   }
 
   private fire(gen: number): void {
-    if (gen !== this.generation) return;
-    // The attempt runs once: a later visibility change leaves it alone (the next schedule watches again).
-    this.stopWatchingVisible();
-    if (!this.o.lifecycle.resumingAfterDrop) return;
+    if (gen !== this.generation || !this.o.lifecycle.resumingAfterDrop) return;
     this.o.connect();
   }
 }

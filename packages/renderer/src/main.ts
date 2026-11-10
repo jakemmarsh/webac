@@ -406,15 +406,15 @@ import { packSlotCounts } from './agent/packCounts.js';
 import { ItemShortcutRestorer, toolbarObjectMoved as toolbarObjectMovedOnBar, isShortcutEligible, shortcutDropRefusal1999, shortcutDropIntoContainer1999, type ShortcutTarget, type ShortcutItemInfo } from './network/itemShortcutRestore.js';
 import { tradeItemEntryFor } from './ui/tradeItemEntry.js';
 import { decidePositionCorrection, blendStep } from './world/PositionCorrection.js';
-import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid, RESUME_HEALTHY_MS, RESUME_PAGE_CAP, RESUME_PAGE_CAP_WINDOW_MS, RESUME_SILENT_AGAIN_WINDOW_MS } from './session/SessionLifecycle.js';
+import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid } from './session/SessionLifecycle.js';
 import { LoginRefusalMemory } from './session/LoginRefusalMemory.js';
 import { ProvenLoginRetry, firstTimeLoginRetryAllowed, type LoginCredentials } from './session/ProvenLoginRetry.js';
-import { LoginCaseFallback, LoginCaseMemory, passwordCaseFor, CASE_VERBATIM_RETRY_DELAY_MS } from './session/LoginCredentialCase.js';
+import { LoginCaseFallback, LoginCaseMemory, passwordCaseFor } from './session/LoginCredentialCase.js';
 import { armDropResume, handleUnexpectedDrop, resumeAttemptRefusalIsFinal, silentReloginDrop } from './session/UnexpectedDrop.js';
-import { SessionLiveness, sessionDropped, liveSessionSocketFailed, characterListRole } from './session/SessionLiveness.js';
+import { SessionLiveness, sessionDropped, characterListRole } from './session/SessionLiveness.js';
 import { ChargenDraftStore, decideChargenDraft, CHARGEN_DRAFT_OFFER_TEXT, type ChargenDraftOwner } from './session/ChargenResume.js';
 import { DrainHandover } from './session/DrainHandover.js';
-import { ResumeRunner, attemptFoundNoNetwork, documentVisibilitySource, windowOnlineSource } from './session/ResumeRunner.js';
+import { ResumeRunner, attemptFoundNoNetwork, windowOnlineSource } from './session/ResumeRunner.js';
 import { AccountTabGuard, accountSessionKey, openSessionChannel, type LogoutReason } from './session/AccountTabGuard.js';
 import { InWorldEnterWait, LOGGED_OUT_FOR_OTHER_TAB_TEXT } from './session/InWorldHolder.js';
 import { LoginHolderWait, LOGGED_OUT_FOR_LOGIN_TEXT, stoodDownForOtherTabText } from './session/LoginHolder.js';
@@ -502,6 +502,7 @@ import { CellGate, GatedEventQueue, PrefetchStatus, settleBurst } from './dat/st
 import { GameplayUiShow } from './session/GameplayUiShow.js';
 import { skyObjectRoots } from './dat/streaming/DatClosure.js';
 import { appearanceRoots, arrivalCellOf, queuedObjectRoots } from './dat/streaming/ArrivalEvents.js';
+import { CASE_VERBATIM_RETRY_DELAY_MS, RESUME_HEALTHY_MS, RESUME_PAGE_CAP, RESUME_PAGE_CAP_WINDOW_MS, RESUME_SILENT_AGAIN_WINDOW_MS } from './session/RetryPolicy.js';
 
 // BUG.ui-text-blank-iosurface-exhaustion — CPU-backed 2D canvases before any UI exists.
 installCpuBacked2dCanvases();
@@ -8607,8 +8608,6 @@ async function main() {
         sourceUrl: runtimeConfig.sourceUrl,
         siteLinks: runtimeConfig.siteLinks,
         linkedWorld,
-        // OBS.upgrade-aborted sweep — a failed world list's background retry runs when the player looks back.
-        visibility: documentVisibilitySource(document),
       });
       linkedWorld = null;
       launcherActive = false;
@@ -8720,8 +8719,6 @@ async function main() {
   });
   accountTabGuard.watch(aceConnection, () => (aceAccount ? accountSessionKey(connectUrl, aceAccount) : null));
   preworldReporter?.setTabId(accountTabGuard.tabId);
-  // Disable auto-reconnect — prevents cascading duplicate sessions
-  aceConnection.autoReconnect = false;
   // Clean up on page unload to prevent zombie WebSocket connections
   // The dirty PlayerModule goes out before the socket closes (the pagehide
   // flush runs after this handler, with no connection left); the pre-world
@@ -8879,7 +8876,6 @@ async function main() {
     confirm: (text, onAnswer) => { gameUI.showConfirmationDialog(text, onAnswer); return () => gameUI.hideConfirmationDialog(); },
     login: () => {
       console.log('[AC] ACE: logging in again now that the other tab was asked to log out');
-      aceConnection.autoReconnect = false;
       aceConnection.connect(aceAccount, acePassword);
     },
     schedule: (fn, ms) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); },
@@ -8915,8 +8911,7 @@ async function main() {
    * the epilogue mode, logs the character off and exits the process
    * (gmEpilogueUI → Device::Done). A browser tab cannot exit, so the
    * relaunch is a fresh connect cycle: back to the connecting screen and
-   * the full login sequence — the same recovery the /reconnect command
-   * performs, which is why /reconnect shares it.
+   * the full login sequence.
    */
   const relaunchConnectCycle = (): void => {
     if (!urlLogin.autoLogin && reloadIfUpdatePending()) return;
@@ -8934,14 +8929,13 @@ async function main() {
     // the new LoginRequest (mirrors the page-load wait at the
     // aceDisconnectTime check above).
     setTimeout(() => {
-      aceConnection.autoReconnect = false;
       aceConnection.connect(aceAccount, acePassword);
     }, 750);
   };
   /**
    * A drop in the world that wasn't ours to make (a bridge restart, a network
    * blip): reconnect and re-enter the same character on our own, a few
-   * attempts with backoff (SessionLifecycle.RESUME_DELAYS_MS), behind the
+   * attempts with backoff (RetryPolicy.RESUME_DELAYS_MS), behind the
    * connecting screen. False when there is nothing to resume or the budget
    * is spent — the caller then raises retail's Disconnected screen. Uses
    * only the NetConnection surface (connect/disconnect), so every era's
@@ -8956,12 +8950,9 @@ async function main() {
   const resumeRunner = new ResumeRunner({
     lifecycle: sessionLifecycle,
     connect: () => {
-      aceConnection.autoReconnect = false;
       aceConnection.connect(aceAccount, acePassword);
     },
     online: windowOnlineSource(window),
-    // OBS.upgrade-aborted — a background tab's pending attempt runs as soon as the player looks at it.
-    visibility: documentVisibilitySource(document),
     log: (text) => console.log(text),
   });
   /**
@@ -9062,7 +9053,6 @@ async function main() {
     accountTabGuard.release();
     sessionLifecycle.noteDisconnected();
     enterRequestTimer.cancel();
-    aceConnection.autoReconnect = false;
     aceConnection.disconnect();
     pageStorage('session').setItem('aceDisconnectTime', Date.now().toString());
   };
@@ -9134,7 +9124,6 @@ async function main() {
       gameUI.showConnectingScreen();
       gameUI.setWorldName(launcherWorldName ?? '');
       setTimeout(() => {
-        aceConnection.autoReconnect = false;
         aceConnection.connect(aceAccount, acePassword);
       }, 750);
     });
@@ -19692,11 +19681,10 @@ async function main() {
           // CharacterList) starts from a clean enter-world path instead
           // of leaving a stale world behind character select. Not a
           // deliberate logout: keep the last-entered character so
-          // /reconnect resumes it.
+          // the resume (scheduleResume) re-enters it.
           const wasInWorld = sessionLifecycle.inWorld;
-          // A live session ended under the player: the closing socket had opened, or the session behind it had
-          // reached its character list (a socket the connection opened on its own can fail unopened: SessionLiveness.ts).
-          const unexpected = sessionDropped(event, sessionLiveness.isLive);
+          // A session ended under the player: its socket had opened and we did not close it (SessionLiveness.ts).
+          const unexpected = sessionDropped(event);
           // UX.chargen-resume / UX.charselect-resume — a drop in chargen keeps the draft, one at character
           // select keeps the list and selection, one while Entering World waits enters the same character:
           // each resumes the same way (session/UnexpectedDrop.ts armDropResume).
@@ -19743,18 +19731,6 @@ async function main() {
             raiseServerDied();
           }
           break;
-
-        case 'reconnecting': {
-          // FAITHFUL.269 — structured reconnect event (autoReconnect is off
-          // in this app, so this is a dormant path). CORE.17.k.b: retail has
-          // no auto-reconnect and never prints connection progress into
-          // chat — the developer console is its sink.
-          const a = event.reconnectAttempt ?? 0;
-          const m = event.reconnectMax ?? 0;
-          const s = event.reconnectDelaySec ?? 0;
-          raiseClientNotice(gameUI, CN.reconnecting, { text: `Reconnecting to the ACE server in ${s}s (attempt ${a}/${m})…` });
-          break;
-        }
 
         case 'loginUnanswered': {
           // BUG.second-tab-login-refusal — the silent form of "account in use" (some GDLE builds never
@@ -19869,12 +19845,6 @@ async function main() {
             break;
           }
           if (event.netErrorId || event.serverNetError) {
-            // A socket the connection opened on its own for a live session couldn't open: the
-            // 'disconnected' right after it ends (and resumes) the session; no refusal dialog.
-            if (liveSessionSocketFailed(event, sessionLiveness.isLive, sessionLifecycle.resumingAfterDrop)) {
-              console.warn('[AC] ACE: a live session\'s new socket could not open — handled as a drop');
-              break;
-            }
             // A resume attempt that couldn't connect: the next one, or the
             // Disconnected screen once the budget is spent.
             if (sessionLifecycle.resumingAfterDrop) {
@@ -19930,7 +19900,6 @@ async function main() {
                 provenLoginRetryTimer = setTimeout(() => {
                   provenLoginRetryTimer = null;
                   if (launcherActive || gameStarted || aceAccount !== typed.account || acePassword !== typed.password || connectUrl !== typed.url) return;
-                  aceConnection.autoReconnect = false;
                   aceConnection.connect(aceAccount, acePassword);
                 }, CASE_VERBATIM_RETRY_DELAY_MS);
                 return true;
@@ -19951,7 +19920,6 @@ async function main() {
                       provenLoginRetryTimer = null;
                       // Gone to the launcher, another tab, or new credentials meanwhile: nothing to retry.
                       if (launcherActive || gameStarted || aceAccount !== typed.account || acePassword !== typed.password) return;
-                      aceConnection.autoReconnect = false;
                       aceConnection.connect(typed.account, typed.password);
                     }, verdict.delayMs);
                     return;
@@ -20026,7 +19994,7 @@ async function main() {
     // The server's CreateObject burst follows the arrival position: wait for it to go quiet (bounded).
     const QUEUED_OBJECT_QUIET_MS = 400;
     const QUEUED_OBJECT_BURST_MAX_MS = 1500;
-    const SESSION_LIFECYCLE = new Set(['connected', 'disconnected', 'error', 'reconnecting', 'serverTimeout', 'loginRetry']);
+    const SESSION_LIFECYCLE = new Set(['connected', 'disconnected', 'error', 'serverTimeout', 'loginRetry']);
     let gateBackgroundRelease: (() => void) | null = null;
     const releaseGateBackgroundHold = (): void => { gateBackgroundRelease?.(); gateBackgroundRelease = null; };
     const sessionEventGate: GatedEventQueue<ConnectionEvent> = new GatedEventQueue<ConnectionEvent>({

@@ -127,7 +127,6 @@ function clientLogin(kind: 'eor' | 'eor-colon' | 'ac1999', account: string, pass
     const conn = kind === 'ac1999'
       ? new Connection1999('wss://bridge.example/connect?server=ac1999')
       : new ClientConnection('wss://bridge.example/connect?server=x', kind === 'eor-colon' ? { loginProfile: { ...EOR_LOGIN_PROFILE, authStyle: 'account-colon-password' } } : {});
-    if (conn instanceof ClientConnection) conn.autoReconnect = false;
     conn.connect(account, password);
     const ws = CaptureSocket.last!;
     ws.readyState = 1;
@@ -1322,6 +1321,41 @@ describe('reconciler robustness', () => {
     calls.length = 0;
     expect(await m.reconcile()).toMatchObject({ released: 1 });
     expect(calls.find((c) => c[0] === 'disassociate')?.[1]).toBe('eipassoc-eipalloc-1');
+    await m.stop();
+  });
+
+  it('an address its holder releases after the listing is not detached again (2026-11-10 UnauthorizedOperation)', async () => {
+    const dir = tempDir();
+    const clock = fakeClock();
+    const { api, calls, addresses } = fakeEc2();
+    const cap = capture();
+    const m = await awsManager(dir, 'ac1999:2', api, clock, cap.log, ['10.0.1.11', '10.0.1.12']);
+    const l = await lease(m, 'ac1999', '198.51.100.1');
+    const heldAlloc = [...addresses.values()].find((a) => a.publicIp === l.publicIp)!.allocationId;
+    // A genuine orphan on the other slot: tagged, no record names it.
+    const orphan = await api.allocateAddress({ tag: l.localAddress === '10.0.1.11' ? '10.0.1.12' : '10.0.1.11', instanceId: 'i-self' });
+    l.release();
+    clock.advance(121_000);
+    // As AWS does for an address that is gone (the IAM policy is scoped to tagged addresses).
+    const disassociate = api.disassociateAddress.bind(api);
+    api.disassociateAddress = async (a) => {
+      if (![...addresses.values()].some((x) => x.associationId === a.associationId)) throw Object.assign(new Error('denied'), { name: 'UnauthorizedOperation' });
+      return disassociate(a);
+    };
+    // The grace timer's release lands after the reconciler listed, before the slot's turn.
+    const describe = api.describeTaggedAddresses.bind(api);
+    api.describeTaggedAddresses = async () => {
+      const listed = await describe();
+      expect(await m.releaseIfIdle(l.localAddress)).toBe('released');
+      return listed;
+    };
+    calls.length = 0;
+    expect(await m.reconcile()).toMatchObject({ released: 1, errors: 0 });
+    expect(calls.filter((c) => c[0] === 'disassociate' && c[1] === `eipassoc-${heldAlloc}`)).toHaveLength(1);
+    expect(calls.filter((c) => c[0] === 'release' && c[1] === heldAlloc)).toHaveLength(1);
+    expect(addresses.has(heldAlloc)).toBe(false);
+    expect(addresses.has(orphan.allocationId)).toBe(false);
+    expect(cap.lines.some((l2) => l2.event === 'egress_reconcile' && l2.fields.ok === false)).toBe(false);
     await m.stop();
   });
 

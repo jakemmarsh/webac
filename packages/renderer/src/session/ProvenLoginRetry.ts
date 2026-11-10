@@ -53,9 +53,7 @@
  * success came after the player changed the name or password.
  */
 import { autoCreateNameProblem } from '../launcher/worldDirectory.js';
-
-/** Waits before each automatic retry of a proven login (about 10 s in all); after the last, today's error. */
-export const PROVEN_LOGIN_RETRY_DELAYS_MS: readonly number[] = Object.freeze([3000, 6000]);
+import { PROVEN_LOGIN_RETRY_DELAYS_MS } from './RetryPolicy.js';
 
 /**
  * Login refusals a proven login retries. Only the server's catch-all "Client

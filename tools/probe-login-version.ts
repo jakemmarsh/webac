@@ -42,7 +42,6 @@ function readString16(bytes: Uint8Array): string {
 
 async function probe(target: string, version: string): Promise<string> {
   const conn = new ClientConnection(target, { loginProfile: { clientVersion: version, authStyle: 'account-password' } });
-  conn.autoReconnect = false;
   const account = `probe${Math.random().toString(36).slice(2, 10)}`;
   return new Promise((resolve) => {
     const done = (s: string) => { clearTimeout(timer); try { conn.disconnect(); } catch { /* closing */ } resolve(s); };

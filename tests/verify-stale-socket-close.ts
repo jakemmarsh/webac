@@ -51,7 +51,6 @@ function connected(): { conn: ClientConnection; events: ConnectionEvent[] } {
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'log').mockImplementation(() => {});
   const conn = new ClientConnection('ws://bridge');
-  conn.autoReconnect = false;
   const events: ConnectionEvent[] = [];
   conn.on((e) => events.push(e));
   conn.connect('enkarta', 'pw');

@@ -477,7 +477,7 @@ export const MOVE_STATE_FIELDS = [
 /** renderer MovementSync MOVE_SEND_ORIGINS. */
 export const MOVE_SEND_ORIGINS = ['event', 'update_state', 'update_jump', 'update_turn', 'held', 'position'] as const;
 /** renderer CameraController MOVEMENT_EVENT_SOURCES. */
-export const MOVEMENT_EVENT_SOURCES = ['key_down', 'key_up', 'autorun', 'stop_moving', 'mouse_left', 'mouse_turn'] as const;
+export const MOVEMENT_EVENT_SOURCES = ['key_down', 'key_up', 'autorun', 'stop_moving', 'mouse_left', 'mouse_turn', 'mouse_look'] as const;
 const MOVE_LIMITER_DRIVERS = ['player', 'agent'] as const;
 const MOVE_LIMITER_KINDS = ['macro', 'meta', 'rules'] as const;
 /** List lengths kept (renderer: 15 fields, 6 recent sends, 8 recent events). */

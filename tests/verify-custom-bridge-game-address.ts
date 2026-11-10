@@ -74,7 +74,7 @@ class FakeSocket {
   fail(): void { this.readyState = 3; this.onerror?.(); this.onclose?.(); }
 }
 
-type Conn = { connect(a: string, p: string): void; on(l: (e: ConnectionEvent) => void): void; autoReconnect?: boolean };
+type Conn = { connect(a: string, p: string): void; on(l: (e: ConnectionEvent) => void): void };
 const lanes: Array<[string, (url: string) => Conn]> = [
   ['end of retail / Dark Majesty (ClientConnection)', (url) => new ClientConnection(url)],
   ['AC1999 (Connection1999)', (url) => new Connection1999(url)],
@@ -83,7 +83,6 @@ const lanes: Array<[string, (url: string) => Conn]> = [
 /** The page's raiseNetError text for a connection that never opened (main.ts). */
 function failureText(make: (url: string) => Conn, world: World, inWorld = false): string {
   const conn = make(world.kind === 'custom' ? world.bridgeUrl! : 'wss://bridge.example/?server=x');
-  conn.autoReconnect = false;
   const events: ConnectionEvent[] = [];
   conn.on((e) => events.push(e));
   conn.connect('bael', 'pw');

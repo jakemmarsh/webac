@@ -108,7 +108,6 @@ function session() {
   const p = pipe();
   stopHost = p.stop;
   const client = new NetWorkerClient(p.endpoint, 'ws://sim');
-  client.autoReconnect = false;
   const events: ConnectionEvent[] = [];
   const connectedSeen: boolean[] = [];
   client.on((e) => { events.push(e); if (e.type === 'connected') connectedSeen.push(client.isConnected); });

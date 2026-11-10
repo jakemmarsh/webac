@@ -13,9 +13,9 @@
  *  - a live session's socket closing: a drop (everOpened=true), resumed;
  *  - the stale-session retry's socket failing before any character list: not a
  *    drop (the page stays on its connecting / refusal path, as before);
- *  - a live session whose end comes from a socket that never opened (a socket
- *    the connection opened on its own after the list): still a drop, and the
- *    CantSocket before it raises no refusal dialog;
+ *  - no socket the connection opens on its own can end a session that had its
+ *    list (a list cancels the stale-session retry; a Logon after it opens
+ *    nothing), so `everOpened` alone decides a drop (SessionLiveness.sessionDropped);
  *  - a page-started connect resets liveness (leaving for the launcher, then an
  *    unreachable bridge, stays CantSocket, not the Disconnected screen).
  */
@@ -25,7 +25,7 @@ import {
   PacketHeaderFlags, type PacketHeaderData, PACKET_HEADER_SIZE, FRAGMENT_HEADER_SIZE,
   writePacketHeader, fragmentMessage, writeFragment, GameMessageGroup,
 } from '@ac/network';
-import { SessionLiveness, sessionDropped, liveSessionSocketFailed } from '../packages/renderer/src/session/SessionLiveness.js';
+import { SessionLiveness, sessionDropped } from '../packages/renderer/src/session/SessionLiveness.js';
 
 const CHARACTER_ERROR = 0xF659;
 const CHARACTER_LIST = 0xF658;
@@ -71,15 +71,14 @@ function rig() {
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'log').mockImplementation(() => {});
   const conn = new ClientConnection('ws://relay');
-  conn.autoReconnect = false; // as main.ts sets it
   const live = new SessionLiveness();
   const events: ConnectionEvent[] = [];
-  const decisions: { dropped: boolean; dialogSuppressed?: boolean }[] = [];
+  const decisions: { dropped: boolean }[] = [];
   conn.on((e) => {
     events.push(e);
     if (e.type === 'characterList') live.noteCharacterList();
-    if (e.type === 'error' && e.netErrorId) decisions.push({ dropped: false, dialogSuppressed: liveSessionSocketFailed(e, live.isLive, false) });
-    if (e.type === 'disconnected') { decisions.push({ dropped: sessionDropped(e, live.isLive) }); live.noteEnded(); }
+    if (e.type === 'error' && e.netErrorId) decisions.push({ dropped: false });
+    if (e.type === 'disconnected') { decisions.push({ dropped: sessionDropped(e) }); live.noteEnded(); }
   });
   const pageConnect = (): void => { live.noteConnectAttempt(); conn.connect('acct', 'pw'); };
   const feed = (p: Uint8Array): void => (conn as unknown as { handlePacket(p: Uint8Array): void }).handlePacket(p);
@@ -102,7 +101,7 @@ describe('the live check\'s sequence: the stale-session retry\'s socket fails wi
       { type: 'error', netErrorId: 'ID_NetError_CantSocket', everOpened: undefined },
       { type: 'disconnected', netErrorId: undefined, everOpened: false },
     ]);
-    expect(r.decisions).toEqual([{ dropped: false, dialogSuppressed: false }, { dropped: false }]);
+    expect(r.decisions).toEqual([{ dropped: false }, { dropped: false }]);
   });
 });
 
@@ -120,31 +119,33 @@ describe('a live session', () => {
     expect(r.decisions.at(-1)).toEqual({ dropped: true });
   });
 
-  it('ended by a socket the connection opened on its own that never opened: still a drop, and no refusal dialog', () => {
+  it('a character list cancels a pending stale-session retry: no socket of its own after the list', () => {
+    vi.useFakeTimers();
+    const r = rig();
+    r.pageConnect();
+    FakeSocket.instances[0].open();
+    r.feed(packet(2, CHARACTER_ERROR, 0, ERR_LOGON)); // the retry is due in 3 s
+    r.pageConnect(); // the page logs in itself meanwhile
+    FakeSocket.instances[1].open();
+    r.feed(packet(2, CHARACTER_LIST, 0));
+    expect(r.live.isLive).toBe(true);
+    vi.advanceTimersByTime(ClientConnection.LOGIN_REJECT_RETRY_MS * 10);
+    expect(FakeSocket.instances).toHaveLength(2);
+  });
+
+  it('a Logon refusal after the list (booted by a login elsewhere) opens nothing: the drop is the open socket\'s', () => {
     vi.useFakeTimers();
     const r = rig();
     r.pageConnect();
     FakeSocket.instances[0].open();
     r.feed(packet(2, CHARACTER_LIST, 0));
-    // The connection's own reconnect (dormant in the app, on here) replaces the dead socket.
-    r.conn.autoReconnect = true;
+    r.feed(packet(3, CHARACTER_ERROR, 1, ERR_LOGON));
+    expect(r.events.some((e) => e.type === 'error' && e.characterError === ERR_LOGON)).toBe(true);
+    expect(r.events.some((e) => e.type === 'loginRetry')).toBe(false);
+    vi.advanceTimersByTime(ClientConnection.LOGIN_REJECT_RETRY_MS * 10);
+    expect(FakeSocket.instances).toHaveLength(1);
     FakeSocket.instances[0].die();
-    // That first end is the live drop; the page resumes it. Then a reconnect socket fails unopened.
     expect(r.decisions.at(-1)).toEqual({ dropped: true });
-    // Simulate a session the page still holds as live when the replacement socket fails (no 'disconnected' in between).
-    r.live.noteCharacterList();
-    // The reconnect opens its socket after 2 s; the browser fails it before its own open timeout
-    // (15 s, BUG.resume-hung-socket: past it the connection gives up on the socket itself).
-    vi.advanceTimersByTime(5_000);
-    expect(FakeSocket.instances).toHaveLength(2);
-    const failed = FakeSocket.instances[1];
-    expect(failed).toBeTruthy();
-    failed.die();
-    const tail = r.events.filter((e) => e.type === 'error' || e.type === 'disconnected').slice(-2);
-    expect(tail.map((e) => [e.type, e.everOpened ?? null, e.netErrorId ?? null])).toEqual([
-      ['error', null, 'ID_NetError_CantSocket'], ['disconnected', false, null],
-    ]);
-    expect(r.decisions.slice(-2)).toEqual([{ dropped: false, dialogSuppressed: true }, { dropped: true }]);
   });
 
   it('our own close is never a drop, live or not', () => {
@@ -165,7 +166,7 @@ describe('a live session', () => {
     r.conn.disconnect(); // leaving for the launcher
     r.pageConnect(); // the launcher's ENTER
     FakeSocket.instances[1].die();
-    expect(r.decisions.slice(-2)).toEqual([{ dropped: false, dialogSuppressed: false }, { dropped: false }]);
+    expect(r.decisions.slice(-2)).toEqual([{ dropped: false }, { dropped: false }]);
   });
 });
 
@@ -180,10 +181,8 @@ describe('SessionLiveness / sessionDropped', () => {
     l.noteCharacterList();
     l.noteConnectAttempt();
     expect(l.isLive).toBe(false);
-    expect(sessionDropped({ everOpened: true, deliberate: false }, false)).toBe(true);
-    expect(sessionDropped({ everOpened: false, deliberate: false }, true)).toBe(true);
-    expect(sessionDropped({ everOpened: false, deliberate: false }, false)).toBe(false);
-    expect(sessionDropped({ everOpened: true, deliberate: true }, true)).toBe(false);
-    expect(liveSessionSocketFailed({ netErrorId: 'ID_NetError_CantSocket' }, true, true)).toBe(false); // the page's own resume counts it
+    expect(sessionDropped({ everOpened: true, deliberate: false })).toBe(true);
+    expect(sessionDropped({ everOpened: false, deliberate: false })).toBe(false);
+    expect(sessionDropped({ everOpened: true, deliberate: true })).toBe(false);
   });
 });

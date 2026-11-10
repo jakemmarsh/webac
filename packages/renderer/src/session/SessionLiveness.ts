@@ -1,34 +1,32 @@
 /**
- * UX.chargen-resume (live check, 2026-10-29) — "did a session that was live
- * just end under the player?", asked of the whole session rather than of the
- * socket that happened to close last.
+ * UX.chargen-resume (live check, 2026-10-29) — "did a session just end under
+ * the player?", and whether this session already had its character list.
  *
  * The connection's 'disconnected' event carries `everOpened`: whether THAT
  * socket ever opened (ClientConnection.wsEverOpened / Connection1999.everOpened,
  * per socket on purpose: a never-opened socket after leaving for the launcher
- * must read as CantSocket, not as a dropped session). The connection can open
- * a socket of its own between the page's connects: the stale-session login
- * retry (CharacterError.Logon → detach, then a fresh socket 3 s later) and the
- * dormant autoReconnect. When such a socket fails, its 'disconnected' says
- * everOpened=false, and the page treated it as "nothing was live": no resume,
- * no ServerDied, and the CantSocket error before it raised the refusal dialog.
+ * must read as CantSocket, not as a dropped session). A session drops when its
+ * socket had opened and the close was not our own.
  *
  * The live check that found it: tools/probe-client-suspend.ts opened chargen
- * over the connecting screen (its char-select wait accepted the connecting
- * screen), the login was in its stale-session retry gap, the relay died, and
- * the retry's socket failed: CantSocket, then disconnected(everOpened=false).
- * That session never reached the character list, so not resuming it is right;
- * but the rule now says so explicitly: a session is live from its character
- * list until it ends or the page starts another connect, whichever socket
- * carries it, and a live session's end is a drop even if the socket that
- * reported it never opened.
+ * over the connecting screen, the login was in its stale-session retry gap
+ * (CharacterError.Logon: the connection detaches and opens a fresh socket 3 s
+ * later), the relay died, and the retry's socket failed: CantSocket, then
+ * disconnected(everOpened=false). That session never reached the character
+ * list, so not resuming it is right.
+ *
+ * A never-opened socket cannot end a session that had its list: the stale-
+ * session retry is the only socket a connection opens on its own (the network
+ * layer has no other reconnect; docs/reconnect.md), it is scheduled only
+ * before a list (ClientConnection.sessionPastLogin) and a list cancels it.
+ * Until 2026-11-10 a `live` term covered that case for the network layer's
+ * dormant auto-reconnect, now deleted.
  */
 
 /** The slice of a 'disconnected' / 'error' event the decision reads. */
 export interface SessionEndEvent {
   everOpened?: boolean;
   deliberate?: boolean;
-  netErrorId?: string;
 }
 
 export class SessionLiveness {
@@ -47,23 +45,9 @@ export class SessionLiveness {
   get isLive(): boolean { return this.live; }
 }
 
-/**
- * A session ended under the player: not our own close, and either the
- * closing socket had opened or the session behind it had reached its
- * character list (`live`).
- */
-export function sessionDropped(event: SessionEndEvent, live: boolean): boolean {
-  return event.deliberate !== true && (event.everOpened === true || live);
-}
-
-/**
- * A socket the connection opened on its own for a live session could not
- * open (CantSocket): the 'disconnected' that follows ends the session (and
- * resumes it), so the error itself raises nothing. Never during the page's
- * own resume, whose failed attempts are counted where they are.
- */
-export function liveSessionSocketFailed(event: SessionEndEvent, live: boolean, resuming: boolean): boolean {
-  return live && !resuming && event.netErrorId === 'ID_NetError_CantSocket';
+/** A session ended under the player: its socket had opened, and the close was not our own. */
+export function sessionDropped(event: SessionEndEvent): boolean {
+  return event.deliberate !== true && event.everOpened === true;
 }
 
 /**

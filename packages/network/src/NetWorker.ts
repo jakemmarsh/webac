@@ -22,7 +22,6 @@ import type { LinkSample } from './ThreadStall.js';
 
 /** What the page uses of a session connection (ClientConnection or NetWorkerClient). */
 export interface NetConnection {
-  autoReconnect: boolean;
   datIterations: { portal: number; cell: number; language: number };
   loginProfile: LoginProfile;
   readonly isConnected: boolean;
@@ -63,7 +62,7 @@ export interface NetSnapshot {
 
 export type NetCommand =
   | { t: 'init'; url: string; loginProfile?: LoginProfile }
-  | { t: 'set'; autoReconnect?: boolean; datIterations?: NetConnection['datIterations']; loginProfile?: LoginProfile }
+  | { t: 'set'; datIterations?: NetConnection['datIterations']; loginProfile?: LoginProfile }
   | { t: 'setUrl'; url: string }
   | { t: 'connect'; account: string; password: string }
   | { t: 'disconnect' }
@@ -112,7 +111,6 @@ export function hostClientConnection(port: NetPort): () => void {
     if (!conn) return;
     switch (cmd.t) {
       case 'set':
-        if (cmd.autoReconnect !== undefined) conn.autoReconnect = cmd.autoReconnect;
         if (cmd.datIterations) conn.datIterations = cmd.datIterations;
         if (cmd.loginProfile) conn.loginProfile = cmd.loginProfile;
         break;

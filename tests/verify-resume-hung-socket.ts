@@ -23,14 +23,15 @@ import { EOR_LOGIN_PROFILE } from '../packages/network/src/LoginProfile.js';
 import { HANDOVER_ADOPT_TIMEOUT_MS } from '../packages/network/src/SocketHandover.js';
 import { WS_OPEN_TIMEOUT_MS, armOpenTimeout } from '../packages/network/src/WsOpenTimeout.js';
 import {
-  SessionLifecycle, RESUME_DELAYS_MS, RESUME_UNREACHABLE_GRACE_MS,
+  SessionLifecycle,
 } from '../packages/renderer/src/session/SessionLifecycle.js';
 import {
-  ResumeRunner, RESUME_ONLINE_SETTLE_MS, windowOnlineSource, type OnlineSource,
+  ResumeRunner, windowOnlineSource, type OnlineSource,
 } from '../packages/renderer/src/session/ResumeRunner.js';
 import { PreworldReporter, type PreworldEvent } from '../packages/renderer/src/telemetry/PreworldReporter.js';
 import { sanitizeClientPreworld } from '../services/ws-tcp-bridge/src/clientPreworld.js';
 import { probeCustomBridge } from '../packages/renderer/src/launcher/worldDirectory.js';
+import { RESUME_DELAYS_MS, RESUME_ONLINE_SETTLE_MS, RESUME_UNREACHABLE_GRACE_MS } from '../packages/renderer/src/session/RetryPolicy.js';
 
 class FakeSocket {
   static readonly CONNECTING = 0;
@@ -77,7 +78,6 @@ function make(kind: 'eor' | 'ac1999'): { conn: Conn; events: ConnectionEvent[] }
   const conn: Conn = kind === 'eor'
     ? new ClientConnection('ws://bridge/?server=w')
     : new Connection1999('ws://bridge/?server=w', { loginProfile: { ...EOR_LOGIN_PROFILE, protocol: 'ac1999' } });
-  conn.autoReconnect = false;
   const events: ConnectionEvent[] = [];
   conn.on((e) => events.push(e));
   return { conn, events };

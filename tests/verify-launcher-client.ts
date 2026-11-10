@@ -20,6 +20,7 @@ import {
   exposeDebugGlobal, readDebugGlobal, debugBag, setDebugGlobalsEnabledForTest,
 } from '../packages/renderer/src/utils/debugGlobals';
 import { wrapLines, LAUNCHER_GEOMETRY, LAUNCHER_SITE_LINKS } from '../packages/renderer/src/launcher/LauncherScreen';
+import { WORLD_LIST_BACKGROUND_RETRY_MS, WORLD_LIST_RETRY_DELAYS_MS } from '../packages/renderer/src/session/RetryPolicy';
 import { loadDomWindow, installDomGlobals, restoreDomGlobals } from './_harness/dom.js';
 import { ERA_PROFILES } from '../packages/renderer/src/era/EraProfiles';
 
@@ -1016,7 +1017,7 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     const blocked = () => new TypeError('Failed to fetch');
     const details = (k: { mount: HTMLElement }) => [...k.mount.querySelectorAll('.launcher-details-body span')].map((e: Element) => e.textContent).join(' ');
 
-    function start(results: Array<'fail' | 'ok'>, extra: { visibility?: { onVisible(fn: () => void): () => void } } = {}) {
+    function start(results: Array<'fail' | 'ok'>) {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
       vi.setSystemTime(1_000_000);
       const k = makeKit();
@@ -1030,52 +1031,14 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
           return { mode: 'multi', worlds: worlds() };
         },
         onWorldListFailed: (f: { attempts: number; elapsedMs: number; error: unknown }) => { failures.push(f); },
-        ...extra,
       });
       void screen.run();
       return { k, screen, failures, calls: () => calls };
     }
 
-    /** A fake page visibility: show() is the hidden → visible change. */
-    function fakeVisibility() {
-      const subs = new Set<() => void>();
-      return {
-        onVisible: (fn: () => void) => { subs.add(fn); return () => { subs.delete(fn); }; },
-        show: () => { for (const f of [...subs]) f(); },
-        get listeners() { return subs.size; },
-      };
-    }
-
-    it('OBS.upgrade-aborted sweep: the page coming into view runs the waiting background retry at once, once', async () => {
-      const vis = fakeVisibility();
-      const t = start(['fail', 'fail', 'fail', 'fail', 'ok'], { visibility: vis });
-      vis.show(); // nothing waits during the quiet retries: nothing happens
-      await vi.advanceTimersByTimeAsync(0);
-      expect(t.calls()).toBe(1);
-      await vi.advanceTimersByTimeAsync(7_000);
-      expect(t.calls()).toBe(3);
-      expect(vis.listeners).toBe(1);
-      await vi.advanceTimersByTimeAsync(1_000);
-      vis.show(); // attempt 4 now, not at 30 s; it fails and the next waits again
-      await vi.advanceTimersByTimeAsync(0);
-      expect(t.calls()).toBe(4);
-      expect(details(t.k)).toContain("Can't reach the webAC server");
-      expect(vis.listeners).toBe(1);
-      await vi.advanceTimersByTimeAsync(29_999);
-      expect(t.calls()).toBe(4); // the old 30 s timer did not run it a second time
-      vis.show();
-      await vi.advanceTimersByTimeAsync(0);
-      expect(t.calls()).toBe(5);
-      expect(t.k.mount.querySelectorAll('.launcher-world-row').length).toBe(3);
-      expect(vis.listeners).toBe(0);
-      expect(vi.getTimerCount()).toBe(0);
-      vis.show();
-      expect(t.calls()).toBe(5);
-    });
-
     it('the defaults: 2 s and 5 s quiet retries, 30 s in the background', () => {
-      expect(mod.WORLD_LIST_RETRY_DELAYS_MS).toEqual([2_000, 5_000]);
-      expect(mod.WORLD_LIST_BACKGROUND_RETRY_MS).toBe(30_000);
+      expect(WORLD_LIST_RETRY_DELAYS_MS).toEqual([2_000, 5_000]);
+      expect(WORLD_LIST_BACKGROUND_RETRY_MS).toBe(30_000);
     });
 
     it('fails twice then loads: the box stays "Loading worlds…" throughout and no error or report ever shows', async () => {

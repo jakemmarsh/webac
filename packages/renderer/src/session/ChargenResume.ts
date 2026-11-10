@@ -6,7 +6,7 @@
  * it when necessary so users don't see weird sticky selections."
  *
  * A drop in chargen (socket closed, a hidden tab, a network blip) runs the
- * in-world reconnect's quiet resume (SessionLifecycle.RESUME_DELAYS_MS behind
+ * in-world reconnect's quiet resume (RetryPolicy.RESUME_DELAYS_MS behind
  * the connecting screen, same credentials) and reopens chargen on the same
  * step with every choice (ui/ChargenDraft.ts). If FINISH had sent a
  * CharacterCreate, the reconnect's character list is checked first

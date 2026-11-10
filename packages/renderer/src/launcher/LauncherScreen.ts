@@ -33,21 +33,10 @@ import {
   type World, type WorldDirectory, connectUrlFor, parseCustomBridge, probeCustomBridge, worldEnterBlock, worldRegistrationText,
 } from './worldDirectory.js';
 import { matchUrlWorld } from './urlLogin.js';
-import type { VisibilitySource } from '../session/ResumeRunner.js';
 import { loadFavoriteWorlds, loadRememberedLogin, saveFavoriteWorlds, saveRememberedLogin, worldKeyOf, type RememberedLogin } from './launcherStorage.js';
+import { WORLD_LIST_BACKGROUND_RETRY_MS, WORLD_LIST_RETRY_DELAYS_MS } from '../session/RetryPolicy.js';
 
 export const CHARSEL_LAYOUT = 0x21000004;
-
-/**
- * BUG.world-list-unreachable — a world list that fails to load is tried again
- * quietly after these delays (three attempts in all) while the details box
- * keeps its "Loading worlds…" state; only the last failure shows the error.
- * Production 2026-10-19: a player saw "(Failed to fetch)" from a request that
- * never reached the bridge. A browser-UX exception (CLAUDE.md).
- */
-export const WORLD_LIST_RETRY_DELAYS_MS: readonly number[] = [2_000, 5_000];
-/** While the error shows, the list is tried again in the background this often; a success brings it back. */
-export const WORLD_LIST_BACKGROUND_RETRY_MS = 30_000;
 
 /** The bridge's host name for the error text (from the configured bridge URL, never a literal). */
 function bridgeHostName(bridgeUrl: string): string | null {
@@ -228,11 +217,6 @@ export interface LauncherOptions {
   /** Background retry period while the error shows (default WORLD_LIST_BACKGROUND_RETRY_MS). */
   backgroundRetryMs?: number;
   /**
-   * OBS.upgrade-aborted sweep — while a background retry waits, the page coming back into view
-   * (hidden → visible) runs it at once: the player is looking at the error. Absent: never.
-   */
-  visibility?: VisibilitySource;
-  /**
    * Every quiet attempt failed and the error is now shown (once per load:
    * the first, and each Retry; not the background retries). main.ts sends
    * the web-origin report (telemetry/WebReport.ts).
@@ -411,13 +395,9 @@ export class LauncherScreen {
   private loadGen = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-  private unsubscribeVisible: (() => void) | null = null;
-
   private clearRetryTimer(): void {
     if (this.retryTimer !== null) clearTimeout(this.retryTimer);
     this.retryTimer = null;
-    this.unsubscribeVisible?.();
-    this.unsubscribeVisible = null;
   }
 
   /** Load the world list again now (the error's Retry link), with the quiet retries. */
@@ -464,9 +444,8 @@ export class LauncherScreen {
 
   /** While the error shows: try again every backgroundRetryMs, silently; a success replaces the error with the list. */
   private scheduleBackgroundRetry(gen: number): void {
-    // Each background attempt runs once: by its timer, or sooner when the page comes into view.
-    const run = (): void => {
-      this.clearRetryTimer();
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
       if (gen !== this.loadGen || this.done) return;
       this.loaded = this.opts.loadDirectory().then(
         (dir) => {
@@ -478,9 +457,7 @@ export class LauncherScreen {
           this.scheduleBackgroundRetry(gen);
         },
       );
-    };
-    this.retryTimer = setTimeout(run, this.opts.backgroundRetryMs ?? WORLD_LIST_BACKGROUND_RETRY_MS);
-    if (this.opts.visibility) this.unsubscribeVisible = this.opts.visibility.onVisible(run);
+    }, this.opts.backgroundRetryMs ?? WORLD_LIST_BACKGROUND_RETRY_MS);
   }
 
   /** Take a loaded directory in; returns the `?world=` link's world to select, if any. */

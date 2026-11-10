@@ -36,8 +36,9 @@ import {
   GameMessageGroup, buildCharacterEnterWorldRequest, buildCharacterEnterWorld,
 } from '../packages/network/src/index.js';
 import {
-  SessionLifecycle, IN_WORLD_RETRY_BUDGET, IN_WORLD_RETRY_DELAY_MS, JUST_CREATED_RETRY_DELAYS_MS,
+  SessionLifecycle,
 } from '../packages/renderer/src/session/SessionLifecycle.js';
+import { IN_WORLD_RETRY_BUDGET, IN_WORLD_RETRY_DELAY_MS, JUST_CREATED_RETRY_DELAYS_MS } from '../packages/renderer/src/session/RetryPolicy.js';
 
 const GUID = 0x50000def;
 const F7C8 = 0xF7C8;

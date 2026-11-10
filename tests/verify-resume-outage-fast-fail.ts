@@ -31,11 +31,12 @@ import { Connection1999 } from '../packages/network/src/era1999/Connection1999.j
 import { EOR_LOGIN_PROFILE } from '../packages/network/src/LoginProfile.js';
 import { WS_OPEN_TIMEOUT_MS } from '../packages/network/src/WsOpenTimeout.js';
 import {
-  SessionLifecycle, RESUME_DELAYS_MS, RESUME_UNREACHABLE_GRACE_MS, RESUME_UNREACHABLE_GAPS_MS,
+  SessionLifecycle,
 } from '../packages/renderer/src/session/SessionLifecycle.js';
 import { ResumeRunner, attemptFoundNoNetwork, type OnlineSource } from '../packages/renderer/src/session/ResumeRunner.js';
 import { PreworldReporter, type PreworldEvent } from '../packages/renderer/src/telemetry/PreworldReporter.js';
 import { sanitizeClientPreworld, MAX_OPEN_MS } from '../services/ws-tcp-bridge/src/clientPreworld.js';
+import { RESUME_DELAYS_MS, RESUME_UNREACHABLE_GAPS_MS, RESUME_UNREACHABLE_GRACE_MS } from '../packages/renderer/src/session/RetryPolicy.js';
 
 /** How the network treats a new socket: fails it fast, lets it hang, or opens it. */
 type NetMode = 'fast' | 'hang' | 'up';
@@ -99,7 +100,6 @@ function page(kind: Kind, opts: { hidden?: () => boolean } = {}) {
   const conn = kind === 'eor'
     ? new ClientConnection('ws://bridge/?server=w')
     : new Connection1999('ws://bridge/?server=w', { loginProfile: { ...EOR_LOGIN_PROFILE, protocol: 'ac1999' } });
-  conn.autoReconnect = false;
   const life = new SessionLifecycle();
   const online = new FakeOnline();
   const sent: PreworldEvent[] = [];
@@ -111,7 +111,7 @@ function page(kind: Kind, opts: { hidden?: () => boolean } = {}) {
   const state = { disconnectedScreen: false, connected: 0, events: [] as ConnectionEvent[] };
   const runner = new ResumeRunner({
     lifecycle: life, online, now: () => Date.now(),
-    connect: () => { conn.autoReconnect = false; conn.connect('acct', 'pw'); },
+    connect: () => conn.connect('acct', 'pw'),
   });
   const scheduleResume = (opts: { unreachable?: boolean } = {}): boolean => {
     const wasResuming = life.resumingAfterDrop;
