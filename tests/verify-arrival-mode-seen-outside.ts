@@ -227,9 +227,19 @@ describe.skipIf(!haveEolDat)('walking out of the Holtburg tavern after a vestibu
   }
 
   it('contrast: the old interior-mode world reads the doorway floor edge as a ledge', () => {
-    const X = OX + 97.507;
+    // The live stop was x 97.507. Since BUG.edge-slide-check-walkable-overhang (2026-11-09) an EdgeSlide body's centre
+    // stands up to r / 2 (0.24 m) past a ledge, as retail's does (check_walkable @ 0050aff0 at check_walkables
+    // @ 0050c3e0's half radius), so the interior-mode world now holds it within 0.24 m west of there instead.
+    // Was: the very first 0.1 m step west of 97.507 collided.
     const Z = OY + 35.954;
-    const p = precipiceStep(dungeon, X, Z, 94, -0.1, 0, 0.6, dungeonGroundAt);
-    expect(p).toBe('collided');
+    let x = OX + 97.507;
+    let held: number | null = null;
+    for (let i = 0; i < 10 && held === null; i++) {
+      const p = precipiceStep(dungeon, x, Z, 94, -0.05, 0, 0.6, dungeonGroundAt);
+      if (p === 'collided') held = x;
+      else x += p ? p[0] : -0.05;
+    }
+    expect(held).not.toBeNull();
+    expect(OX + 97.507 - held!).toBeLessThanOrEqual(0.25);
   });
 });

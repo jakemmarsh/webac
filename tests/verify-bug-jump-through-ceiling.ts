@@ -191,13 +191,16 @@ describe.skipIf(!DATS)('BUG.jump-through-ceiling — Mountain Keep (0x01D2), the
     expect(withCeiling.x - BX).toBeGreaterThan(85.4);
     expect(withCeiling.z).toBeCloseTo(0, 2);
     // With no ceiling in the kit: through the ceiling and over the wall. The planner flies the live frame's own ground
-    // (BUG.planner-live-jump-gap: interiorGroundY, not "any floor below"), so it comes down where the live client did
-    // before the fix, hanging at z 0 outside every cell (the planner used to put it on the −6 floor 14 m west).
+    // (BUG.planner-live-jump-gap: interiorGroundY, not "any floor below"), so it comes down where the live client does.
+    // Re-pinned 2026-11-09 (BUG.edge-slide-check-walkable-overhang): that is now the −6 floor 14 m west, in a cell. Was:
+    // hanging at z 0 outside every cell; the body coasted on a level edge it no longer sinks against (a centre within
+    // r / 2 past a level polygon rests on its plane, adjust_sphere_to_plane @ 00538210) and walks off past r / 2.
     const { ceiling: _drop, ...noCeiling } = nav.kit;
     const before = simulateFlight(noCeiling, from, l.vx, l.vy, l.up)!;
     const live = liveFrames(TAKE_OFF, { jump: westJump(), ceilings: false, coast: true });
     expect(before.x - BX).toBeLessThan(84);
-    expect(before.z).toBeCloseTo(0, 2);
+    expect(before.z).toBeCloseTo(-6, 2);
+    expect(live.cell).not.toBe(0);
     expect(Math.hypot(before.x - BX - live.x, before.y - BY - live.y)).toBeLessThan(0.05);
   });
 });

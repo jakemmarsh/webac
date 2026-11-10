@@ -223,6 +223,10 @@ export class AutomationReporter {
 
   // ── The run going now ──
   private run: { kind: RoutineKind; driver: RoutineDriver; startedAt: number; countedFrom: number; errors: number; errorSent: boolean } | null = null;
+  /** The routine running now (its driver and kind), or null (the move_limiter event says it). */
+  get runningRoutine(): { driver: RoutineDriver; kind: RoutineKind } | null {
+    return this.run ? { driver: this.run.driver, kind: this.run.kind } : null;
+  }
 
   // ── This world session ──
   private enterAt: number | null = null;

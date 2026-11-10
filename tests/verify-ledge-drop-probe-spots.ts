@@ -16,7 +16,7 @@ import { getJumpVelocity } from '@ac/shared';
 import { DatDatabase } from '../packages/dat-parser/src/DatDatabase.ts';
 import { FileDatBytes } from '../packages/dat-parser/src/node/FileDatBytes.ts';
 import {
-  DEATH_LINE, LEDGE_SPOTS, SETTLE_MS, TELEPORT_JUMP_M, headingQuat, ledgeEra, ledgeVerdict, sampleTable, spotsFor, telelocCommand, turnDelta,
+  DEATH_LINE, LEDGE_OVERHANG_M, LEDGE_SPOTS, SETTLE_MS, TELEPORT_JUMP_M, headingQuat, ledgeEra, ledgeVerdict, sampleTable, spotsFor, telelocCommand, turnDelta,
   type LedgeSample, type LedgeSpot,
 } from '../tools/lib/ledge-drop.ts';
 import { headingOf } from '../tools/lib/ac-wire.ts';
@@ -59,6 +59,14 @@ describe('ledgeVerdict over sample runs (tools/lib/ledge-drop.ts)', () => {
     expect(landed).toMatchObject({ outcome: 'FAIL', reason: 'hung' });
     const floating = arc(pit, { ...PIT, land: 0, cell: 0, hangAt: 0, after: 0 });
     expect(ledgeVerdict(pit, floating)).toMatchObject({ outcome: 'FAIL', reason: 'hung' });
+  });
+
+  it('a body back on the ledge up to r / 2 past the edge line still stands on it: INCONCLUSIVE never-crossed, not hung', () => {
+    // BUG.edge-slide-check-walkable-overhang: retail's EdgeSlide centre stands up to 0.24 m past a ledge.
+    const onLedge = arc(pit, { land: 0, cell: pit.cell, endY: pit.edge.at - 0.22 });
+    expect(ledgeVerdict(pit, onLedge)).toMatchObject({ outcome: 'INCONCLUSIVE', reason: 'never-crossed' });
+    const over = arc(pit, { land: 0, cell: pit.cell, endY: pit.edge.at - 0.5 });
+    expect(ledgeVerdict(pit, over)).toMatchObject({ outcome: 'FAIL', reason: 'hung' });
   });
 
   it('a landing in no cell, on the wrong floor, in another cell, or too slowly: FAIL with that reason', () => {
@@ -233,7 +241,10 @@ for (const [era, dats] of Object.entries(ERA_DATS)) {
           expect(held.fell).toBe(false);
           expect(held.z).toBeCloseTo(s.start.z, 2);
           const gap = (s.edge.at - held[s.edge.axis]) * s.edge.dir; // how far short of the edge line the run stopped
-          expect(gap).toBeGreaterThan(-0.1);
+          // Re-pinned 2026-11-09 (BUG.edge-slide-check-walkable-overhang). Was: > -0.1 (at most 0.1 past the edge).
+          // Retail's EdgeSlide centre stands up to r / 2 (0.24) past a ledge (check_walkable @ 0050aff0 at
+          // check_walkables @ 0050c3e0's half radius); the lead's retail walkway runs stopped 0.238-0.240 past it.
+          expect(gap).toBeGreaterThanOrEqual(-LEDGE_OVERHANG_M - 1e-6);
           expect(gap).toBeLessThan(1.2);
           for (const speed of SPEEDS) for (const skill of SKILLS) for (const power of [0.1, 0.6]) {
             const v = velocity(s.heading, speed);

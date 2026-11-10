@@ -93,7 +93,7 @@ export const LEDGE_SPOTS: LedgeSpot[] = [
     cell: c(MK, 0x2a6), start: { x: 90, y: -63.5, z: 0 }, heading: 180,
     edge: { axis: 'y', at: -65.0, dir: -1 },
     jump: 'run-jump', landZ: [-12, -6], landCells: [c(MK, 0x128), c(MK, 0x1ff)], maxFallMs: 3500,
-    notes: 'A run south is held at y -65.0 (EdgeSlide); a jump off lands on the -12 floor (0x01D20128, about y -74.5), '
+    notes: 'A run south is held at about y -65.24, its centre r / 2 past the edge (EdgeSlide); a jump off lands on the -12 floor (0x01D20128, about y -74.5), '
       + 'or, slow and low, on the -6 bridge deck at about y -70 (in the air cell 0x01D201FF). '
       + 'Same cells in the end-of-retail, ClassicACE CustomDM 1.60 and Classic Dereth 1.1 DATs.',
   },
@@ -202,7 +202,15 @@ const Z_TOL = 0.35;
 /** A landing counts once the body stays on the ground, its height steady, this long. */
 export const SETTLE_MS = 300;
 
-const beyond = (spot: Pick<LedgeSpot, 'edge'>, s: Pick<LedgeSample, 'x' | 'y'>): boolean => (s[spot.edge.axis] - spot.edge.at) * spot.edge.dir > 0;
+/**
+ * How far past the edge line a body still stands on the ledge: an EdgeSlide body's centre stands up to r / 2 past it
+ * (CTransition::check_walkable @ 0050aff0 at SPHEREPATH::check_walkables @ 0050c3e0's half radius; a player's feet
+ * sphere is 0.48), as retail's did on the Mountain Keep walkway (0.238-0.240 m, BUG.edge-slide-check-walkable-overhang).
+ */
+export const LEDGE_OVERHANG_M = 0.24;
+/** Over the drop: past the edge line by more than a body standing on the ledge overhangs it. */
+const beyond = (spot: Pick<LedgeSpot, 'edge'>, s: Pick<LedgeSample, 'x' | 'y'>): boolean =>
+  (s[spot.edge.axis] - spot.edge.at) * spot.edge.dir > LEDGE_OVERHANG_M + 0.01;
 const fmt = (s: LedgeSample): string => `(${s.x.toFixed(2)}, ${s.y.toFixed(2)}, z ${s.z.toFixed(2)}) cell 0x${(s.cell >>> 0).toString(16).toUpperCase().padStart(8, '0')}${s.onGround ? '' : ' airborne'}`;
 
 /**

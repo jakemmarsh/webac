@@ -95,14 +95,18 @@ describe.skipIf(!haveEor)('Mountain Keep 0x01D2 (end of retail): the doorway 0x0
 
   it('a run on to the walkway beyond is held on it by the edge slide across the y −45 seam (none falls into the pit)', () => {
     // Before the fix the y −45 edge's hit took a step up, which skips the precipice rule: 46 of 81 headings at
-    // 6.5 m/s ran off the walkway's west edge at the seam and fell 6 m. A few headings still stop at that seam
-    // (BUG.ledge-seam-edge-slide-stall: the edge slide at a triangulated floor's diagonal), but on the walkway.
+    // 6.5 m/s ran off the walkway's west edge at the seam and fell 6 m. Headings stop at that seam as retail's do
+    // (BUG.ledge-seam-edge-slide-stall), on the walkway.
+    // Re-pinned 2026-11-09 (BUG.edge-slide-check-walkable-overhang). Was: x < 68.0 counted as off the walkway. Retail's
+    // centre stands up to r / 2 (0.24) past the west ledge (x 68.033): check_walkable @ 0050aff0 at check_walkables
+    // @ 0050c3e0's half radius; the lead's retail runs from this start stopped at x 67.7934-67.7951. Off the walkway is
+    // now a fall, or a centre more than r / 2 past the ledge.
     const base = Math.atan2(-50 - START.y, 66.52 - START.x);
     const fell: string[] = [];
     for (let k = -40; k <= 40; k += 4) {
       for (const speed of [4.5, 6.5]) {
         const r = walkToward(nav, START, base + k * 0.0005, speed, 6);
-        if (r.z < -0.01 || r.x < 68.0) fell.push(`${speed} ${k}: (${r.x.toFixed(2)}, ${r.y.toFixed(2)}, ${r.z.toFixed(2)})`);
+        if (r.z < -0.01 || r.x < 68.033 - 0.24 - 0.002) fell.push(`${speed} ${k}: (${r.x.toFixed(2)}, ${r.y.toFixed(2)}, ${r.z.toFixed(2)})`);
       }
     }
     expect(fell).toEqual([]);

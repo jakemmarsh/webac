@@ -454,6 +454,7 @@ import { AutomationReporter } from './telemetry/AutomationReporter.js';
 import { RefusalReporter, scrubNames } from './telemetry/RefusalReporter.js';
 import { knownObjectNames, pendingRequestDetail, castRefusalDetail, selectionRefusalDetail, CastPressTracker, type RefusalDetail, type PlacedObject } from './telemetry/RefusalTemplates.js';
 import { ObjsendReporter, countReleasedInView, summarizeObjects, type ObjsendSnapshot } from './telemetry/ObjsendReporter.js';
+import { MoveLimiterReporter } from './telemetry/MoveLimiterReporter.js';
 import { PortalUseReporter, bodyTouchesPortal, isPortalObject, overlapsPortal, ownMovementTouch, serverFramePoint, type PortalSnapshot, type PortalUseHeld } from './telemetry/PortalUseReporter.js';
 import { accountTag, browserId, realLocalStorage } from './telemetry/LoginTags.js';
 import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, serverIdFromUrl, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
@@ -885,6 +886,13 @@ let automationReporter: AutomationReporter | null = null;
 let portalUseReporter: PortalUseReporter | null = null;
 /** TELEMETRY.objsend-diagnostics — the object table when the player types ACE's @objsend, and 5 s later (telemetry/ObjsendReporter.ts). */
 let objsendReporter: ObjsendReporter | null = null;
+/** BUG.movetostate-burst-abuse-close: the session's first outgoing-limiter engagement (telemetry/MoveLimiterReporter.ts). */
+let moveLimiterReporter: MoveLimiterReporter | null = null;
+/** The frame rate last measured (frameStep's once-a-second count), for the move_limiter event. */
+let measuredFps = 0;
+/** What the movement-event sources and the connection's pacer count are read from (set once the world's pieces exist). */
+let moveLimiterSources: () => readonly import('./scene/CameraController.js').MovementEventSource[] = () => [];
+let moveLimiterTxPaced: () => number | null = () => null;
 /** TELEMETRY.refusal-events — every refusal the player saw, client- or server-made (telemetry/RefusalReporter.ts). */
 let refusalReporter: RefusalReporter | null = null;
 /** Run `f` with the refusal reporter's client spew tap off (server text shown through the spew, chat-command feedback). */
@@ -1420,6 +1428,16 @@ async function main() {
     heldGuids: () => serverObjectManager?.getAllObjects().keys() ?? [],
   });
   objsendReporter.install(window, document);
+  moveLimiterReporter = new MoveLimiterReporter({
+    endpoint: PreworldReporter.endpointFor(runtimeConfig.bridgeUrl),
+    build: (import.meta.env.VITE_ACJS_BUILD_ID as string | undefined) ?? DEV_BUILD_ID,
+    trace: preworldReporter.trace,
+    era: () => activeEra.id,
+    server: () => preworldServer(),
+    context: () => ({ sources: moveLimiterSources(), fps: measuredFps, routine: automationReporter?.runningRoutine ?? null, txPaced: moveLimiterTxPaced() }),
+  });
+  moveLimiterReporter.install(window, document);
+  { const ml = moveLimiterReporter; worldReporter.onSessionStart(() => ml.sessionStarted()); }
   refusalReporter = new RefusalReporter({
     endpoint: PreworldReporter.endpointFor(runtimeConfig.bridgeUrl),
     build: (import.meta.env.VITE_ACJS_BUILD_ID as string | undefined) ?? DEV_BUILD_ID,
@@ -9280,7 +9298,13 @@ async function main() {
     movementSync = new MovementSync(
       aceConnection,
       () => ++aceActionSequence,
+      // BUG.movetostate-burst-abuse-close: whether any other action went out since the last MoveToState.
+      () => aceActionSequence,
     );
+    // Its limiters' first engagement this session is reported (move_limiter).
+    movementSync.onLimiter = (kind, snap) => { moveLimiterReporter?.engage(kind, snap); };
+    moveLimiterSources = () => cameraController.recentMovementEventSources;
+    moveLimiterTxPaced = () => aceConnection.getDiagnostics().txPaced ?? null;
     // RawMotionState::current_style: the style the player's sequence is in.
     movementSync.stanceProvider = () => playerAnimated?.motionManager.currentStyleId ?? 0;
     // BUG.portal-use-held-keys — a MoveToState while a Use is unanswered cancels ACE's walk (PORTAL_CANCELLED).
@@ -20419,6 +20443,8 @@ async function main() {
   let frameCount = 0;
   let fpsTimer = 0;
   let currentFps = 0;
+  /** The pacer's held-back count already seen (move_limiter 'pacer'). */
+  let pacedSeen = 0;
   let lastTerrainX = 0;
   let lastTerrainZ = 0;
   // RECON.ambient-sound-weighting / SOUND.ambient-seen-outside — the cell
@@ -20610,8 +20636,15 @@ async function main() {
     fpsTimer += dt;
     if (fpsTimer >= 1.0) {
       currentFps = frameCount;
+      measuredFps = frameCount;
       frameCount = 0;
       fpsTimer = 0;
+      // BUG.movetostate-burst-abuse-close: the connection's pacer held a send back since the last look (once a second).
+      const paced = moveLimiterTxPaced();
+      if (paced !== null && paced > pacedSeen) {
+        pacedSeen = paced;
+        moveLimiterReporter?.engage('pacer', movementSync?.limiterSnapshot(now) ?? { recent: 0, fields: [], origins: [] });
+      }
     }
 
     // Refresh outdoor building collision when landblock meshes change

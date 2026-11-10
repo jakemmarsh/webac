@@ -15,7 +15,7 @@ export const NET_DIAG_MS_FIELDS = [
 ] as const;
 /** Counters and sequence numbers: 0..2^32-1. */
 export const NET_DIAG_COUNT_FIELDS = [
-  'rxAck', 'rxHigh', 'rxHeld', 'rxMissing', 'fragHeld', 'naks', 'txSeq', 'txUnacked', 'txAckedBySrv',
+  'rxAck', 'rxHigh', 'rxHeld', 'rxMissing', 'fragHeld', 'naks', 'txSeq', 'txUnacked', 'txPaced', 'txAckedBySrv',
   'srvNaks', 'resent', 'unsatisfied', 'srvRejects', 'wsBuffered', 'tickGapMaxMs', 'rxPkts', 'txPkts', 'rxBytes',
 ] as const;
 /** Header flags / opcodes as "0x" + up to 8 hex digits. */

@@ -462,6 +462,70 @@ export function sanitizeClientObjsend(body: unknown): ClientObjsendEvent | null 
   };
 }
 
+/**
+ * BUG.movetostate-burst-abuse-close — the first time in a world session that an outgoing limiter engaged (renderer
+ * telemetry/MoveLimiterReporter.ts): MovementSync's MoveToState budget or identical-repeat cap, or the connection's
+ * SendPacer. Closed vocabularies and counts only.
+ */
+export const MOVE_LIMITER_OUTCOMES = ['move_limiter'] as const;
+export const MOVE_LIMITERS = ['budget', 'repeat', 'pacer'] as const;
+/** renderer MovementSync MOVE_STATE_FIELDS. */
+export const MOVE_STATE_FIELDS = [
+  'forward', 'backward', 'turnLeft', 'turnRight', 'strafeLeft', 'strafeRight', 'running', 'forwardHoldRun', 'runToggle',
+  'turnSpeed', 'serverControlled', 'movementEvent', 'standingLongJump', 'substate', 'jumpCharging',
+] as const;
+/** renderer MovementSync MOVE_SEND_ORIGINS. */
+export const MOVE_SEND_ORIGINS = ['event', 'update_state', 'update_jump', 'update_turn', 'held', 'position'] as const;
+/** renderer CameraController MOVEMENT_EVENT_SOURCES. */
+export const MOVEMENT_EVENT_SOURCES = ['key_down', 'key_up', 'autorun', 'stop_moving', 'mouse_left', 'mouse_turn'] as const;
+const MOVE_LIMITER_DRIVERS = ['player', 'agent'] as const;
+const MOVE_LIMITER_KINDS = ['macro', 'meta', 'rules'] as const;
+/** List lengths kept (renderer: 15 fields, 6 recent sends, 8 recent events). */
+const MOVE_LIST_MAX = 16;
+
+export interface ClientMoveLimiterEvent extends WorldIds {
+  outcome: typeof MOVE_LIMITER_OUTCOMES[number];
+  limiter: typeof MOVE_LIMITERS[number] | null;
+  recent: number | null;
+  fields: string[] | null;
+  origins: string[] | null;
+  sources: string[] | null;
+  fps: number | null;
+  driver: typeof MOVE_LIMITER_DRIVERS[number] | null;
+  kind: typeof MOVE_LIMITER_KINDS[number] | null;
+  txPaced: number | null;
+}
+
+export function isMoveLimiterOutcome(v: unknown): boolean {
+  return pick(v, MOVE_LIMITER_OUTCOMES) !== null;
+}
+
+/** Each entry of a list that is in the vocabulary (others dropped); null when not an array. */
+function vocabList(v: unknown, allowed: readonly string[]): string[] | null {
+  if (!Array.isArray(v)) return null;
+  return v.slice(0, MOVE_LIST_MAX).filter((x): x is string => typeof x === 'string' && allowed.includes(x));
+}
+
+/** Validate a posted move_limiter event field by field; null when it is not one. */
+export function sanitizeClientMoveLimiter(body: unknown): ClientMoveLimiterEvent | null {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const b = body as Record<string, unknown>;
+  const outcome = pick(b.outcome, MOVE_LIMITER_OUTCOMES);
+  if (!outcome) return null;
+  return {
+    outcome, ...worldIds(b),
+    limiter: pick(b.limiter, MOVE_LIMITERS),
+    recent: uint(b.recent, 100_000),
+    fields: vocabList(b.fields, MOVE_STATE_FIELDS),
+    origins: vocabList(b.origins, MOVE_SEND_ORIGINS),
+    sources: vocabList(b.sources, MOVEMENT_EVENT_SOURCES),
+    fps: uint(b.fps, 10_000),
+    driver: pick(b.driver, MOVE_LIMITER_DRIVERS),
+    kind: pick(b.kind, MOVE_LIMITER_KINDS),
+    txPaced: uint(b.txPaced, U32),
+  };
+}
+
 export type ClientWorldEvent = ClientFirstMinuteEvent | ClientWorldLeftEvent;
 export type ClientPortalEvent = ClientPortalUseFailedEvent | ClientPortalUsedEvent;
 

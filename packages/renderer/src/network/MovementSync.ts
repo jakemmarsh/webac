@@ -249,6 +249,24 @@ export function surfaceCellFrameSane(localX: number, localY: number): boolean {
   return localX >= lo && localX < hi && localY >= lo && localY < hi;
 }
 
+/** BUG.movetostate-burst-abuse-close telemetry: the MovementState fields compared between consecutive sends. */
+export const MOVE_STATE_FIELDS = [
+  'forward', 'backward', 'turnLeft', 'turnRight', 'strafeLeft', 'strafeRight', 'running', 'forwardHoldRun', 'runToggle',
+  'turnSpeed', 'serverControlled', 'movementEvent', 'standingLongJump', 'substate', 'jumpCharging',
+] as const;
+export type MoveStateField = typeof MOVE_STATE_FIELDS[number];
+/** Which MovementSync path sent a MoveToState. */
+export const MOVE_SEND_ORIGINS = ['event', 'update_state', 'update_jump', 'update_turn', 'held', 'position'] as const;
+export type MoveSendOrigin = typeof MOVE_SEND_ORIGINS[number];
+export interface MoveLimiterSnapshot {
+  /** MoveToStates sent in the last MOVE_TO_STATE_BUDGET_MS. */
+  recent: number;
+  /** State fields that differed between consecutive recent sends. */
+  fields: MoveStateField[];
+  /** The recent sends' callers, oldest first. */
+  origins: MoveSendOrigin[];
+}
+
 export class MovementSync {
   /**
    * BUG.stale-surface-cell-sent — outgoing positions whose surface interior cell could not hold the body
@@ -358,12 +376,107 @@ export class MovementSync {
     return p ? { cellId: p.cellId >>> 0, x: p.x, y: p.y, z: p.z } : null;
   }
 
+  /**
+   * @param peekActionSequence the shared game-action counter WITHOUT taking a number (main.ts: every
+   * GameAction the page sends draws from it), so a MoveToState knows whether anything went out since
+   * the last one (the coalescing rule in sendMoveToState). Absent: only this class's own sends count.
+   */
   constructor(
     connection: Pick<NetConnection, 'sendMessage'>,
     actionSequence: () => number,
+    peekActionSequence?: () => number,
   ) {
     this.connection = connection;
     this.actionSequence = actionSequence;
+    this.peekActionSequence = peekActionSequence ?? null;
+  }
+
+  private readonly peekActionSequence: (() => number) | null;
+
+  /**
+   * BUG.movetostate-burst-abuse-close — the cap on identical MoveToStates in a row. Retail's
+   * SendMovementEvent @ 006b4680 packs and sends on every call, and it is called once per input
+   * event (a movement key's press or release, the autorun toggle, Stop Moving, a cast's or attack's
+   * StopCompletely), so retail does send a MoveToState identical to the one before now and then: W
+   * held, S pressed on top, W let go leaves the state S made (verify-movement-command-interpreter),
+   * and a Stop Moving with nothing moving repeats a stop. What input can't do is send the same
+   * state dozens of times in a few milliseconds. A MoveToState byte-identical to the last one, with
+   * no other game action between them (a Use, a Jump, an attack, an AutonomousPosition) and within
+   * MOVE_TO_STATE_REPEAT_MS of the run's first, goes out up to MOVE_TO_STATE_REPEATS more times; past
+   * that the copies carry nothing the server didn't just get (ACE's HandleActionMoveToState applies
+   * the same raw state and position again, and StopExistingMoveToChains has no chain to stop that no
+   * action started) and are dropped. Every change of state, position, stance or stamp sends.
+   * A run of client stops sent 600+ identical MoveToStates in one go (playwebac.com 2026-11-10
+   * 00:40:33Z) and the bridge closed the session for abuse.
+   */
+  static readonly MOVE_TO_STATE_REPEAT_MS = 250;
+  static readonly MOVE_TO_STATE_REPEATS = 3;
+  /**
+   * BUG.movetostate-burst-abuse-close — the most MoveToStates that go out in MOVE_TO_STATE_BUDGET_MS. A movement
+   * event is an input event, and no player's hands make 40 a second; the 2026-11-10 flood was ~420 a second for ~1.9 s
+   * (txSeq 2815 − txAckedBySrv 2017 in srvAckAgoMs 1879), about one per frame at that page's ~400-500 fps, which the
+   * identical-repeat cap alone would not stop if the state alternated. Past the budget the newest state is held and goes
+   * out (with the position then) as soon as the window frees, on the next frame's update: the server always ends with
+   * the latest state, never a flood. Normal play never reaches it.
+   */
+  static readonly MOVE_TO_STATE_BUDGET = 20;
+  static readonly MOVE_TO_STATE_BUDGET_MS = 500;
+  private recentMoveToStates: number[] = [];
+  /** The newest state past the budget, sent once the window frees (update). */
+  private heldMoveToState: MovementState | null = null;
+  /** MoveToStates held back by the budget (this session). */
+  moveToStatesHeld = 0;
+
+  private overBudget(now: number): boolean {
+    const r = this.recentMoveToStates;
+    while (r.length && (now - r[0] >= MovementSync.MOVE_TO_STATE_BUDGET_MS || now < r[0])) r.shift();
+    return r.length >= MovementSync.MOVE_TO_STATE_BUDGET;
+  }
+
+  /** Which caller the next sendMoveToState is for (telemetry: MOVE_SEND_ORIGINS). */
+  private sendOrigin: MoveSendOrigin = 'event';
+  /** The last few MoveToStates sent: their raw state and caller (telemetry: which fields kept changing). */
+  private readonly recentSends: Array<{ state: MovementState; origin: MoveSendOrigin }> = [];
+  static readonly RECENT_SENDS_KEPT = 6;
+  /**
+   * A MoveToState limiter (the budget or the repeat cap) engaged: called once per MovementSync (one per world session),
+   * with what the sends looked like (main.ts: the move_limiter telemetry event). Null: nobody listens.
+   */
+  onLimiter: ((kind: 'budget' | 'repeat', snap: MoveLimiterSnapshot) => void) | null = null;
+  private limiterSaid = false;
+
+  /** What the recent MoveToStates looked like: how many in the budget window, which state fields differed between consecutive ones, their callers. */
+  limiterSnapshot(now: number): MoveLimiterSnapshot {
+    this.overBudget(now); // trims the window
+    const diff = new Set<MoveStateField>();
+    const s = this.recentSends;
+    for (let i = 1; i < s.length; i++) {
+      for (const f of MOVE_STATE_FIELDS) if (s[i].state[f] !== s[i - 1].state[f]) diff.add(f);
+    }
+    return { recent: this.recentMoveToStates.length, fields: MOVE_STATE_FIELDS.filter((f) => diff.has(f)), origins: s.map((x) => x.origin) };
+  }
+
+  private limiterEngaged(kind: 'budget' | 'repeat', now: number): void {
+    if (this.limiterSaid || !this.onLimiter) return;
+    this.limiterSaid = true;
+    try { this.onLimiter(kind, this.limiterSnapshot(now)); } catch { /* telemetry only */ }
+  }
+
+  /** The last MoveToState's payload, when its run of identical copies began, how many copies followed, and the action sequence it took. */
+  private lastMoveToState: { payload: Uint8Array; at: number; repeats: number; seq: number } | null = null;
+  /** Identical MoveToStates past the cap, not sent (this session). */
+  moveToStateRepeatsDropped = 0;
+
+  /** The same MoveToState again, with nothing else sent between, inside the window: the run it continues; else null. */
+  private repeatRunOf(payload: Uint8Array, now: number): { payload: Uint8Array; at: number; repeats: number; seq: number } | null {
+    const last = this.lastMoveToState;
+    if (!last || now - last.at > MovementSync.MOVE_TO_STATE_REPEAT_MS || now < last.at) return null;
+    // Something else went out since (a Use, a Jump, an attack, an AutonomousPosition): not a repeat.
+    if (this.peekActionSequence && this.peekActionSequence() !== last.seq) return null;
+    const a = last.payload;
+    if (a.length !== payload.length) return null;
+    for (let i = 0; i < a.length; i++) if (a[i] !== payload[i]) return null;
+    return last;
   }
 
   /**
@@ -372,6 +485,13 @@ export class MovementSync {
    */
   update(state: MovementState, pos: PlayerPosition, now: number): void {
     if (this.lastSentTime === null) this.lastSentTime = now;
+    // A state the budget held back goes out as soon as the window frees (MOVE_TO_STATE_BUDGET).
+    if (this.heldMoveToState && !this.overBudget(now)) {
+      const held = this.heldMoveToState;
+      this.heldMoveToState = null;
+      this.sendOrigin = 'held';
+      this.sendMoveToState(held, pos, now);
+    }
     const commenceJump = state.jumpCharging === true && !this.prevJumpCharging;
     this.prevJumpCharging = state.jumpCharging === true;
     // Back on the ground: the jump's airborne stretch is over.
@@ -384,6 +504,7 @@ export class MovementSync {
     if ((state.serverControlled || baseline) && !commenceJump) {
       this.prevState = { ...state };
     } else if (this.hasStateChanged(state) || commenceJump) {
+      this.sendOrigin = commenceJump ? 'update_jump' : 'update_state';
       this.sendMoveToState(state, pos, now);
       this.prevState = { ...state };
       this.lastTurnSpeedSent = now;
@@ -392,6 +513,7 @@ export class MovementSync {
       // Use Mouse Turning: the turn speed follows the mouse every frame
       // locally, but CameraSet::Rotate / MouseLookHandler resend the movement
       // event (cmdinterp +0x4c) at most every 0.5 s (m_LastServerMessage).
+      this.sendOrigin = 'update_turn';
       this.sendMoveToState(state, pos, now);
       this.prevState = { ...state };
       this.lastTurnSpeedSent = now;
@@ -455,6 +577,7 @@ export class MovementSync {
   }
 
   sendPositionNow(state: MovementState, pos: PlayerPosition, now: number = performance.now()): void {
+    this.sendOrigin = 'position';
     this.sendMoveToState(state, pos, now);
     this.prevState = { ...state };
     this.sendAutonomousPosition(pos, now);
@@ -469,6 +592,7 @@ export class MovementSync {
    * the arrival — including any collision push-out resolved meanwhile.
    */
   sendMovementEventNow(state: MovementState, pos: PlayerPosition, now: number = performance.now()): void {
+    this.sendOrigin = 'event';
     this.sendMoveToState(state, pos, now);
     this.prevState = { ...state };
   }
@@ -527,8 +651,6 @@ export class MovementSync {
   onPositionSent: ((frame: { cellId: number; x: number; y: number; z: number }) => void) | null = null;
 
   private sendMoveToState(state: MovementState, pos: PlayerPosition, now: number): void {
-    this.lastSentTime = now; // SendMovementEvent stamps last_sent_position_time
-    this.moveToStatesSent++;
     const motion: RawMotionStateFields = {
       running: state.running,
       currentStance: this.currentStance,
@@ -541,7 +663,20 @@ export class MovementSync {
     };
     const fields = this.buildPosition(pos.moveToStateYaw === undefined ? pos : { ...pos, playerYaw: pos.moveToStateYaw });
     const payload = buildMoveToStatePayload(motion, { ...fields, standingLongJump: state.standingLongJump === true });
-    const msg = serializeGameAction(this.actionSequence(), GameActionType.MoveToState, payload);
+    const run = this.repeatRunOf(payload, now);
+    const origin = this.sendOrigin;
+    this.sendOrigin = 'event';
+    if (run && run.repeats >= MovementSync.MOVE_TO_STATE_REPEATS) { this.moveToStateRepeatsDropped++; this.limiterEngaged('repeat', now); return; }
+    if (this.overBudget(now)) { this.heldMoveToState = { ...state }; this.moveToStatesHeld++; this.limiterEngaged('budget', now); return; }
+    this.heldMoveToState = null;
+    this.recentMoveToStates.push(now);
+    this.recentSends.push({ state: { ...state }, origin });
+    if (this.recentSends.length > MovementSync.RECENT_SENDS_KEPT) this.recentSends.shift();
+    this.lastSentTime = now; // SendMovementEvent stamps last_sent_position_time
+    this.moveToStatesSent++;
+    const seq = this.actionSequence();
+    this.lastMoveToState = run ? { ...run, repeats: run.repeats + 1, seq } : { payload, at: now, repeats: 0, seq };
+    const msg = serializeGameAction(seq, GameActionType.MoveToState, payload);
     this.connection.sendMessage(msg, GameMessageGroup.SmartboxQueue);
     this.onMoveToStateSent?.();
     this.positionWentOut(fields);
@@ -617,6 +752,7 @@ export class MovementSync {
     };
     const fields = this.buildPosition(pos);
     const payload = buildMoveToStatePayload(motionState, fields);
+    this.lastMoveToState = null; // its own command (a new motion sequence each): never a repeat, and it ends one
     const msg = serializeGameAction(this.actionSequence(), GameActionType.MoveToState, payload);
     this.connection.sendMessage(msg, GameMessageGroup.SmartboxQueue);
     this.onMoveToStateSent?.();
@@ -635,6 +771,7 @@ export class MovementSync {
   private sendAutonomousPosition(pos: PlayerPosition, now: number): void {
     const fields = this.buildPosition(pos);
     const payload = buildAutonomousPositionPayload(fields);
+    this.lastMoveToState = null; // another action between: the next MoveToState is never a repeat
     const msg = serializeGameAction(this.actionSequence(), GameActionType.AutonomousPosition, payload);
     this.connection.sendMessage(msg, GameMessageGroup.SmartboxQueue);
     // SendPositionEvent: last_sent_position_time, last_sent_position, last_sent_contact_plane.

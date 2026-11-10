@@ -57,6 +57,14 @@ export interface MovementCollider {
     x: number, z: number, floorY: number, destX: number, destZ: number,
   ): { edge: Normal | null; floorNormal: Normal } | null;
   /**
+   * BUG.ledge-seam-edge-slide-stall — retail's step down at the destination with check_walkable's r / 2 test, then
+   * edge_slide's walkable and crossed edge (DungeonCollision.edgeSlideStep). `{ ok: true }` = the step stands; null =
+   * the body is on no BSP floor. Preferred over precipiceEdge where a collider has it.
+   */
+  edgeSlideStep?(
+    x: number, z: number, standY: number, destX: number, destZ: number, stepDownHeight: number,
+  ): { ok: true } | { ok: false; edge: Normal | null; floorNormal: Normal } | null;
+  /**
    * RECON.transition-stepup-stepdown-port.e — the step down at (destX,
    * destZ) for a body at (x, z) whose ground was `fromY` lands on a walkable it does
    * not fit on (StepDown's Placement insert fails), so the step has no
@@ -584,20 +592,36 @@ function dungeonAdjustedStep(
  * GAP.7 walk-off cover those), 'collided', or the slid (dx, dz).
  */
 export function precipiceStep(
-  collider: Pick<MovementCollider, 'precipiceEdge' | 'collisionNormal'>,
+  collider: Pick<MovementCollider, 'precipiceEdge' | 'edgeSlideStep' | 'collisionNormal'>,
   x: number, z: number, floorY: number, dx: number, dz: number,
   stepDownHeight: number,
   groundAt: ((x: number, z: number, fromY: number) => number | null) | undefined,
 ): [number, number] | 'collided' | null {
-  if (!groundAt || !collider.precipiceEdge) return null;
+  if (!groundAt || (!collider.precipiceEdge && !collider.edgeSlideStep)) return null;
   const destX = x + dx;
   const destZ = z + dz;
   // The floor under this transition step's start: floorY is the frame's,
-  // and a sloped floor has moved on by the later substeps.
-  const standY = groundAt(x, z, floorY) ?? floorY;
+  // and a sloped floor has moved on by the later substeps. A centre standing
+  // past a ledge (edgeSlideStep lets it, by r / 2) has the drop under it: the
+  // body still stands at floorY. A floor less than half StepDownHeight below
+  // is no such drop: check_walkable's second look (half StepDownHeight lower)
+  // would have stepped the body down onto it.
+  const under = groundAt(x, z, floorY);
+  const standY = under !== null && under >= floorY - stepDownHeight / 2 ? under : floorY;
+  // A walkable within StepDownHeight under the destination: the step stands (or walks off onto it; see
+  // DungeonCollision.edgeSlideStep for why that walk-off is kept). The cheap test every grounded step makes first.
   const ground = groundAt(destX, destZ, standY);
   if (ground !== null && standY - ground <= stepDownHeight) return null;
-  const pe = collider.precipiceEdge(x, z, standY, destX, destZ);
+  let pe: { edge: Normal | null; floorNormal: Normal } | null;
+  if (collider.edgeSlideStep) {
+    // BUG.ledge-seam-edge-slide-stall: retail's step down at the destination and check_walkable decide, not the
+    // floor under the destination's centre; edge_slide then takes the walkable that step down landed on.
+    const r = collider.edgeSlideStep(x, z, standY, destX, destZ, stepDownHeight);
+    if (r === null || r.ok) return null;
+    pe = r;
+  } else {
+    pe = collider.precipiceEdge!(x, z, standY, destX, destZ);
+  }
   if (!pe) return null;
   if (!pe.edge) return 'collided';
   // precipice_slide: turn the edge normal against the offset.

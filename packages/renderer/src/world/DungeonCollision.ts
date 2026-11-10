@@ -4,7 +4,7 @@ import type { Frame } from '@ac/dat-parser/file-types/Frame.js';
 import type { GfxObj } from '@ac/dat-parser/file-types/GfxObj.js';
 import { CELL_SPHERE_SLACK, pointInCell, pointInsideCellBsp, sphereIntersectsCell } from './cellContainment.js';
 import {
-  buildCollisionBSP, sphereIntersectsPoly, sphereIntersectsAnyPoly, sphereIntersectsSolid, findFloorHeight, collectWalkableFloorHeights, collectWalkableFloors, findCrossedEdge, findWalkable, collectWalkableSphereHits, sphereRestLift, FLOOR_WALKABLE_Z,
+  buildCollisionBSP, sphereIntersectsPoly, sphereIntersectsAnyPoly, sphereIntersectsSolid, findFloorHeight, collectWalkableFloorHeights, collectWalkableFloors, findCrossedEdge, polygonCheckWalkable, findWalkable, collectWalkableSphereHits, sphereRestLift, FLOOR_WALKABLE_Z,
   landblockX, landblockY,
 } from '@ac/shared';
 import type { CollisionBSPNode, CollisionSphere, PhysicsPolygon } from '@ac/shared';
@@ -369,8 +369,25 @@ const FLOOR_SEARCH_MAX_DROP = 5.0;
 const STEP_SEARCH_SLACK = 0.05;
 /** stepDownBlocked: a landing this far above the search height raises the body. */
 const STEP_DOWN_RAISE_EPS = 0.01;
+/**
+ * stepDownContact: a polygon this level (normal · up) rests the sphere on its plane where the centre is within r / 2
+ * of it (BUG.edge-slide-check-walkable-overhang). 2.5°: the plane past a tilted floor's high edge is at most 1 cm above
+ * it within r / 2; steeper floors keep the polygon rest (a ramp top's plane would bump the body up).
+ */
+const LEVEL_PLANE_REST_Z = 0.999;
 /** AC +Z: the up axis step_sphere_down moves the feet sphere along. */
 const AC_UP = { x: 0, y: 0, z: 1 };
+
+/**
+ * CPolygon::adjust_sphere_to_plane @ 00538210's rest: the lift along `up` that puts `center` `radius` off the
+ * polygon's plane (cell-local, unscaled). Null for a plane `up` runs along.
+ */
+function planeRestLift(poly: PhysicsPolygon, center: { x: number; y: number; z: number }, up: { x: number; y: number; z: number }, radius: number): number | null {
+  const n = poly.plane.normal;
+  const nUp = n.x * up.x + n.y * up.y + n.z * up.z;
+  if (nUp <= PHYSICS_EPSILON) return null;
+  return (radius - (n.x * center.x + n.y * center.y + n.z * center.z + poly.plane.distance)) / nUp;
+}
 const scratchLanding = new THREE.Vector3();
 /** riseLimit's sweep step (m): a few cm of headroom lost at most. */
 const RISE_STEP_M = 0.05;
@@ -2195,13 +2212,15 @@ export class DungeonCollision {
       const here = { x: c.x + upL.x * stepDownHeight * inv, y: c.y + upL.y * stepDownHeight * inv, z: c.z + upL.z * stepDownHeight * inv };
       for (const poly of polys) {
         if (underFromBehind(poly, here, upL)) continue; // a roof over the body is no floor
-        // Lift along up until the sphere (lowH) rests on the polygon.
-        const t = sphereRestLift(poly, c, upL, lowH * inv);
+        // Lift along up until the sphere (lowH) rests on the polygon; on a level polygon whose centre projects within
+        // r / 2 of it (check_walkable's reach, where an EdgeSlide body may stand), on its plane.
+        const onPlane = this.levelPlaneReach(poly, c, upL, r * inv);
+        const t = onPlane ? planeRestLift(poly, c, upL, lowH * inv) : sphereRestLift(poly, c, upL, lowH * inv);
         if (t === null || t < -1e-9) continue; // already above its resting place: beyond step-down reach
         const y = startZ + t * s - lowH;
         if (y > fromY + STEP_SEARCH_SLACK) continue;
         // Placement runs where retail's sphere rests: its full radius off the polygon.
-        const tPlace = sphereRestLift(poly, c, upL, r * inv) ?? t;
+        const tPlace = (onPlane ? planeRestLift(poly, c, upL, r * inv) : sphereRestLift(poly, c, upL, r * inv)) ?? t;
         const g = quatRotate(cell.quat, poly.plane.normal);
         landings.push({ y, placeY: startZ + tPlace * s - lowH, normal: { x: g.x, y: g.z, z: g.y } });
       }
@@ -2505,6 +2524,166 @@ export class DungeonCollision {
     if (!local) return { edge: null, floorNormal };
     const e = quatRotate(cell.quat, local); // walkable_pos.frame.localtoglobalvec
     return { edge: { x: e.x, y: e.z, z: e.y }, floorNormal };
+  }
+
+  /**
+   * BUG.ledge-seam-edge-slide-stall — what an EdgeSlide body's grounded step to (destX, destZ) meets in retail's
+   * CTransition::transitional_insert @ 0050b6f0, for the BSP floors this collider holds, the body standing at
+   * (worldX, worldZ) on the ground `standY` (three.js Y):
+   *  1. the step down at the destination (CTransition::step_down @ 0050b2a0, in two halves of StepDownHeight when it
+   *     exceeds the sphere's diameter): the feet sphere, its full radius over the ground as retail's rests, is
+   *     lowered and BSPTREE::step_sphere_down @ 0053a210's find_walkable sets it back up onto the walkables it meets
+   *     (SPHEREPATH::set_walkable @ 00539fc0 records the polygon);
+   *  2. CTransition::check_walkable @ 0050aff0: the destination's centre must lie within r / 2 of that polygon
+   *     (SPHEREPATH::check_walkables @ 0050c3e0 halves the radius; CPolygon::check_walkable @ 00538e60), or within
+   *     r / 2 of any walkable the sphere meets half the step down lower (BSPLEAF::hits_walkable @ 0053d670 →
+   *     check_small_walkable @ 005390b0). Then the step stands: `{ ok: true }`. An EdgeSlide body's centre so stands
+   *     up to r / 2 past a ledge, and a seam between two triangles of one floor is never a ledge;
+   *  3. else CTransition::edge_slide @ 0050b3d0: SPHEREPATH::precipice_slide @ 0050cc80 slides along the edge the
+   *     destination crosses (CPolygon::find_crossed_edge @ 00539300) of the walkable the destination's step down
+   *     landed on, or, when it landed on none, of the one a step down of half StepDownHeight from where the body
+   *     stands lands on. No walkable, or no crossed edge: Collided (`edge: null`).
+   * Renderer axes out (y up), with the walkable's normal (the contact plane slide_sphere slides on). Null when the
+   * body stands on no BSP walkable here (terrain, or no cells): the other rules decide.
+   */
+  edgeSlideStep(
+    worldX: number, worldZ: number, standY: number, destX: number, destZ: number, stepDownHeight: number,
+  ): { ok: true } | { ok: false; edge: { x: number; y: number; z: number } | null; floorNormal: { x: number; y: number; z: number } } | null {
+    if (this.cells.size === 0) return null;
+    // The destination's centre over a walkable at the body's height (its step down lands and check_walkable passes,
+    // on that polygon or by the second look's), or within StepDownHeight below it, decides cheaply: the step stands.
+    // Checked first: every grounded dungeon step asks, and only a step out over a real drop needs the walk below.
+    // A walkable lower than the body's but within StepDownHeight: the step walks off onto it. Retail holds such a drop
+    // (between half and all of StepDownHeight) only while each step stays inside the ledge's reach: its 1/30 s physics
+    // quantum (MIN_QUANTUM) moves a running body 0.2-0.4 m a step, past the first half step down's reach of the edge,
+    // and its second half lands on the floor below. Our 60 Hz frames are half that; the rule as written would hold
+    // runs too (the Holtburg scriveners' 0.82 m dais, the 0x482E cave's ramp lip). Kept: the walk-off within reach.
+    const below = this.getFloorHeight(destX, destZ, standY, stepDownHeight);
+    if (below !== null && standY - below <= stepDownHeight) return { ok: true };
+    const r = this.bodySphereRadius;
+    // transitional_insert: a step down taller than the sphere's diameter goes in two halves.
+    const half = stepDownHeight > 2 * r ? stepDownHeight / 2 : stepDownHeight;
+    const scope = this.bodyScope(worldX, worldZ, standY);
+    const restZ = standY + r;
+    // Where the body stands: edge_slide's own step down of half StepDownHeight.
+    const here = this.walkableLanding(worldX, worldZ, restZ - half, half, scope, worldX, worldZ, restZ);
+    if (!here) return null;
+    const land = this.walkableLanding(destX, destZ, restZ - half, half, scope, worldX, worldZ, restZ)
+      ?? this.walkableLanding(destX, destZ, restZ - 2 * half, half, scope, worldX, worldZ, restZ);
+    if (land) {
+      const upL = quatRotate(quatConjugate(land.cell.quat), AC_UP);
+      if (polygonCheckWalkable(land.poly, this.cellLocal(land.cell, destX, destZ, land.z), upL, (r / 2) / land.cell.scale)) return { ok: true };
+      if (this.smallWalkableUnder(destX, destZ, land.z - half, scope)) return { ok: true };
+    }
+    const walk = land ?? here;
+    const cell = walk.cell;
+    const upL = quatRotate(quatConjugate(cell.quat), AC_UP);
+    const n = quatRotate(cell.quat, walk.poly.plane.normal);
+    const floorNormal = { x: n.x, y: n.z, z: n.y };
+    const local = findCrossedEdge(walk.poly, this.cellLocal(cell, destX, destZ, land ? land.z : restZ), upL);
+    if (!local) return { ok: false, edge: null, floorNormal };
+    const e = quatRotate(cell.quat, local);
+    return { ok: false, edge: { x: e.x, y: e.z, z: e.y }, floorNormal };
+  }
+
+  /**
+   * stepDownContact: a level polygon (LEVEL_PLANE_REST_Z) whose plane the cell-local `center` projects onto within
+   * `radius` / 2 of it (CPolygon::check_walkable @ 00538e60 at check_walkables @ 0050c3e0's half radius). There an
+   * EdgeSlide body stands past the polygon's edge, and retail's sphere rests on the plane
+   * (adjust_sphere_to_plane @ 00538210), not down against the edge.
+   */
+  private levelPlaneReach(
+    poly: PhysicsPolygon, center: { x: number; y: number; z: number }, up: { x: number; y: number; z: number }, radius: number,
+  ): boolean {
+    const n = poly.plane.normal;
+    if (n.x * up.x + n.y * up.y + n.z * up.z < LEVEL_PLANE_REST_Z) return false;
+    return polygonCheckWalkable(poly, center, up, radius / 2);
+  }
+
+  /** (worldX, worldZ, AC z) in a cell's own frame, unscaled by its scale. */
+  private cellLocal(cell: CellCollision, worldX: number, worldZ: number, z: number): { x: number; y: number; z: number } {
+    return scaleVec(globalToLocal(cell.origin, cell.quat, { x: worldX - cell.blockOffsetX, y: worldZ - cell.blockOffsetY, z }), 1 / cell.scale);
+  }
+
+  /**
+   * BSPTREE::step_sphere_down @ 0053a210 over this collider's BSPs: the feet sphere (the body's radius) with its
+   * centre at (worldX, worldZ, centerZ) (AC z) is set back up, along up × `movement` metres, onto each walkable
+   * polygon it meets (find_walkable, cell by cell, the sphere moved in place as retail's is). The walkable is the last
+   * polygon that moved it (SPHEREPATH::set_walkable), with the sphere's centre z where it then rests. A walkable the
+   * body stands under (seen from (fromX, fromZ, fromCenterZ)) is no floor, as in bspStepUp.
+   */
+  private walkableLanding(
+    worldX: number, worldZ: number, centerZ: number, movement: number, scope: BodyScope,
+    fromX: number, fromZ: number, fromCenterZ: number,
+  ): { cell: CellCollision; poly: PhysicsPolygon; z: number } | null {
+    const path = { walkInterp: 1, walkableAllowance: FLOOR_WALKABLE_Z };
+    // The first cell whose find_walkable moves the sphere decides: step_sphere_down then returns ADJUSTED, and the
+    // re-insert that follows steps down by step_down_amt × walk_interp (now 0), so no later cell moves it again.
+    for (const cell of this.cellArray(worldX, worldZ, centerZ, fromCenterZ)) {
+      if (scoped(cell) && !this.inScope(cell, scope)) continue;
+      const inv = 1 / cell.scale;
+      const localUp = quatRotate(quatConjugate(cell.quat), AC_UP);
+      const start = this.cellLocal(cell, worldX, worldZ, centerZ);
+      const sphere: CollisionSphere = { center: { ...start }, radius: this.bodySphereRadius * inv };
+      const here = this.cellLocal(cell, fromX, fromZ, fromCenterZ);
+      const poly = findWalkable(cell.bsp, path, sphere, scaleVec(localUp, -movement * inv), localUp,
+        (p) => underFromBehind(p, here, localUp));
+      if (!poly) continue;
+      const off = localToGlobalVec(cell.quat, {
+        x: (sphere.center.x - start.x) * cell.scale,
+        y: (sphere.center.y - start.y) * cell.scale,
+        z: (sphere.center.z - start.z) * cell.scale,
+      });
+      return { cell, poly, z: centerZ + off.z };
+    }
+    return null;
+  }
+
+  /**
+   * The order retail's insert visits the BSPs a body sphere at (worldX, worldZ, centerZ) (AC z) can meet: the check
+   * position's cell, then CObjCell::find_cell_list @ 0052b4e0's array, outward through the portals of each cell whose
+   * volume the sphere reaches (CEnvCell::find_transit_cells @ 0052c820), then every other source in reach (building
+   * shells, statics) in registration order. find_cell_list starts at check_pos.objcell_id: the cell the transition's
+   * insert found for the centre standing at `standCenterZ`, looked up from the body's own cell. The step down that
+   * lowers the sphere to `centerZ` (CTransition::step_down @ 0050b2a0) moves only the origin's z, not the cell id.
+   */
+  private cellArray(worldX: number, worldZ: number, centerZ: number, standCenterZ: number): CellCollision[] {
+    const r = this.bodySphereRadius;
+    const near = [...this.cellsNear(worldX, worldZ, r)];
+    const start = this.findCellContaining(worldX, worldZ, standCenterZ, this.bodyCell || this.lastShellCell);
+    if (start === 0) return near;
+    const ids = [start >>> 0];
+    for (let i = 0; i < ids.length; i++) {
+      for (const n of this.envCells.get(ids[i])?.neighbors ?? []) {
+        if (ids.includes(n)) continue;
+        const next = this.envCells.get(n);
+        if (!next?.cellBspRoot) continue;
+        if (sphereIntersectsCell(next.cellBspRoot, next.origin, next.quat,
+          { x: worldX - next.blockOffsetX, y: worldZ - next.blockOffsetY, z: centerZ }, r)) ids.push(n);
+      }
+    }
+    const ordered = ids.map((id) => this.envCells.get(id)!).filter((c) => near.includes(c));
+    for (const c of near) if (!ordered.includes(c)) ordered.push(c);
+    return ordered;
+  }
+
+  /**
+   * CTransition::check_walkable @ 0050aff0's second look: the sphere lowered to `centerZ` (AC z) meets a walkable
+   * (walkable_hits_sphere) whose plane the centre projects onto within r / 2 of (BSPLEAF::hits_walkable @ 0053d670 →
+   * CPolygon::check_small_walkable @ 005390b0).
+   */
+  private smallWalkableUnder(worldX: number, worldZ: number, centerZ: number, scope: BodyScope): boolean {
+    for (const cell of this.cellsNear(worldX, worldZ, this.bodySphereRadius)) {
+      if (scoped(cell) && !this.inScope(cell, scope)) continue;
+      const inv = 1 / cell.scale;
+      const localUp = quatRotate(quatConjugate(cell.quat), AC_UP);
+      const c = this.cellLocal(cell, worldX, worldZ, centerZ);
+      const radius = this.bodySphereRadius * inv;
+      for (const poly of collectWalkableSphereHits(cell.bsp, { center: c, radius }, localUp, FLOOR_WALKABLE_Z)) {
+        if (polygonCheckWalkable(poly, c, localUp, radius / 2)) return true;
+      }
+    }
+    return false;
   }
 
   // ── Camera distance (raycaster) ───────────────────────────

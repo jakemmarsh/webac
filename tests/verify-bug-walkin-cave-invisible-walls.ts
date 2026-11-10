@@ -287,7 +287,14 @@ describe.skipIf(!haveEol)('the cave mouth at 0x482E (end of retail): the body ne
   // The lead's live walk (2026-11-01: @teleloc 0x482E002E 147 133.5 9, five "4m west" legs) went
   // 0x148 → 0x147 → outdoor 0x2E with the camera in the rock.
   let world: Awaited<ReturnType<typeof caveWorld>>;
-  beforeAll(async () => { world = await caveWorld(0x48, 0x2e); }, 120_000);
+  beforeAll(async () => {
+    world = await caveWorld(0x48, 0x2e);
+    // The player's StepDownHeight: Setup 0x02000001's 1.5 m (main.ts passes setup.stepDownHeight), not the block
+    // harness's 0.6. Since BUG.edge-slide-check-walkable-overhang (2026-11-09) the precipice rule steps the destination
+    // down by it (transitional_insert @ 0050b6f0), and the chamber floor's west lip stands ~1 m over the ramp: 0.6 held
+    // the walk at the lip, 1.5 (the live body's) walks off it onto the ramp as the old point probe did.
+    (world.services as { stepDownHeight: number }).stepDownHeight = 1.5;
+  }, 120_000);
 
   it('one outside portal, 0x149\'s: a cave, not a tunnel', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

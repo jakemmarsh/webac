@@ -163,6 +163,49 @@ describe.skipIf(!DATS)('BUG.planner-live-jump-gap — the planner flies the live
     col.lastStepUp = 0; col.collisionNormal = null; col.lastShellCell = 0;
   });
 
+  it('a take-off at the r / 2 overhang (BUG.edge-slide-check-walkable-overhang): the planner\'s walk stops where the live walk does, and jumps from there land where the live body does', () => {
+    // The pit ledge of the mk-pit probe spot: 0x01D202A6's floor ends at y −65.0 over the pit 0x01D202A7. An EdgeSlide
+    // body now stands up to r / 2 (0.24 m) past it (check_walkable @ 0050aff0). jumpPlan never places a take-off on an
+    // edge line itself: the planner's take-off is where its walk probe (main.ts navProbe: stepPlayerMovement) stops, and
+    // the walk re-aims from where the body really stands (reaimJump). So both follow the overhang; pinned here.
+    const EDGE_Y = -65.0;
+    const start = { x: 90, y: -63.5, z: 0 };
+    const held = liveFramesOver(nav, LB, start, { walk: { vx: 0, vy: -4 }, seconds: 2 });
+    expect(held.fell).toBe(false);
+    expect(held.z).toBeCloseTo(0, 3);
+    const liveOver = EDGE_Y - held.y;
+    expect(liveOver).toBeGreaterThan(0.15);
+    expect(liveOver).toBeLessThanOrEqual(0.24 + 1e-6);
+    const probed = nav.probe({ x: BX + start.x, y: BY + start.y, z: 0 }, { x: BX + start.x, y: BY + start.y - 6 })!;
+    expect(probed.z).toBeCloseTo(0, 3);
+    const probeOver = EDGE_Y - (probed.y - BY);
+    expect(probeOver).toBeGreaterThan(0.15);
+    expect(probeOver).toBeLessThanOrEqual(0.24 + 1e-6);
+    // Within jumpOptions' take-off slop (TAKEOFF_SLOP_M 0.15) of each other.
+    expect(Math.hypot(probed.x - BX - held.x, probed.y - BY - held.y)).toBeLessThan(0.15);
+    // From the live body's spot past the edge, the planned flight is the live one (the pit's −6 / −12 floors, coast and all).
+    const at = { x: held.x, y: held.y, z: held.z };
+    const south = { x: 0, y: -1 };
+    for (const v of [3, 6.5]) for (const p of [0.1, 0.6, 1]) {
+      const up = getJumpVelocity(0, 112, p);
+      const l = plan(at, south, v, up)!;
+      const r = live(at, south, v, up);
+      const tag = `v ${v} power ${p}: planned (${(l.x - BX).toFixed(2)}, ${(l.y - BY).toFixed(2)}, z ${l.z.toFixed(2)}), live (${r.rest.x.toFixed(2)}, ${r.rest.y.toFixed(2)}, z ${r.rest.z.toFixed(2)})`;
+      expect(r.rest.landed, tag).toBe(true);
+      expect(Math.hypot(l.x - BX - r.rest.x, l.y - BY - r.rest.y), tag).toBeLessThan(0.05);
+      expect(Math.abs(l.z - r.rest.z), tag).toBeLessThan(0.05);
+    }
+    // And the jumps the planner offers from its own probed take-off land where the live body's would from its spot.
+    const offered = jumpOptions(nav.kit, probed, south, { maxDamage: 1000, max: 4 });
+    expect(offered.length).toBeGreaterThan(0);
+    for (const o of offered) {
+      const l = nav.kit.launch(o.power, o.walk);
+      const r = live(at, o.dir, l.forward, l.up);
+      expect(Math.abs(o.to.z - r.rest.z), `power ${o.power} walk ${o.walk}`).toBeLessThan(0.5);
+      expect(Math.hypot(o.to.x - BX - r.rest.x, o.to.y - BY - r.rest.y), `power ${o.power} walk ${o.walk}`).toBeLessThan(1.5);
+    }
+  });
+
   it('at 30 and 144 frames a second the live body rests within 0.35 m of the planned 60 Hz flight, on the same floor', () => {
     let worst = 0;
     for (const dt of [1 / 30, 1 / 144]) for (const [at, dir] of [[FLAT_FROM, FLAT_DIR], [LEAP_FROM, LEAP_DIR]] as const) for (const v of [4, 6.5]) for (const p of [0.3, 1]) {

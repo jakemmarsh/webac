@@ -44,6 +44,7 @@ import { codecs1999 } from './codecs/index.js';
 import { parseCharSelectNews } from './codecs/CharSelect1999.js';
 import { buildLoginBody1999, readGrant1999 } from './Login1999.js';
 import { ThreadStallClock, silenceIsOwnStall, type LinkSample } from '../ThreadStall.js';
+import { SendPacer } from '../SendPacer.js';
 import {
   buildPacket1999, buildSeqList1999, checksum1999, F1999, fragmentMessage1999, HEADER_SIZE_1999, Isaac1999Keys,
   MAX_DATAGRAM_1999, optionBytes1999, readFragments1999, readHeader1999, readSeqList1999, type Fragment1999,
@@ -185,6 +186,8 @@ export class Connection1999 implements NetConnection {
   private fragmentSequence = 2;
   private flowBytes = 0;
   private readonly resendCache = new Map<number, { packet: Uint8Array; lastSent: number }>();
+  /** BUG.movetostate-burst-abuse-close — data sends past the bridge's message rate wait their turn (SendPacer.ts). */
+  private readonly sendPacer = new SendPacer();
   private awaitingCreate = false;
   /**
    * The server answered our enter-world request (0xF7C7) and has not left the
@@ -255,6 +258,7 @@ export class Connection1999 implements NetConnection {
     this.fragmentSequence = 2;
     this.flowBytes = 0;
     this.resendCache.clear();
+    this.sendPacer.clear();
     this.awaitingCreate = false;
     this.enterWorldGranted = false;
     this.dddFiles = [];
@@ -304,6 +308,7 @@ export class Connection1999 implements NetConnection {
       naks: d.naks,
       txSeq: this.sequence,
       txUnacked: this.resendCache.size,
+      txPaced: this.sendPacer.deferred,
       txAckedBySrv: d.srvAck,
       srvNakAgoMs: msAgo(now, d.srvNakAt),
       srvNaks: d.srvNaks,
@@ -864,7 +869,9 @@ export class Connection1999 implements NetConnection {
       const label = messageLabel(message);
       frags.forEach((f, i) => {
         if (f.length > MAX_DATA_BODY) throw new Error('1999 fragment over the datagram limit');
-        this.sendData(f, i === 0 ? label : 'cont');
+        // BUG.movetostate-burst-abuse-close: a burst past the bridge's message rate waits its turn (SendPacer.ts);
+        // the sequence and key are taken when the packet goes, so order holds.
+        this.sendPacer.submit(() => this.sendData(f, i === 0 ? label : 'cont'));
       });
     }
   }

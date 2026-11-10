@@ -43,6 +43,8 @@ export interface NetDiagnostics {
   /** Our last client→server sequence, our sequenced packets the server has not ACKed (retransmit cache), and its last ACK of ours. */
   txSeq: number;
   txUnacked: number;
+  /** Game-message sends the outgoing pacer held back for a burst (SendPacer, BUG.movetostate-burst-abuse-close); absent: none kept. */
+  txPaced?: number;
   txAckedBySrv: number;
   /** Since the server last asked us to resend, and the sequences it asked for in total. */
   srvNakAgoMs: number | null;
@@ -180,7 +182,7 @@ const MS_KEYS = [
   'srvAckAgoMs', 'srvAckAdvAgoMs',
 ] as const;
 const COUNT_KEYS = [
-  'rxAck', 'rxHigh', 'rxHeld', 'rxMissing', 'fragHeld', 'naks', 'txSeq', 'txUnacked', 'txAckedBySrv',
+  'rxAck', 'rxHigh', 'rxHeld', 'rxMissing', 'fragHeld', 'naks', 'txSeq', 'txUnacked', 'txPaced', 'txAckedBySrv',
   'srvNaks', 'resent', 'unsatisfied', 'srvRejects', 'wsBuffered', 'tickGapMaxMs', 'rxPkts', 'txPkts', 'rxBytes',
 ] as const;
 const HEX_KEYS = ['rxFlags', 'rxOpcode', 'rxEvent'] as const;

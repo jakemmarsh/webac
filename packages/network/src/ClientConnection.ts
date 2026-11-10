@@ -57,6 +57,7 @@ import { SocketHandover, type HandoverResult, type HandoverSocket } from './Sock
 import { armOpenTimeout, WS_OPEN_TIMEOUT_MS } from './WsOpenTimeout.js';
 import { type NetDiagnostics, TxRing, hex32, joinLabels, messageLabel, msAgo } from './NetDiagnostics.js';
 import { ThreadStallClock, silenceIsOwnStall, type LinkSample } from './ThreadStall.js';
+import { SendPacer } from './SendPacer.js';
 import type { GameMessage, CharacterCreateResponseData, CharacterRestoreResponseData, CreateObjectData } from './MessageSerializer.js';
 
 /**
@@ -483,6 +484,9 @@ export class ClientConnection {
   // Sent packet cache for server-requested retransmit
   private sentPacketCache: Map<number, Uint8Array> = new Map();
 
+  /** BUG.movetostate-burst-abuse-close — game-message sends past the bridge's message rate wait their turn (SendPacer.ts). */
+  private readonly sendPacer = new SendPacer();
+
   /** Shared ACK/NAK send stamp — retail ReceiverData::timeStamp_ is shared by
    *  SharedNet::EnqueuePak @ 00543b10 and SharedNet::EnqueueNaks @ 00543bd0. */
   private lastAckNakSentAt: number = 0;
@@ -740,6 +744,7 @@ export class ClientConnection {
       naks: this.diagNaks,
       txSeq: this.packetSequence,
       txUnacked: this.sentPacketCache.size,
+      txPaced: this.sendPacer.deferred,
       txAckedBySrv: this.diagSrvAck,
       srvNakAgoMs: msAgo(now, this.diagSrvNakAt),
       srvNaks: this.diagSrvNaks,
@@ -1066,6 +1071,7 @@ export class ClientConnection {
     this.packetSequence = 1; // ACE expects first C2S fragment packet to be seq=2
     this.fragmentSequence = 0;
     this.sentPacketCache.clear();
+    this.sendPacer.clear();
     this.fragmentAssembler.reset();
     this.orderedBuffer.reset();
     this.orderedFragments.reset();
@@ -1549,7 +1555,9 @@ export class ClientConnection {
     }
     const fragId = ++this.fragmentSequence;
     const fragments = fragmentMessage(messageBytes, fragId, queue, fragId);
-    this.sendFragmentPacket(fragments);
+    // The packet's sequence and ISAAC key are taken when it goes (sendFragmentPacket), so a paced
+    // send stays in order with everything after it.
+    this.sendPacer.submit(() => this.sendFragmentPacket(fragments));
   }
 
   // ─── Internal Packet Handling ──────────────────────

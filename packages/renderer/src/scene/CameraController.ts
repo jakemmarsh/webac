@@ -50,6 +50,11 @@ function removeFrom(list: string[], entry: string): void {
   if (i >= 0) list.splice(i, 1);
 }
 
+/** Where a movement event came from (BUG.movetostate-burst-abuse-close telemetry). */
+export const MOVEMENT_EVENT_SOURCES = ['key_down', 'key_up', 'autorun', 'stop_moving', 'mouse_left', 'mouse_turn'] as const;
+export type MovementEventSource = typeof MOVEMENT_EVENT_SOURCES[number];
+const MOVEMENT_EVENT_SOURCES_KEPT = 8;
+
 /**
  * CameraController — AC-style WASD + right-click mouse look controller.
  *
@@ -252,10 +257,15 @@ export class CameraController {
    * sendMovementEventNow).
    */
   onMovementEvent: (() => void) | null = null;
-  private raiseMovementEvent(): void {
+  private raiseMovementEvent(source: MovementEventSource): void {
     this._movementEvents++;
+    this._movementEventSources.push(source);
+    if (this._movementEventSources.length > MOVEMENT_EVENT_SOURCES_KEPT) this._movementEventSources.shift();
     this.onMovementEvent?.();
   }
+  /** BUG.movetostate-burst-abuse-close telemetry: the input each recent movement event came from, oldest first. */
+  get recentMovementEventSources(): readonly MovementEventSource[] { return this._movementEventSources; }
+  private readonly _movementEventSources: MovementEventSource[] = [];
 
   /**
    * CMotionInterp::standing_longjump — a jump charge that began standing
@@ -801,7 +811,7 @@ export class CameraController {
 
   /** A mouse turn starting, stopping or reversing is a movement event (MovePlayer + SendMovementEvent). */
   private setMouseTurn(t: { left: boolean; speed: number } | null): void {
-    if ((t === null) !== (this.mouseTurn === null) || (t && this.mouseTurn && t.left !== this.mouseTurn.left)) this.raiseMovementEvent();
+    if ((t === null) !== (this.mouseTurn === null) || (t && this.mouseTurn && t.left !== this.mouseTurn.left)) this.raiseMovementEvent('mouse_turn');
     this.mouseTurn = t;
   }
 
@@ -1064,7 +1074,7 @@ export class CameraController {
     // head; the release removes it (RemoveCommand's mouse branch).
     removeFrom(this.substateList, MOUSE_FORWARD);
     if (down) this.substateList.unshift(MOUSE_FORWARD);
-    this.raiseMovementEvent();
+    this.raiseMovementEvent('mouse_left');
     return CameraController.useMouseTurning && this.mouseLookActive;
   }
 
@@ -1186,7 +1196,7 @@ export class CameraController {
     if (code === 'KeyW' || code === 'KeyS') { this.onAbortAutomaticAttack?.(); this.setAutoRun(false); this.forwardStopped = false; this.transientPosture = false; this._rawForwardHoldRun = false; }
     const wasActive = list ? list.length > 0 : false;
     list?.unshift(code);
-    if (list) this.raiseMovementEvent();
+    if (list) this.raiseMovementEvent('key_down');
     if (!wasActive && list === this.turnList) this.turnSince = ++this.motionClock;
     if (!wasActive && list === this.sidestepList) this.sidestepSince = ++this.motionClock;
   }
@@ -1198,6 +1208,14 @@ export class CameraController {
    * AbortAutomaticAttack still cancels an automatic attack.
    */
   private releaseKey(code: string): void {
+    // Only a key that is down comes up: CInputManager deactivates an action it
+    // activated (DirectInput's buffer has no key-up without its key-down), so
+    // HandleKeyboardCommand never sees the release of a key not held and no
+    // movement event goes out for one. BUG.movetostate-burst-abuse-close
+    // (2026-11-10): the agent let go of every movement key it might hold
+    // (stopMoving: six keys, a walk's cancel: four), each a MoveToState, so a
+    // run of stops sent hundreds in one go and the bridge closed the session.
+    if (!this.keys.has(code)) return;
     this.keys.delete(code);
     const list = this.listFor(code);
     if (!list) return;
@@ -1211,7 +1229,7 @@ export class CameraController {
     if (!list.length && list === this.turnList && this.sidestepList.length) this.sidestepSince = ++this.motionClock;
     // NukeCommand re-applies a new head (a Stop Moving forward no longer holds).
     if (list === this.substateList && wasHead && list.length && !this.transientPosture) this.forwardStopped = false;
-    if (!controlled) this.raiseMovementEvent();
+    if (!controlled) this.raiseMovementEvent('key_up');
   }
 
   /** CommandInterpreter::LoseControlToServer @ 006b3170: the server moves us; autorun and a jump charge end. */
@@ -1296,7 +1314,7 @@ export class CameraController {
   toggleAutoRun(): void {
     this.setAutoRun(!this._autoRun);
     if (!this._autoRun) this._rawForwardHoldRun = false;
-    this.raiseMovementEvent();
+    this.raiseMovementEvent('autorun');
   }
 
   /**
@@ -1318,7 +1336,7 @@ export class CameraController {
     this._rawForwardHoldRun = false;
     if (this.substateList.length) this.forwardStopped = true;
     this.onStopMovingSubstate?.();
-    this.raiseMovementEvent();
+    this.raiseMovementEvent('stop_moving');
   }
 
   /**

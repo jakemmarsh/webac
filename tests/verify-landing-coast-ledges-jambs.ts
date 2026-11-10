@@ -111,13 +111,18 @@ describe.skipIf(!DATS)('the landing coast at Mountain Keep\'s pit ledge (0x01D20
     expect(col.findCellContaining(BX + START.x, BY + START.y, 0.48) >>> 0).toBe(C(0x2a6));
   });
 
-  it('EdgeSlide: a landing\'s coast south at the run\'s 6.54 m/s is held at the ledge, as a walk is — no fall, still on 0x01D202A6', () => {
+  it('EdgeSlide: a landing\'s coast south at the run\'s 6.54 m/s is held at the ledge, as a walk is — no fall, its centre over the pit\'s air cell', () => {
     const coast = coastFrom(START, { coast: { x: 0, z: -RUN }, edgeSlide: true });
     const walk = coastFrom(START, { walk: { vx: 0, vy: -RUN }, edgeSlide: true, seconds: 1 });
     for (const r of [coast, walk]) {
       expect(r.fell).toBe(false);
       expect(r.z).toBeCloseTo(0, 3);
-      expect(r.cell).toBe(C(0x2a6));
+      // Re-pinned 2026-11-09 (BUG.edge-slide-check-walkable-overhang). Was: still in 0x01D202A6. Retail's centre
+      // stands up to r / 2 (0.24 m) past the ledge (check_walkable @ 0050aff0 at check_walkables @ 0050c3e0's half
+      // radius), and the body's cell is the one holding its centre (CObjCell::find_cell_list @ 0052b4e0's check
+      // cell): here the pit's air cell 0x01D202A7. (Not checked in the retail client at this spot; the walkway run
+      // there reported the cell holding its overhanging centre, 0x01D20293.)
+      expect(r.cell).toBe(C(0x2a7));
     }
     // Both stop at the same edge (the coast's transition is the walk's).
     expect(Math.abs(coast.minY - walk.minY)).toBeLessThan(0.15);

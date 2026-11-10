@@ -802,6 +802,47 @@ export function findCrossedEdge(
 /** PhysicsGlobals.EPSILON (ACE PhysicsGlobals.cs: 0.0002). */
 const CROSSED_EDGE_EPSILON = 0.0002;
 
+/**
+ * BUG.ledge-seam-edge-slide-stall — CPolygon::check_walkable @ 00538e60 (and check_small_walkable @ 005390b0, which
+ * is the same test at half the radius): does `center`, projected along `up` onto the polygon's plane, lie within
+ * `radius` of the polygon (inside it, within `radius` of an edge's segment, or of a vertex)? The edges are walked in
+ * retail's order from (last, first): a point outside an edge's line by more than `radius` fails at once.
+ * SPHEREPATH::check_walkables @ 0050c3e0 runs it on the step-down's walkable with half the body sphere's radius, so
+ * an EdgeSlide body's centre may stand up to r / 2 past a ledge.
+ */
+export function polygonCheckWalkable(poly: PhysicsPolygon, center: Vec3, up: Vec3, radius: number): boolean {
+  const n = poly.plane.normal;
+  const angleUp = n.x * up.x + n.y * up.y + n.z * up.z;
+  if (Math.abs(angleUp) < CROSSED_EDGE_EPSILON) return false;
+  const angle = (n.x * center.x + n.y * center.y + n.z * center.z + poly.plane.distance) / angleUp;
+  const cx = center.x - up.x * angle;
+  const cy = center.y - up.y * angle;
+  const cz = center.z - up.z * angle;
+  const r2 = radius * radius;
+  let inside = true;
+  const verts = poly.vertices;
+  let prevIdx = verts.length - 1;
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i];
+    const lv = verts[prevIdx];
+    prevIdx = i;
+    const ex = v.x - lv.x, ey = v.y - lv.y, ez = v.z - lv.z;
+    const kx = n.y * ez - n.z * ey;
+    const ky = n.z * ex - n.x * ez;
+    const kz = n.x * ey - n.y * ex;
+    const px = cx - lv.x, py = cy - lv.y, pz = cz - lv.z;
+    const s = px * kx + py * ky + pz * kz;
+    if (s < 0) {
+      if ((kx * kx + ky * ky + kz * kz) * r2 < s * s) return false;
+      const t = px * ex + py * ey + pz * ez;
+      if (t >= 0 && t <= ex * ex + ey * ey + ez * ez) return true;
+      inside = false;
+    }
+    if (px * px + py * py + pz * pz <= r2) return true;
+  }
+  return inside;
+}
+
 /** Simple 2D point-in-polygon test (XY plane, AC Z-up). */
 function pointInPolygonXY(poly: PhysicsPolygon, px: number, py: number): boolean {
   const verts = poly.vertices;

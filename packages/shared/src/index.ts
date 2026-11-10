@@ -9,7 +9,7 @@ export { WaterMap, LandWaterType, isWaterTerrainType, WATER_DEPTH_ENTIRELY, WATE
 export { computeCellSplitDir } from './physics/CellSplitDir.js';
 export {
   buildCollisionBSP, sphereIntersectsPoly, sphereIntersectsAnyPoly, sphereIntersectsSolid,
-  findFloorHeight, collectWalkableFloorHeights, collectWalkableFloors, findCrossedEdge, findWalkable, collectWalkableSphereHits, sphereRestLift,
+  findFloorHeight, collectWalkableFloorHeights, collectWalkableFloors, findCrossedEdge, polygonCheckWalkable, findWalkable, collectWalkableSphereHits, sphereRestLift,
   makePlane, polygonHitsSpherePrecise, posHitsSphere, FLOOR_WALKABLE_Z,
 } from './physics/CollisionBSP.js';
 export type {

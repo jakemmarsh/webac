@@ -199,11 +199,16 @@ describe('stepPlayerMovement — an EdgeSlide player on a roof', () => {
     expect(s.z).toBeCloseTo(Z0, 6);
   });
 
-  it('a diagonal run slides along the edge', () => {
+  it('a diagonal run slides along the edge, its centre r / 2 past it (BUG.edge-slide-check-walkable-overhang)', () => {
+    // Re-pinned 2026-11-09 against retail: check_walkable @ 0050aff0 keeps a step whose centre lies within r / 2
+    // (0.24 m) of the walkable (check_walkables @ 0050c3e0 halves the radius; CPolygon::check_walkable @ 00538e60), and
+    // only then precipice_slide @ 0050cc80 runs. Steps of 0.2 east: x 3.2 past the centre passes (0.2 <= 0.24), 3.4
+    // does not, and the slide along the edge keeps x where the last step left it. The lead's retail run along the
+    // Mountain Keep walkway stopped 0.238-0.240 past its ledge. Was: x <= the edge (no overhang).
     const s = run(onRoof(), outdoorServices(roofWorld()), 0.2, 0.1, 40);
-    expect(s.x).toBeLessThanOrEqual(X0 + HALF + 1e-6);
-    // Along the +z edge too: it ends at the corner, still on the roof.
-    expect(s.z).toBeLessThanOrEqual(Z0 + HALF + 1e-6);
+    expect(s.x).toBeCloseTo(X0 + HALF + 0.2, 6);
+    // Along the +z edge too: it ends at the corner, its centre within r / 2 of the corner vertex.
+    expect(Math.hypot(s.x - (X0 + HALF), Math.max(0, s.z - (Z0 + HALF)))).toBeLessThanOrEqual(DungeonCollision.BODY_SPHERE_RADIUS / 2 + 1e-6);
     expect(s.z).toBeGreaterThan(Z0 + 1.5); // it kept moving along the edge after reaching x's edge
   });
 
@@ -239,6 +244,8 @@ describe('stepPlayerMovement — a dungeon ledge', () => {
     const high = ledge(20);
     const s = run(onRoof({ inDungeon: true }), sv(high), 0.25, 0, 40);
     expect(s.x).toBeLessThanOrEqual(X0 + HALF + 1e-6);
+    // A 1 m drop is within StepDownHeight: walked off (BUG.edge-slide-check-walkable-overhang keeps the walk-off: retail's
+    // 1/30 s physics quantum steps a run past the ledge's reach, see DungeonCollision.edgeSlideStep).
     const low = ledge(11);
     const t = run(onRoof({ inDungeon: true, floorY: 11 }), sv(low), 0.25, 0, 40);
     expect(t.x).toBeGreaterThan(X0 + HALF + 1);
