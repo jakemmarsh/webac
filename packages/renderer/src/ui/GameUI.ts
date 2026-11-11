@@ -527,7 +527,7 @@ import { appearanceHeritageRules, appearanceUpdateRandomize, APPEARANCE_ROWS, AP
 import type { PaperdollDropTarget } from '../inventory/PaperdollDragObject.js';
 import { datMissEpoch, noDatMissSince, onDatMissResolved } from '@ac/dat-parser/streaming/DatMiss.js';
 import { PanelPressGuard } from './PanelPressGuard.js';
-import { captureScroll, restoreScroll, type ScrollSnapshot } from './ScrollKeep.js';
+import { captureScroll, restoreScroll, unrestoredScroll, type ScrollSnapshot } from './ScrollKeep.js';
 
 /* ------------------------------------------------------------------ */
 /*  Skill name lookup (from ACE Skill enum)                            */
@@ -16605,10 +16605,28 @@ export class GameUI {
    */
   private renderInventoryPanel(): void {
     if (this.pressGuard.defer(this.inventoryPanel, () => this.renderInventoryPanel())) return;
-    const kept = captureScroll(this.inventoryPanel);
+    // BUG.pack-scroll-resets-on-arrival — the offsets come from the live grid
+    // when it has them, else from the last scroll it reported: a hidden /
+    // detached panel reads scrollTop 0 in a browser, and a panel hidden and
+    // shown again is retail's same list (gmInventoryUI persists; SetDisplay-
+    // Inventory @ 004a6750 re-parents only when it shows another container).
+    const live = this.inventoryPanel?.isConnected ? captureScroll(this.inventoryPanel) : null;
+    const kept = live && live.size > 0 ? live : this.inventoryScrollSeen;
     this.renderInventoryPanelFresh();
-    restoreScroll(this.inventoryPanel, kept);
+    const panel = this.inventoryPanel as HTMLElement | null;
+    if (!panel) return;
+    restoreScroll(panel, kept);
+    const lost = unrestoredScroll(panel, kept);
+    if (lost.length > 0) console.warn(`[ScrollKeep] inventory rebuild did not keep ${lost.join(', ')}`);
+    this.inventoryScrollSeen = captureScroll(panel);
+    // Scroll events do not bubble: listen in the capture phase for every keyed viewport under the panel.
+    panel.addEventListener('scroll', () => {
+      if (this.inventoryPanel === panel && panel.isConnected) this.inventoryScrollSeen = captureScroll(panel);
+    }, true);
   }
+
+  /** The inventory's keyed scroll offsets as last seen while it was on screen (renderInventoryPanel). */
+  private inventoryScrollSeen: ScrollSnapshot = new Map();
 
   private renderInventoryPanelFresh(): void {
     // Clean up old panel

@@ -75,6 +75,26 @@ export function applyScroll(el: HTMLElement, top: number, left = 0): void {
   el.dispatchEvent(new Event('scroll'));
 }
 
+/**
+ * The key paths under `root` that the snapshot names but that do not sit at
+ * their (clamped) offset: a restore the browser did not take, e.g. onto a
+ * viewport with no layout box yet. Empty when every match was kept.
+ */
+export function unrestoredScroll(root: HTMLElement | null | undefined, snap: ScrollSnapshot): string[] {
+  if (!root || snap.size === 0) return [];
+  const out: string[] = [];
+  for (const el of root.querySelectorAll<HTMLElement>(KEYED)) {
+    const path = scrollKeyPath(el, root);
+    const s = snap.get(path);
+    if (!s) continue;
+    const want = clampScroll(el, s.top, s.left);
+    if (Math.abs((el.scrollTop || 0) - want.top) > 1 || Math.abs((el.scrollLeft || 0) - want.left) > 1) {
+      out.push(`${path} (at ${el.scrollTop || 0}, wanted ${want.top})`);
+    }
+  }
+  return out;
+}
+
 /** Restore a snapshot onto the rebuilt `root`; returns how many viewports matched. */
 export function restoreScroll(root: HTMLElement | null | undefined, snap: ScrollSnapshot): number {
   if (!root || snap.size === 0) return 0;
