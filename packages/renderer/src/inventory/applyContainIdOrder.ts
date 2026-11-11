@@ -28,3 +28,38 @@ export function applyContainIdOrder(inventory: InventoryManager, e: ContainIdEve
   inventory.setSlotForItem(e.itemGuid, e.slot, e.containerGuid, packs);
   return packs;
 }
+
+/** The parts of a CreateObject that decide where a carried object is listed. */
+export interface ContainedCreate {
+  guid: number;
+  containerId: number;
+  wielderId?: number;
+  /** PublicWeenieDesc._bitfield (ObjectDescriptionFlag). */
+  objectDescFlags?: number;
+  itemsCapacity?: number;
+  containersCapacity?: number;
+}
+
+/** ObjectDescriptionFlag.RequiresPackSlot: AddContent's containers-list test. */
+const BF_REQUIRES_PACKSLOT = 0x800000;
+
+/**
+ * webac#29 — a create that names a container lists the object there the way retail's
+ * ACCObjectMaint::SetWeenieDesc @ 00557a20 (1999: 0x004df510) does: its place in that container's
+ * list when it is already in it, else slot 0 (first). The list is the containers list when the
+ * object has container capacity or needs a pack slot (AddContent @ 0058cce0's test; 1999
+ * ACCWeenieObject_HasContainerCapacity). A wielded object (no container) is left alone.
+ *
+ * This is how a player-to-player give, an NPC's give emote and a trade reach the receiver on the
+ * AC1999 server and GDLE: FinishGiveItem / SimulateGiveObject send the receiver only the item's
+ * contained 0xF745 (the 0x22 goes to the giver), and OnReceiveInventoryItem inserts it at m_Items
+ * slot 0. ACE follows its create with a ServerSaysContainId that then sets the slot itself.
+ *
+ * Returns whether the order changed and which list it is in.
+ */
+export function applyContainOnCreate(inventory: InventoryManager, d: ContainedCreate): { changed: boolean; packs: boolean } {
+  if (!d.containerId || d.wielderId) return { changed: false, packs: false };
+  const packs = ((d.objectDescFlags ?? 0) & BF_REQUIRES_PACKSLOT) !== 0
+    || (d.itemsCapacity ?? 0) !== 0 || (d.containersCapacity ?? 0) !== 0;
+  return { changed: inventory.containOnCreate(d.guid, d.containerId, packs), packs };
+}

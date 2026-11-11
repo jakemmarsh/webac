@@ -63,13 +63,27 @@ describe('the 1999 overlay over an already-translated base (translatedBase)', ()
     [0x01000001, gfx], [CHARGEN, chargenEoL], [AC1999_UNTRANSLATED_COPIES.get(CHARGEN)!, chargen1999], [0x02000001, setup],
   ]);
 
-  it('passes every unpatched file through untouched (a second translation would corrupt it)', () => {
+  it('passes every unpatched file through untouched (a second translation would corrupt it; a GfxObj with no implied 0x11 included)', () => {
     const db = residentDb(files);
     db.setOverlay(ac1999PortalOverlay({ translatedBase: true }));
     expect(db.overlayKind).toBe(AC1999_OVERLAY_KIND);
     expect(u8(db.getFileData(0x01000001))).toEqual(gfx);
     expect(u8(db.getFileData(CHARGEN))).toEqual(chargenEoL);
     expect(u8(db.getFileData(0x02000001))).toEqual(setup);
+  });
+
+  it('a GfxObj whose implied 0x11 the set holds gains the DIDDegrade slot (sets published before it existed)', () => {
+    // An EoL-format GfxObj with no surfaces / vertices / polygons, flags 0.
+    const bare = new Uint8Array([0x22, 0, 0, 0x01, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    const degrade = new Uint8Array([0x22, 0, 0, 0x11, 0, 0, 0, 0]);
+    const db = residentDb(new Map([[0x01000022, bare], [0x11000022, degrade]]));
+    db.setOverlay(ac1999PortalOverlay({ translatedBase: true }));
+    const served = u8(db.getFileData(0x01000022))!;
+    expect(served.length).toBe(bare.length + 4);
+    const v = new DataView(served.buffer);
+    expect(v.getUint32(4, true)).toBe(0x8);
+    expect(v.getUint32(bare.length, true)).toBe(0x11000022);
+    expect(u8(db.getFileData(0x11000022))).toEqual(degrade); // the 0x11 itself passes through
   });
 
   it('the untranslated bytes come from the set\'s copy (CharGen), a patch, or nowhere for other translated types', () => {

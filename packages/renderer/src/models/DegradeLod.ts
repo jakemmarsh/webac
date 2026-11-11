@@ -564,9 +564,23 @@ export class DegradeLod {
   /** Smoothed frame rate the controller last saw. */
   get framesPerSecond(): number { return this.fpsEma; }
 
+  /**
+   * Whether get_degrade shifts the distance by the Degrade Distance preference (the era's
+   * EraWorldRules.degradeDistanceShift). End of retail: GfxObjDegradeInfo::get_degrade @ 0051e4b0
+   * compares |dist| − Render::s_rDegradeDistance. 1999: get_degrade @ 0x0044b6d0 (client.exe)
+   * compares |dist| itself (`fld; fabs` straight into the loop) and the exe has no Degrade
+   * Distance option.
+   */
+  degradeDistanceShift = true;
+
+  /** The distance get_degrade subtracts: the preference, or 0 where the era has no shift. */
+  get effectiveDegradeDistance(): number {
+    return this.degradeDistanceShift ? this._prefs.degradeDistance : 0;
+  }
+
   /** Select a level for one part at `distance` (already divided by scale z). */
   levelFor(chain: DegradeChain, distance: number): number {
-    return selectDegradeLevel(chain.degrades, distance, this._prefs.degradeDistance, this.bias, this.forceLevel, this.disabled);
+    return selectDegradeLevel(chain.degrades, distance, this.effectiveDegradeDistance, this.bias, this.forceLevel, this.disabled);
   }
 
   /** Render::object_distance_2dsq as the controller currently holds it. */

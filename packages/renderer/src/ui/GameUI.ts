@@ -29854,11 +29854,16 @@ export class GameUI {
       // the texture menus (CORE.17.h.g.c) and chat fonts (CORE.17.h.g.b)
       // are live; Mouselook Sensitivity + Invert mouselook axes drive the
       // live camera (applyCameraConfig).
-      this.addSliderRow(content, configString('degradeDistance'),
-        this.optionsSettings.degradeDistance as number, R.degradeDistance.min, R.degradeDistance.max,
-        configString('close'), configString('far'), (v) => {
-          this.optionsSettings.degradeDistance = q(v); this.saveOptionsSettings(); this.applyDegradePrefs();
-        }, 'degradeDistance');
+      // Only where the era's get_degrade reads it (EraWorldRules.degradeDistanceShift): the 1999
+      // exe has no Degrade Distance (get_degrade @ 0x0044b6d0 compares |dist| itself), so the
+      // slider would do nothing there.
+      if (this.clientRules.world.degradeDistanceShift) {
+        this.addSliderRow(content, configString('degradeDistance'),
+          this.optionsSettings.degradeDistance as number, R.degradeDistance.min, R.degradeDistance.max,
+          configString('close'), configString('far'), (v) => {
+            this.optionsSettings.degradeDistance = q(v); this.saveOptionsSettings(); this.applyDegradePrefs();
+          }, 'degradeDistance');
+      }
 
       // ── Rendering Quality Options ── (ID_Graphics_TextureSection)
       this.addSectionHeader(content, configString('renderingQualitySection'));

@@ -15,11 +15,13 @@
  * PlayScript: docs/ac1999-support.md "Meaning checks") and SpellComponentTable
  * 0x0E00000F, ChatPoseTable 0x0E000007 and SkillTable 0x0E000004 (strings lose their NUL). Synthetic: the spell-component
  * DualDidMapper 0x27000002 the 1999 portal lacks (the client hardcoded the
- * map), served whatever the base, a streamed set included. Every other type
+ * map), served whatever the base, a streamed set included. A GfxObj also gets
+ * the DIDDegrade the 1999 client derives from its id (impliedDegradeId1999),
+ * a streamed set's already-translated GfxObjs included. Every other type
  * already parses and means the same (docs/ac1999-support.md). Cell routing: EnvCells.
  */
 import type { DatOverlay } from '../DatDatabase.js';
-import { transcodeEnvCell1999, transcodeEnvironment1999, transcodeGfxObj1999 } from './Geometry1999.js';
+import { impliedDegradeId1999, transcodeEnvCell1999, transcodeEnvironment1999, transcodeGfxObj1999, withDegradeId } from './Geometry1999.js';
 import {
   REGION_1999_HARDWARE_ID, SPELL_COMPONENT_MAPPER_ID, synthesizeSpellComponentMapper1999, transcodeCharGen1999,
   transcodeChatPoseTable1999, transcodePhysicsScriptTable1999, transcodeRegion1999, transcodeSkillTable1999, transcodeSpellComponentTable1999, transcodeSpellTable1999,
@@ -84,8 +86,16 @@ const SPELLCOMPONENTTABLE = 0x0e00000f;
 const CHATPOSETABLE = 0x0e000007;
 const SKILLTABLE = 0x0e000004;
 const REGION = 0x13000000;
+const GFXOBJ_PREFIX = 0x01;
 
-type Translate = (raw: ArrayBuffer, id: number, getRaw: (id: number) => ArrayBuffer | null) => ArrayBuffer | null;
+/** `has`: whether the DAT holds a file (a server patch or the container), without reading it. */
+type Translate = (raw: ArrayBuffer, id: number, getRaw: (id: number) => ArrayBuffer | null, has: (id: number) => boolean) => ArrayBuffer | null;
+
+/** The DIDDegrade a 1999 GfxObj gets: its implied 0x11 when the DAT holds one (impliedDegradeId1999), else 0. */
+function gfxObjDegradeId(id: number, has: (id: number) => boolean): number {
+  const degrade = impliedDegradeId1999(id);
+  return has(degrade) ? degrade : 0;
+}
 
 function portalTranslator(id: number): Translate | null {
   switch (id) {
@@ -98,7 +108,7 @@ function portalTranslator(id: number): Translate | null {
     default: break;
   }
   switch (id >>> 24) {
-    case 0x01: return (raw) => transcodeGfxObj1999(raw);
+    case 0x01: return (raw, i, _getRaw, has) => transcodeGfxObj1999(raw, gfxObjDegradeId(i, has));
     case 0x05: return (raw, i) => transcodeSurfaceTexture1999(raw, i);
     case 0x06: return (raw) => transcodeTexture1999(raw);
     case 0x08: return (raw) => transcodeSurface1999(raw);
@@ -135,7 +145,7 @@ function makeOverlay(
     patches,
     get cachedCount() { return cache.size; },
     clearCache() { cache.clear(); },
-    get(id, base) {
+    get(id, base, baseHas) {
       const build = constants.get(id);
       if (build) {
         const hit = cache.get(id);
@@ -146,8 +156,16 @@ function makeOverlay(
       }
       const r = route(id);
       if (!r) return patches.has(id) ? patches.get(id)! : undefined;
-      // An already-translated base: only a patched source needs translating.
-      if (translatedBase && !patches.has(r.from)) return undefined;
+      const has = (i: number): boolean => patches.has(i) || (baseHas ? baseHas(i) : base(i) !== null);
+      // An already-translated base: only a patched source needs translating. Its GfxObjs were
+      // translated before the implied DIDDegrade was written (a set published earlier): add it
+      // here (withDegradeId leaves a record that has one unchanged). Not cached: the base holds
+      // the bytes, and a file not resident yet (streamed) must be read again when it lands.
+      if (translatedBase && !patches.has(r.from)) {
+        if (id >>> 24 !== GFXOBJ_PREFIX) return undefined;
+        const served = base(id);
+        return served && withDegradeId(served, gfxObjDegradeId(id, has));
+      }
       const hit = cache.get(id);
       if (hit !== undefined) return hit;
       const getRaw = (i: number): ArrayBuffer | null => patches.get(i) ?? base(i);
@@ -155,7 +173,7 @@ function makeOverlay(
       let out: ArrayBuffer | null = null;
       if (raw) {
         try {
-          out = r.translate ? r.translate(raw, r.from === id ? id : r.from, getRaw) : raw;
+          out = r.translate ? r.translate(raw, r.from === id ? id : r.from, getRaw, has) : raw;
         } catch (err) {
           opts.onError?.(id, err);
           out = null;

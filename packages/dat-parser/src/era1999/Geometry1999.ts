@@ -196,8 +196,46 @@ class Geo {
   }
 }
 
-/** GfxObj (portal 0x01xxxxxx): 1999 u32 counts + pads → EoL compressed counts, no pads. */
-export function transcodeGfxObj1999(raw: ArrayBuffer): ArrayBuffer {
+/** EoL GfxObjFlags.HasDIDDegrade: the trailing DIDDegrade slot (file-types/GfxObj.ts). */
+const GFXOBJ_HAS_DID_DEGRADE = 0x8;
+
+/**
+ * The GfxObjDegradeInfo (0x11) a 1999 GfxObj implies. A 1999 GfxObj has no
+ * DIDDegrade field: CPhysicsPart::LoadGfxObjArray @ 0x004462c0 (1999
+ * client.exe) looks up `(gfxobj & 0xFFFFFF) | 0x11000000` and, when that file
+ * exists, builds the part's per-level GfxObj array from it (a level whose
+ * GfxObj id is 0 draws nothing); without one the part draws its GfxObj at
+ * every distance. End of retail reads the id from the GfxObj's own DIDDegrade
+ * (CPhysicsPart::LoadGfxObjArray @ 0050dcf0), so the translation writes the
+ * implied id into that slot when the 1999 portal holds the 0x11 file.
+ */
+export function impliedDegradeId1999(gfxObjId: number): number {
+  return (0x11000000 | (gfxObjId & 0xffffff)) >>> 0;
+}
+
+/**
+ * An end-of-retail GfxObj record with its DIDDegrade slot set to `degradeId`
+ * (flag 0x8 + the trailing u32). A record that already carries one, or a
+ * `degradeId` of 0, is returned unchanged.
+ */
+export function withDegradeId(eolGfxObj: ArrayBuffer, degradeId: number): ArrayBuffer {
+  if (!degradeId) return eolGfxObj;
+  if (eolGfxObj.byteLength < 8) throw new Error(`GfxObj: ${eolGfxObj.byteLength} bytes, shorter than id + flags`);
+  const flags = new DataView(eolGfxObj).getUint32(4, true);
+  if (flags & GFXOBJ_HAS_DID_DEGRADE) return eolGfxObj;
+  const out = new Uint8Array(eolGfxObj.byteLength + 4);
+  out.set(new Uint8Array(eolGfxObj));
+  const w = new DataView(out.buffer);
+  w.setUint32(4, (flags | GFXOBJ_HAS_DID_DEGRADE) >>> 0, true);
+  w.setUint32(eolGfxObj.byteLength, degradeId >>> 0, true);
+  return out.buffer;
+}
+
+/**
+ * GfxObj (portal 0x01xxxxxx): 1999 u32 counts + pads → EoL compressed counts, no pads.
+ * `degradeId` (impliedDegradeId1999, when the 1999 portal holds it) fills the EoL DIDDegrade slot.
+ */
+export function transcodeGfxObj1999(raw: ArrayBuffer, degradeId = 0): ArrayBuffer {
   const g = new Geo(raw, 'GfxObj');
   const id = g.u32();
   g.what = `GfxObj 0x${id.toString(16).padStart(8, '0')}`;
@@ -229,7 +267,7 @@ export function transcodeGfxObj1999(raw: ArrayBuffer): ArrayBuffer {
   }
   if (flags & 0x8) g.u32(); // DIDDegrade
   g.dropAlign(); // CGfxObj::UnPack's closing PACK_ALIGN
-  return g.end();
+  return withDegradeId(g.end(), degradeId);
 }
 
 /** Environment (portal 0x0Dxxxxxx): same structure; only the per-polygon / per-node pads go. */

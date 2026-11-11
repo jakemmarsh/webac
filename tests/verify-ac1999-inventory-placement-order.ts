@@ -9,8 +9,9 @@
  * both servers (AC1999 Container_InsertInventoryItem inserts into m_Items / m_Packs; ACE
  * Container.TryAddToInventory shifts every PlacementPosition at or past it). A double-click pick-up
  * asks for slot 0 in both clients (1999 PlaceInBackpack @ 0x004ffb80 → ItemHolder_AttemptPlaceIn-
- * Container(item, player, 0, 1); EoL PlaceInBackpack @ 0055d8c0), and the AC1999 server's NPC give
- * (SimulateGiveObject), vendor buy and loot spawn (SpawnInContainer) all send slot 0 and insert at 0.
+ * Container(item, player, 0, 1); EoL PlaceInBackpack @ 0055d8c0), and the AC1999 server's vendor buy
+ * and loot spawn (SpawnInContainer) send slot 0 and insert at 0. (A give sends the receiver no 0x22
+ * at all, only the contained create: webac#29, tests/verify-give-receiver-placement.ts.)
  * So every one of them lands FIRST.
  *
  * Ours kept one guid → slot map with no shifting: the key's slot 0 tied with the item already at 0
@@ -122,7 +123,8 @@ describe('AC1999: every way an item enters the main pack lands where the server 
     expect(r.mainPack()).toEqual(['Key', 'A', 'B', 'C']);
   });
 
-  it('an NPC give (SimulateGiveObject: 0x22 slot 0 before the create) goes first, not after the others', () => {
+  it('a vendor buy / reward spawn (SpawnInContainer: 0x22 slot 0 before the create) goes first, not after the others', () => {
+    // (A give reaches the receiver as a contained create alone: tests/verify-give-receiver-placement.ts.)
     const r = rig();
     r.login([A, B, C]);
     r.send(move1999(POTION, PLAYER, 0));

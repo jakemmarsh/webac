@@ -560,6 +560,22 @@ describe('the Config page: a Landscape Detail Textures row on AC1999 and the cla
     ui.toggleOptionsPanel();
   });
 
+  it('Degrade Distance is listed only where get_degrade reads it: not in AC1999 (get_degrade @ 0x0044b6d0)', () => {
+    expect(R1999.world.degradeDistanceShift).toBe(false);
+    let ui = makeUi(R1999);
+    openConfig(ui);
+    expect(rowOf(ui, 'degradeDistance')).toBeNull();
+    expect(rowOf(ui, 'adaptiveDegradeBias')).not.toBeNull();
+    ui.toggleOptionsPanel();
+    for (const [id, rules] of [['eor', EOR] as const, ...CLASSIC]) {
+      expect(rules.world.degradeDistanceShift, id).toBe(true);
+      ui = makeUi(rules);
+      openConfig(ui);
+      expect(rowOf(ui, 'degradeDistance'), id).not.toBeNull();
+      ui.toggleOptionsPanel();
+    }
+  });
+
   it('every classic era lists it, unless the world says its region texture is opaque (Classic Dereth)', () => {
     for (const [id, rules] of CLASSIC) {
       const ui = makeUi(rules);

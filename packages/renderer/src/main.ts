@@ -343,7 +343,7 @@ import type { NetDiagnostics, ConnectionEvent, CharacterListData, CharacterCreat
 import { ServerMessageHandler } from './network/ServerMessageHandler.js';
 import { applySetStackSize } from './network/applySetStackSize.js';
 import { getObjectSplitSize } from './inventory/dragSplit.js';
-import { applyContainIdOrder } from './inventory/applyContainIdOrder.js';
+import { applyContainIdOrder, applyContainOnCreate } from './inventory/applyContainIdOrder.js';
 import {
   attemptToPlaceInContainer, placeInBackpack as placeInBackpackDecision, acceptItemListDrop,
   type PlacementWorld, type PlacementObject, type PlacementResult,
@@ -2250,6 +2250,8 @@ async function main() {
   // SceneryInstancePool.updateLod, per-object parts via updateParts). The
   // persisted prefs are applied before the first part is built.
   const degradeLod = new DegradeLod(worldPortalDb);
+  // The 1999 get_degrade @ 0x0044b6d0 has no Degrade Distance shift (EraWorldRules.degradeDistanceShift).
+  degradeLod.degradeDistanceShift = eraRules.world.degradeDistanceShift;
   /** SceneTool::UpdateFPSCounter + gmSmartBoxUI's @framerate meter (ui/FramerateMeter.ts). */
   let framerateMeter: FramerateMeter | null = null;
   const framerate = (): FramerateMeter => (framerateMeter ??= new FramerateMeter(framerateMeterTemplate()));
@@ -10144,6 +10146,18 @@ async function main() {
           // ObjectUpdate this refreshes the existing entry's name/icon/
           // appearance in place (the retail destroy-and-recreate semantic).
           playerState.inventory.addItem(buildInventoryEntry(data), data.guid);
+          // webac#29 — ACCObjectMaint::SetWeenieDesc @ 00557a20 (1999: 0x004df510): a contained
+          // create keeps its place in its container's list, or goes first when not listed. An
+          // AC1999 / GDLE give reaches the receiver as this create alone (the server inserts at
+          // slot 0); pre-fix it fell to the end of the pack until a relog put it first.
+          if (!isUpdate) {
+            const placed = applyContainOnCreate(playerState.inventory, data);
+            if (placed.changed && placed.packs && aceCharGuid !== null && data.containerId === aceCharGuid && sidePackGuids.length > 2) {
+              packPlacement = playerState.inventory.containerOrder(aceCharGuid, true);
+              reorderSidePacks();
+              gameUI.setSidePackGuids([...sidePackGuids]);
+            }
+          }
           // CORE.17.k.b.b.c.c.a.a.c.a.b.a — gmSecureTradeUI::
           // ItemAttributesChanged @ 004ca9d0: the split-off stack a trade
           // drop asked for joins the trade when it reaches the player.
@@ -21440,7 +21454,7 @@ async function main() {
       // meshes laid out against Render::viewer_pos (the camera) and the
       // degrade preferences (billboards, the particle LOD cut).
       sceneManager.camera.getWorldPosition(particleView.viewer);
-      particleView.degradeDistance = degradeLod.prefs.degradeDistance;
+      particleView.degradeDistance = degradeLod.effectiveDegradeDistance;
       particleView.bias = degradeLod.bias;
       particleView.particleDistance2dSq = degradeLod.controller.particleDistance2dSq;
       particleView.forceLevel = degradeLod.forceLevel;

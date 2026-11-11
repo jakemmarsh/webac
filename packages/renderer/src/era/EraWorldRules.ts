@@ -90,6 +90,17 @@ export interface EraWorldRules {
    */
   skyObjectsOnTick: boolean;
   /**
+   * The degrade (LOD) pick subtracts the Degrade Distance preference from the viewer distance.
+   * End of retail: GfxObjDegradeInfo::get_degrade @ 0051e4b0 (|dist| − Render::s_rDegradeDistance,
+   * Config "Degrade Distance"). 1999: get_degrade @ 0x0044b6d0 compares |dist| itself, and the
+   * 1999 exe has no Degrade Distance option (its only degrade string is "Auto-Degrade"). Everything
+   * else in the pick is the same in both exes: the disabled / force-level overrides, the bias
+   * formulas (≥ 0: ideal − (ideal − max)·bias; < 0: ideal + (ideal − min)·bias), the last level
+   * past every threshold, the player's own parts at level 0 (0x00446f90), dist / gfxobj_scale.z,
+   * and the 50 m land-cell distance (0x0057eb60, 0x0060e618 = 50.0).
+   */
+  degradeDistanceShift: boolean;
+  /**
    * The hourglass while an inventory request is pending. 1999: PanelUI_Global_Loop raises the busy
    * count while ACCWeenieObject_get_prevRequest() is non-zero and drops it when the request clears.
    * End of retail has no such site (ui/BusyCount.ts).
@@ -237,6 +248,7 @@ export const EOR_WORLD_RULES: EraWorldRules = Object.freeze({
   afterCharacterCreate: 'enterWorld' as const,
   selectionFlipEndCount: 5,
   skyObjectsOnTick: false,
+  degradeDistanceShift: true,
   inventoryRequestBusy: false,
   chatHistory: Object.freeze({ max: 100, trimTo: 100 }),
   textureSampling: 'prefs' as const,
@@ -276,6 +288,7 @@ export const AC1999_WORLD_RULES: EraWorldRules = Object.freeze({
   afterCharacterCreate: 'characterSelect' as const,
   selectionFlipEndCount: 3,
   skyObjectsOnTick: true,
+  degradeDistanceShift: false,
   inventoryRequestBusy: true,
   chatHistory: Object.freeze({ max: 300, trimTo: 200 }),
   textureSampling: 'bilinearNoMips' as const,

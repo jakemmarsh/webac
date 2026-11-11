@@ -60,8 +60,12 @@ export function isReadableDirBranch(offset: number, fileLength: number): boolean
  * unchanged.
  */
 export interface DatOverlay {
-  /** Bytes to serve for `id`, or undefined to serve the container's own (`base`). */
-  get(id: number, base: (id: number) => ArrayBuffer | null): ArrayBuffer | null | undefined;
+  /**
+   * Bytes to serve for `id`, or undefined to serve the container's own (`base`).
+   * `baseHas` answers whether the container holds a file (resident or not) without reading it
+   * (DatDatabase always passes it; absent, an overlay reads `base` to tell).
+   */
+  get(id: number, base: (id: number) => ArrayBuffer | null, baseHas?: (id: number) => boolean): ArrayBuffer | null | undefined;
   /** Whether `id` exists; `baseHas` answers for the container (any id). */
   has(id: number, baseHas: (id: number) => boolean): boolean;
   /** Extra ids the overlay serves that the container lacks (optionally of one type prefix); `baseIds` lists the container's. */
@@ -482,7 +486,7 @@ export class DatDatabase implements DatFileSource {
    */
   getFileData(fileId: number): ArrayBuffer | null {
     if (this.overlay) {
-      const served = this.overlay.get(fileId >>> 0, (id) => this.getBaseFileData(id));
+      const served = this.overlay.get(fileId >>> 0, (id) => this.getBaseFileData(id), (id) => this.hasBaseFile(id));
       if (served !== undefined) return served;
     }
     return this.getBaseFileData(fileId);

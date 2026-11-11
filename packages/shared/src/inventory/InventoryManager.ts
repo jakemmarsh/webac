@@ -234,6 +234,21 @@ export class InventoryManager {
   }
 
   /**
+   * webac#29 — a CreateObject (or re-sent create) of an object that names a container: retail's
+   * ACCObjectMaint::SetWeenieDesc @ 00557a20 (1999: 0x004df510) looks the object up in that
+   * container's list (GetPlaceInItemsList / GetPlaceInContainersList, -1 when absent), takes 0 when
+   * it is not there, and calls ServerSaysMoveItem(container, place) → AddContent. So an object the
+   * container already lists keeps its place, and one it doesn't goes FIRST. A guid listed under the
+   * same container in either list counts as already there. True when the order changed.
+   */
+  containOnCreate(guid: number, containerId: number, packs = false): boolean {
+    const cur = this._listOf.get(guid);
+    if (cur === InventoryManager.listKey(containerId, false) || cur === InventoryManager.listKey(containerId, true)) return false;
+    this.setSlotForItem(guid, 0, containerId, packs);
+    return true;
+  }
+
+  /**
    * ServerSaysMoveItem with no container (a wield, 0x23): the item leaves its container's list
    * (RemoveContent), so the items after it move up and the server's later slots line up.
    */
