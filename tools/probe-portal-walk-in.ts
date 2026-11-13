@@ -19,6 +19,10 @@
  *   brush        @create PORTAL, strafe 2.6 m, walk forward past it: no try.
  *   side         @create PORTAL, strafe 0.8 m, walk forward: an off-centre walk-in.
  *   ontop        @teleloc onto a portal's own position, wait, walk 1 m.
+ *   graze        MON 2026-11-13 (prod traces 80bb16163b8ab6fb sentClosest 1.88, fa1539f3d8670e79 1.91, both
+ *                against reach 1.92, no teleport): strafe GRAZE_MS (ms list, default 950..1150) off-centre and
+ *                walk straight past, one pass per value; prints the body's closest pass, whether it teleported,
+ *                and the telemetry's sentClosest / sentReached.
  *
  *   BASE=http://localhost:5477/ ACCT=testacjs3 npx tsx tools/probe-portal-walk-in.ts [scenario ...]
  *
@@ -56,8 +60,8 @@ await page.route('**/client-preworld', async (route) => {
     const ev = JSON.parse(body) as Record<string, unknown>;
     if (typeof ev.outcome === 'string' && ev.outcome.startsWith('portal_')) {
       events.push(ev);
-      const { outcome, trigger, wcid, useSent, serverWalk, overlapped, closest, weenieErrors, chatTemplate, endDist, waitedMs, ms } = ev;
-      console.log(`${ts()} EVENT ${JSON.stringify({ outcome, trigger, wcid, useSent, serverWalk, overlapped, closest, weenieErrors, chatTemplate, endDist, waitedMs, ms })}`);
+      const { outcome, trigger, wcid, useSent, serverWalk, overlapped, closest, weenieErrors, chatTemplate, endDist, waitedMs, ms, sentClosest, sentReached } = ev;
+      console.log(`${ts()} EVENT ${JSON.stringify({ outcome, trigger, wcid, useSent, serverWalk, overlapped, closest, weenieErrors, chatTemplate, endDist, waitedMs, ms, sentClosest, sentReached })}`);
     }
   } catch { /* not JSON */ }
   await route.fulfill({ status: 204, body: '' });
@@ -168,6 +172,24 @@ if (run('brush')) {
   await settle('after brushing past');
   console.log(`${ts()} closest pass ${(await ev<number>('window.__portalProbeMin')).toFixed(2)} m (a touch needs < 1.84)`);
   await ev(`clearInterval(window.__portalProbeTimer)`);
+}
+if (run('graze')) {
+  const list = (process.env.GRAZE_MS ?? '950,1000,1030,1060,1100,1150').split(',').map(Number);
+  for (const strafeMs of list) {
+    await fresh(`graze: strafe ${strafeMs} ms, walk straight past a purple portal`);
+    await spawn(PORTAL);
+    await hold('KeyZ', strafeMs);
+    await page.waitForTimeout(1500);
+    await ev(`(() => { window.__portalProbeMin = 1e9; window.__portalProbeTimer = setInterval(() => { const ac = window.__ac; const p = ac.playerModel.position;
+      for (const [g, o] of ac.serverObjectManager.getAllObjects()) if (o.weenieClassId === ${PORTAL} && (g >>> 0) >= 0x80000000 && !ac.gameUI.worldHiddenByPortalSpace)
+        window.__portalProbeMin = Math.min(window.__portalProbeMin, Math.hypot(o.worldX - p.x, o.worldZ - p.z)); }, 20); })()`);
+    const before = await teleports();
+    await hold('KeyW', 2600);
+    await page.waitForTimeout(7000);
+    const min = await ev<number>('window.__portalProbeMin');
+    await ev(`clearInterval(window.__portalProbeTimer)`);
+    console.log(`${ts()} GRAZE strafeMs=${strafeMs} closest=${min.toFixed(2)} teleported=${(await teleports()) > before}`);
+  }
 }
 if (run('side')) {
   await fresh('side: walk into a purple portal 0.8 m off-centre');
