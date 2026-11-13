@@ -23,6 +23,8 @@ import {
 } from '../packages/renderer/src/telemetry/PreworldReporter.js';
 import { CreateStep } from '../packages/renderer/src/ui/CharacterCreate.js';
 import { installUnloadSessionClose, logOffCharacter } from '../packages/renderer/src/session/PlayerModuleSave.js';
+import { PageHideClose } from '../packages/renderer/src/session/UnexpectedDrop.js';
+import { sessionDropped } from '../packages/renderer/src/session/SessionLiveness.js';
 import { CharacterError, CharacterGenerationVerificationResponse, characterCreateErrorToken } from '../packages/shared/src/index.js';
 
 const ACCOUNT = 'secretacct77';
@@ -695,12 +697,13 @@ describe('closing the tab: the screen is the one the player left, not the one th
       screen: () => preworldScreenFor({ ...st, charListReceived: r.characterListReceived }),
       now: () => clock.t, trace: 'feedc0de12345678', send: (_u, raw) => sent.push({ body: JSON.parse(raw) as PreworldEvent, raw }),
     });
-    const winL = new Map<string, Array<() => void>>();
+    const winL = new Map<string, Array<(ev: { persisted?: boolean }) => void>>();
     const docL = new Map<string, () => void>();
     const win = {
-      addEventListener: (t: string, l: () => void) => { winL.set(t, [...(winL.get(t) ?? []), l]); },
+      addEventListener: (t: string, l: (ev: { persisted?: boolean }) => void) => { winL.set(t, [...(winL.get(t) ?? []), l]); },
       setInterval: () => 1,
     };
+    const fire = (t: string, ev: { persisted?: boolean } = {}): void => { for (const l of winL.get(t) ?? []) l(ev); };
     const doc = { visibilityState: 'visible', addEventListener: (t: string, l: () => void) => { docL.set(t, l); } };
     // main(): the reporter installs at boot, the unload wiring later (after the connection exists).
     r.install(win as never, doc as never);
@@ -710,25 +713,36 @@ describe('closing the tab: the screen is the one the player left, not the one th
       () => r.connectAttempt());
     wireLikeMain(conn, r);
     let inWorld = false;
+    // main.ts: the session's end goes through PageHideClose (BUG.beforeunload-silent-disconnect).
+    const pageHideClose = new PageHideClose();
+    const drops: Array<{ inWorld: boolean; pageHide: boolean }> = [];
     conn.on((e) => {
       if (e.type !== 'disconnected') return;
-      const droppedInWorld = inWorld;
-      inWorld = false;
-      if (st.gameStarted) st.gameStarted = false; // teardownWorldState
-      if (e.everOpened && !e.deliberate && !droppedInWorld) r.dropped();
+      pageHideClose.ended((pageHideDrop) => {
+        const droppedInWorld = inWorld;
+        inWorld = false;
+        if (st.gameStarted) st.gameStarted = false; // teardownWorldState
+        const unexpected = sessionDropped(e) || (pageHideDrop && e.everOpened === true);
+        if (unexpected) drops.push({ inWorld: droppedInWorld, pageHide: pageHideDrop });
+        if (unexpected && !droppedInWorld) r.dropped();
+      });
     });
     const flushes: string[] = [];
     const module = { flushChatOptionsSave: () => { flushes.push(`flush@${st.gameStarted ? 'world' : 'pre'}`); } };
     let stamped = false;
-    installUnloadSessionClose(win, { module, connection: conn, reporter: r, after: () => { stamped = true; } });
+    installUnloadSessionClose(win, {
+      module, connection: conn, reporter: r, after: () => { stamped = true; },
+      closing: () => pageHideClose.closing(), restored: (persisted) => pageHideClose.shown(persisted),
+    });
     const closeTab = (): void => {
       // The browser's order on a tab close: beforeunload, pagehide, then visibilitychange (hidden).
-      for (const l of winL.get('beforeunload') ?? []) l();
-      for (const l of winL.get('pagehide') ?? []) l();
+      fire('beforeunload');
+      fire('pagehide', { persisted: false });
       doc.visibilityState = 'hidden';
       docL.get('visibilitychange')!();
     };
     const login = (): void => {
+      pageHideClose.connectAttempt();
       conn.connect(ACCOUNT, PASSWORD);
       clock.t += 50;
       FakeSocket.sockets.at(-1)!.open();
@@ -741,7 +755,10 @@ describe('closing the tab: the screen is the one the player left, not the one th
       st.gameStarted = true; inWorld = true;
       r.enteredWorld();
     };
-    return { r, sent, clock, st, conn, closeTab, login, enterWorld, flushes, stamped: () => stamped, setDisconnectedScreen: (v: boolean) => { st.disconnected = v; } };
+    return {
+      r, sent, clock, st, conn, closeTab, login, enterWorld, flushes, stamped: () => stamped, setDisconnectedScreen: (v: boolean) => { st.disconnected = v; },
+      fire, drops, doc, docL, isInWorld: () => inWorld,
+    };
   }
 
   for (const era of ['eor', 'ac1999'] as const) {
@@ -754,8 +771,11 @@ describe('closing the tab: the screen is the one the player left, not the one th
       expect(p.sent.map(s => [s.body.outcome, s.body.screen])).toEqual([['char_list', 'char-select'], ['enter_ok', 'world']]);
       // The unload still saved and closed the session, in that order, and ran main's sessionStorage stamp.
       expect(p.flushes).toEqual(['flush@world']);
-      expect(p.st.gameStarted).toBe(false);
+      expect(p.conn.isConnected).toBe(false);
+      expect(FakeSocket.sockets.at(-1)!.closed).toBe(true);
       expect(p.stamped()).toBe(true);
+      // The close's end is held while the page may be gone for good: no teardown, no drop, no resume.
+      expect(p.drops).toEqual([]);
       expectClean(p as unknown as Harness);
     });
 
@@ -803,6 +823,91 @@ describe('closing the tab: the screen is the one the player left, not the one th
     q.r.pageUnloading();
     q.r.pageLeft();
     expect(q.sent.map(s => [s.body.outcome, s.body.screen])).toEqual([['page_left', 'server-select']]);
+  });
+
+  // BUG.beforeunload-silent-disconnect — production 2026-11-12 22:05Z (AC1999, build 4f0495fd6): beforeunload fired on a
+  // page that then stayed (a "Leave site?" answered Stay). The handler closed the session deliberately (no resume) and
+  // froze the screen sample: FINISH went out on a dead socket, and every later event said chargen/skills.
+  for (const era of ['eor', 'ac1999'] as const) {
+    /** Logged in with a live session (the AC1999 connection is connected once the server granted the login). */
+    const livePage = () => {
+      const p = page(era);
+      p.login();
+      if (era === 'ac1999') FakeSocket.sockets.at(-1)!.deliver(grant1999(VERSION_1999));
+      expect(p.conn.isConnected).toBe(true);
+      return p;
+    };
+
+    it(`${era}: beforeunload with no pagehide (the page stayed) leaves the session up and the telemetry live`, () => {
+      const p = livePage();
+      p.st.uiScreen = 'character-create';
+      p.r.sample();
+      p.fire('beforeunload');
+      expect(p.conn.isConnected).toBe(true);
+      expect(FakeSocket.sockets.at(-1)!.closed).toBe(false);
+      expect(p.flushes).toEqual([]);
+      expect(p.drops).toEqual([]);
+      // The screen sample follows the page: back to character select, then into the world.
+      p.st.uiScreen = 'character-select';
+      expect(p.r.sample().screen).toBe('char-select');
+      p.enterWorld();
+      expect(p.r.sample().screen).toBe('world');
+      expect(p.sent.map(s => s.body.outcome)).toEqual(['char_list', 'enter_ok']);
+    });
+
+    it(`${era}: pagehide closes the session (save first) and the end is held; a page that never comes back reports nothing more`, () => {
+      const p = livePage();
+      p.st.uiScreen = 'character-create';
+      p.fire('pagehide', { persisted: true });
+      expect(p.flushes).toEqual(['flush@pre']);
+      expect(p.conn.isConnected).toBe(false);
+      expect(FakeSocket.sockets.at(-1)!.closed).toBe(true);
+      expect(p.drops).toEqual([]);
+      expect(p.sent.map(s => [s.body.outcome, s.body.screen])).toEqual([['char_list', 'char-select'], ['page_left', 'chargen']]);
+    });
+
+    it(`${era}: back from the back/forward cache, the closed session is a drop (resumed through the drop path) and the telemetry is live`, () => {
+      const p = livePage();
+      p.st.uiScreen = 'character-create';
+      p.fire('pagehide', { persisted: true });
+      p.doc.visibilityState = 'hidden';
+      p.docL.get('visibilitychange')!();
+      p.clock.t += 60_000;
+      p.doc.visibilityState = 'visible';
+      p.fire('pageshow', { persisted: true });
+      expect(p.drops).toEqual([{ inWorld: false, pageHide: true }]);
+      expect(p.sent.map(s => s.body.outcome)).toEqual(['char_list', 'page_left', 'dropped']);
+      // The sample reads the page again: the resume's login, the world, then a real close reports again.
+      p.login();
+      p.st.uiScreen = 'character-select';
+      expect(p.r.sample().screen).toBe('char-select');
+      p.enterWorld();
+      expect(p.r.sample().screen).toBe('world');
+      p.st.gameStarted = false; p.st.uiScreen = 'character-select';
+      p.closeTab();
+      expect(p.sent.at(-1)!.body).toMatchObject({ outcome: 'page_left', screen: 'char-select' });
+    });
+
+    it(`${era}: in the world, a bfcache restore drops the world session (the world resume), once`, () => {
+      const p = livePage();
+      p.enterWorld();
+      p.fire('pagehide', { persisted: true });
+      expect(p.st.gameStarted).toBe(true);
+      p.fire('pageshow', { persisted: true });
+      expect(p.drops).toEqual([{ inWorld: true, pageHide: true }]);
+      expect(p.st.gameStarted).toBe(false);
+      p.fire('pageshow', { persisted: true });
+      expect(p.drops).toHaveLength(1);
+    });
+  }
+
+  it('pagehide on a page with no connected session marks nothing: a later deliberate close stays ours', () => {
+    const p = page('eor');
+    p.fire('pagehide', { persisted: true });
+    p.fire('pageshow', { persisted: true });
+    p.login();
+    p.conn.disconnect();
+    expect(p.drops).toEqual([]);
   });
 });
 

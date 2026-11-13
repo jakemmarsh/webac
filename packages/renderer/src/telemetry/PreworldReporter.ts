@@ -1093,9 +1093,8 @@ export class PreworldReporter {
   }
 
   /**
-   * The page began to unload (beforeunload), called BEFORE the unload path
-   * logs the character off (session/PlayerModuleSave.ts
-   * installUnloadSessionClose). That logoff tears the world down
+   * The page is leaving (pagehide), called BEFORE the leave path logs the
+   * character off (session/PlayerModuleSave.ts installUnloadSessionClose). That logoff tears the world down
    * (gameStarted false, the session gone), so a screen read afterwards says
    * 'connecting' and every in-world tab close used to report a pre-world
    * page_left (production, build aaa40225). The screen is fixed here, as the
@@ -1108,6 +1107,20 @@ export class PreworldReporter {
     const s = this.sample();
     this.unloadSample = s;
     if (!PRE_WORLD.has(s.screen)) this.left = true;
+  }
+
+  /**
+   * BUG.beforeunload-silent-disconnect — the page came back from the
+   * back/forward cache (pageshow, persisted): it did not leave after all. The
+   * screen is read live again and a later leave is reported. Until this, a
+   * sample fixed by an unload that never happened (it was taken on
+   * beforeunload then) reported every later event of the page from that
+   * screen: a player who logged in again and entered the world still read
+   * chargen/skills (production, AC1999, 2026-11-12).
+   */
+  pageRestored(): void {
+    this.unloadSample = null;
+    this.left = false;
   }
 
   /**

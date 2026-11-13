@@ -248,6 +248,28 @@ export function browserNetChannel(name = 'acjs-utilitybelt'): NetChannel | null 
 
 // The tab's client, for the macro (one game per tab).
 let active: UbNet | null = null;
+/**
+ * A tab leaving (pagehide) says goodbye, so the others drop it at once (else
+ * after 10 s of silence). BUG.beforeunload-silent-disconnect (sweep): a page
+ * put in the back/forward cache comes back (pageshow, persisted) and says
+ * hello again; the listener used to be `once` with nothing to restart it, so a
+ * restored tab ticked on with the net stopped and the other tabs never saw it
+ * again. `current`: this net is still the tab's (a later login replaces it).
+ * Returns the remover.
+ */
+export function bindUbNetToPage(
+  win: { addEventListener(type: string, l: (ev: { persisted?: boolean }) => void): void; removeEventListener(type: string, l: (ev: { persisted?: boolean }) => void): void } | undefined,
+  net: Pick<UbNet, 'start' | 'stop'>,
+  current: () => boolean,
+): () => void {
+  if (!win?.addEventListener) return () => {};
+  const hide = (): void => { if (current()) net.stop(); };
+  const show = (ev: { persisted?: boolean }): void => { if (ev?.persisted === true && current()) net.start(); };
+  win.addEventListener('pagehide', hide);
+  win.addEventListener('pageshow', show);
+  return () => { win.removeEventListener('pagehide', hide); win.removeEventListener('pageshow', show); };
+}
+
 export function setActiveUbNet(net: UbNet | null): void { active = net; }
 export function activeUbNet(): UbNet | null { return active; }
 

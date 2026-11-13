@@ -410,7 +410,7 @@ import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid } fro
 import { LoginRefusalMemory } from './session/LoginRefusalMemory.js';
 import { ProvenLoginRetry, firstTimeLoginRetryAllowed, type LoginCredentials } from './session/ProvenLoginRetry.js';
 import { LoginCaseFallback, LoginCaseMemory, passwordCaseFor } from './session/LoginCredentialCase.js';
-import { armDropResume, handleUnexpectedDrop, resumeAttemptRefusalIsFinal, silentReloginDrop } from './session/UnexpectedDrop.js';
+import { PageHideClose, armDropResume, handleUnexpectedDrop, resumeAttemptRefusalIsFinal, sessionLiveForSend, silentReloginDrop } from './session/UnexpectedDrop.js';
 import { SessionLiveness, sessionDropped, characterListRole } from './session/SessionLiveness.js';
 import { ChargenDraftStore, decideChargenDraft, CHARGEN_DRAFT_OFFER_TEXT, type ChargenDraftOwner } from './session/ChargenResume.js';
 import { DrainHandover } from './session/DrainHandover.js';
@@ -6090,31 +6090,7 @@ async function main() {
         const net = aceConnection.getDiagnostics();
         const cause = linkDeadCause(sample);
         console.warn(`[AC:NET] No server data for ${Math.round(sample.secondsSinceLastPacket)} s (${cause}) — connection diagnostics: ${JSON.stringify(net)}`);
-        const verdict = handleUnexpectedDrop({
-          lifecycle: sessionLifecycle,
-          reportLeft: () => worldReporter?.left('disconnected', { endCause: cause, net }),
-          teardownWorld: () => {
-            if (linkStatusIntervalId !== null) { clearInterval(linkStatusIntervalId); linkStatusIntervalId = null; }
-            if (gameStarted || gameplayUi.isShown) teardownWorldState();
-            gameUI.setIndicatorActive('connection', false);
-            pingLatencyTracker.reset();
-          },
-          // Closes the dead socket itself (a deliberate close: its
-          // 'disconnected' reports and schedules nothing more).
-          scheduleResume: () => scheduleResume({ silentRelogin: silentReloginDrop(cause, activeEra) }),
-          raiseServerDied: () => raiseServerDied(undefined, cause, net),
-          // UX.charselect-resume — the tick outlives a logout: a dead session at character select
-          // (or in chargen, or Entering World) resumes as the socket's own close does.
-          armPreworldResume: () => armDropResume(sessionLifecycle, {
-            unexpected: true,
-            wasInWorld: false,
-            enterPending: sessionLifecycle.enterWorldPending,
-            screen: preworldScreenAtDrop(sessionLiveness.isLive),
-            keepChargenDraft,
-            selection: () => gameUI.charSelectSelectionId,
-          }) !== null,
-        });
-        if (verdict === 'resuming' && sessionLifecycle.resumingWorld) { worldResumePending = true; drainHandover.onSessionDropped(); }
+        endDeadSession(cause, net);
       }
     }, LINK_STATUS_TICK_MS);
     // Reveal the WebGL canvas — kept hidden during pre-play to avoid sky bleed-through
@@ -8693,8 +8669,11 @@ async function main() {
   // reporter: a socket that never opens must not inherit the last session's character list (screen="char-select").
   // UX.chargen-resume — whether THIS session reached its character list, whichever socket carries it (SessionLiveness.ts).
   const sessionLiveness = new SessionLiveness();
+  // BUG.beforeunload-silent-disconnect — the session pagehide closes is a drop if the page comes back (bfcache).
+  const pageHideClose = new PageHideClose();
   reportConnectAttempts(aceConnection, (account, password) => {
     sessionLiveness.noteConnectAttempt();
+    pageHideClose.connectAttempt();
     // OBS.login-refusal-identity — the attempt's salted world + account tag (never the account itself).
     preworldReporter?.connectAttempt(accountTag(connectUrl, account));
     // OBS.login-after-refusal — the credentials as typed (connect()'s arguments; the connection applies the
@@ -8721,13 +8700,24 @@ async function main() {
   });
   accountTabGuard.watch(aceConnection, () => (aceAccount ? accountSessionKey(connectUrl, aceAccount) : null));
   preworldReporter?.setTabId(accountTabGuard.tabId);
-  // Clean up on page unload to prevent zombie WebSocket connections
-  // The dirty PlayerModule goes out before the socket closes (the pagehide
-  // flush runs after this handler, with no connection left); the pre-world
-  // reporter reads the screen before the disconnect tears the world down.
+  // Close the session when the page really goes (pagehide), so no zombie socket is left.
+  // The dirty PlayerModule goes out before the socket closes; the reporters read the
+  // screen before the disconnect tears the world down.
+  // BUG.beforeunload-silent-disconnect — on pagehide, not beforeunload (a "Leave site?"
+  // answered Stay kept the page with its session closed); a page back from the
+  // back/forward cache resumes the closed session as a drop (PageHideClose).
   installUnloadSessionClose(window, {
-    module: gameUI, connection: aceConnection, reporter: { pageUnloading: () => { preworldReporter?.pageUnloading(); worldReporter?.left('closed_tab'); } },
+    module: gameUI, connection: aceConnection,
+    reporter: {
+      pageUnloading: () => { preworldReporter?.pageUnloading(); worldReporter?.left('closed_tab'); },
+      pageRestored: () => preworldReporter?.pageRestored(),
+    },
     after: () => pageStorage('session').setItem('aceDisconnectTime', Date.now().toString()),
+    closing: () => pageHideClose.closing(),
+    restored: (persisted) => {
+      if (persisted) console.log('[AC] page restored from the back/forward cache');
+      pageHideClose.shown(persisted);
+    },
   });
   // Expose for debugging
   exposeDebugGlobal('__aceConnection', aceConnection);
@@ -8819,6 +8809,12 @@ async function main() {
   const enterRequestTimer = new RestartableTimer();
   /** An enter-world request (0xF7C8) went out: send it and start retail's 110 s budget. */
   const sendEnterWorldRequest = (): void => {
+    // BUG.beforeunload-silent-disconnect — a dead session would swallow the request and leave
+    // Entering World waiting out REQUEST_TIMEOUT: end it now (the enter resume enters this character).
+    if (!sessionLiveForSend(aceConnection, () => endDeadSession('link_dead'))) {
+      console.warn('[AC] ACE: enter-world request with no live session — ending it as a drop');
+      return;
+    }
     sessionLifecycle.noteEnterRequestSent();
     aceConnection.sendMessage(buildCharacterEnterWorldRequest(), GameMessageGroup.UIQueue);
     enterRequestTimer.schedule(() => {
@@ -8991,6 +8987,40 @@ async function main() {
     raiseClientNotice(gameUI, CN.reconnecting);
     resumeRunner.schedule(delay);
     return true;
+  };
+  /**
+   * The page found its session dead while the connection had not reported an end: the 40 s link
+   * check (BUG.link-dead-no-resume), or a send that needs the session on a connection no longer
+   * connected (BUG.beforeunload-silent-disconnect: chargen FINISH, the enter-world request).
+   * Ended as the socket's own unexpected close is: the world / chargen / enter / char-select
+   * resume, else the Disconnected screen (UnexpectedDrop.handleUnexpectedDrop).
+   */
+  const endDeadSession = (cause: 'link_dead' | 'client_suspended', net = aceConnection.getDiagnostics()): void => {
+    const verdict = handleUnexpectedDrop({
+      lifecycle: sessionLifecycle,
+      reportLeft: () => worldReporter?.left('disconnected', { endCause: cause, net }),
+      teardownWorld: () => {
+        if (linkStatusIntervalId !== null) { clearInterval(linkStatusIntervalId); linkStatusIntervalId = null; }
+        if (gameStarted || gameplayUi.isShown) teardownWorldState();
+        gameUI.setIndicatorActive('connection', false);
+        pingLatencyTracker.reset();
+      },
+      // Closes the dead socket itself (a deliberate close: its
+      // 'disconnected' reports and schedules nothing more).
+      scheduleResume: () => scheduleResume({ silentRelogin: silentReloginDrop(cause, activeEra) }),
+      raiseServerDied: () => raiseServerDied(undefined, cause, net),
+      // UX.charselect-resume — the tick outlives a logout: a dead session at character select
+      // (or in chargen, or Entering World) resumes as the socket's own close does.
+      armPreworldResume: () => armDropResume(sessionLifecycle, {
+        unexpected: true,
+        wasInWorld: false,
+        enterPending: sessionLifecycle.enterWorldPending,
+        screen: preworldScreenAtDrop(sessionLiveness.isLive),
+        keepChargenDraft,
+        selection: () => gameUI.charSelectSelectionId,
+      }) !== null,
+    });
+    if (verdict === 'resuming' && sessionLifecycle.resumingWorld) { worldResumePending = true; drainHandover.onSessionDropped(); }
   };
   /**
    * A bridge deploy (docs/bridge-handover.md): the draining bridge says so on
@@ -14966,6 +14996,15 @@ async function main() {
     gameUI.callbacks.onCharacterCreated = (wizard: CharacterCreateWizard) => {
       // No character list yet: no session to create on (GameUI shows the refusal).
       if (!aceCharList) return false;
+      // BUG.beforeunload-silent-disconnect — the session is dead under FINISH: the CharacterCreate
+      // would vanish and FINISH wait out its 20 s. End the session as a drop instead (the chargen
+      // resume keeps every choice), once GameUI has cleared its pending FINISH, so the draft is
+      // not kept as "FINISH sent".
+      if (!aceConnection.isConnected) {
+        console.warn('[AC] ACE: FINISH with no live session — ending it as a drop');
+        queueMicrotask(() => { sessionLiveForSend(aceConnection, () => endDeadSession('link_dead')); });
+        return 'session_lost';
+      }
 
       const info = wizard.getCharacterInfo();
       aceCharHeritage = info.heritage;
@@ -19050,6 +19089,74 @@ async function main() {
     }
     if (agentApiEnabled(window.location.search)) startAgent(true);
 
+    /**
+     * The session's end ('disconnected'). BUG.beforeunload-silent-disconnect — `pageHideDrop`: the
+     * page closed this session on pagehide and has come back from the back/forward cache, so for
+     * the player it dropped (session/UnexpectedDrop.ts PageHideClose).
+     */
+    const onSessionEnded = (event: ConnectionEvent, pageHideDrop: boolean): void => {
+      console.log(`[AC] ACE: Disconnected (everOpened=${event.everOpened === true}, deliberate=${event.deliberate === true})`);
+      // ASSESS — drop the dead world so a reconnect (or the next
+      // CharacterList) starts from a clean enter-world path instead
+      // of leaving a stale world behind character select. Not a
+      // deliberate logout: keep the last-entered character so
+      // the resume (scheduleResume) re-enters it.
+      const wasInWorld = sessionLifecycle.inWorld;
+      // A session ended under the player: its socket had opened and we did not close it (SessionLiveness.ts).
+      const unexpected = sessionDropped(event) || (pageHideDrop && event.everOpened === true);
+      // UX.chargen-resume / UX.charselect-resume — a drop in chargen keeps the draft, one at character
+      // select keeps the list and selection, one while Entering World waits enters the same character:
+      // each resumes the same way (session/UnexpectedDrop.ts armDropResume).
+      const dropResume = armDropResume(sessionLifecycle, {
+        unexpected,
+        wasInWorld,
+        enterPending: sessionLifecycle.enterWorldPending,
+        screen: preworldScreenAtDrop(sessionLiveness.isLive),
+        keepChargenDraft,
+        selection: () => gameUI.charSelectSelectionId,
+      });
+      sessionLiveness.noteEnded();
+      const droppedInWorld = dropResume !== null;
+      // RELEASE.first-minute — the world session ended under the player (a no-op after a tab close).
+      // BUG.hidden-tab-session-drop — with what ended it (a network close vs the client's own verdict).
+      // OBS.dm-stall-diagnostics — with the connection's state at the drop (the worker's
+      // snapshot that came with this event); WorldReporter keeps it only for a silent / closed session.
+      const dropNet = aceConnection.getDiagnostics();
+      if (event.endCause === 'server_silent' || event.endCause === 'client_suspended' || event.endCause === 'socket_closed') {
+        console.warn(`[AC:NET] Session ended (${event.endCause}${event.closeCode ? ` ${event.closeCode}` : ''}) — connection diagnostics: ${JSON.stringify(dropNet)}`);
+      }
+      worldReporter?.left('disconnected', { endCause: event.endCause, closeCode: event.closeCode, net: dropNet });
+      sessionLifecycle.noteDisconnected();
+      // A teardown that throws must not swallow the drop (the listener loop only logs it): the
+      // resume or the Disconnected screen below still runs.
+      try {
+        if (gameStarted || gameplayUi.isShown) teardownWorldState();
+      } catch (err) {
+        console.error('[AC] ACE: world teardown threw on disconnect — going on to the drop handling', err);
+      }
+      // FAITHFUL.260 — drop the 'connection' indicator on disconnect.
+      gameUI.setIndicatorActive('connection', false);
+      // A session-not-attached client has no meaningful latency to show.
+      pingLatencyTracker.reset();
+      // CORE.17.k.b — a live session dropped by the other side is
+      // ClientNet::RemoveConnection's ServerDied → the Disconnected
+      // screen. Our own disconnect() (logOffSent_ set) and a socket
+      // that never opened (no recipient existed; the 'error' event
+      // already raised ID_NetError_CantSocket) do not raise it. The
+      // old "Disconnected from ACE server. Type /reconnect to retry."
+      // chat line was a client diagnostic retail never printed.
+      if (unexpected) {
+        // Before the world (a resume attempt's session counts: its world_left already went out).
+        if (!wasInWorld) preworldReporter?.dropped(event.closeCode ?? null, event.endCause ?? null, dropNet);
+        // In the world (or mid-resume): reconnect and re-enter on our own first.
+        if (droppedInWorld && scheduleResume({ silentRelogin: silentReloginDrop(event.endCause, activeEra) })) {
+          if (sessionLifecycle.resumingWorld) { worldResumePending = true; drainHandover.onSessionDropped(); }
+          return;
+        }
+        raiseServerDied();
+      }
+    };
+
     const onSessionEvent = (event: ConnectionEvent): void => {
       // CORE.17.k — a dead server is NOT reported in chat. Retail signals
       // link trouble only through the Link Indicator (0x100000f8, green /
@@ -19690,60 +19797,7 @@ async function main() {
         }
 
         case 'disconnected':
-          console.log(`[AC] ACE: Disconnected (everOpened=${event.everOpened === true}, deliberate=${event.deliberate === true})`);
-          // ASSESS — drop the dead world so a reconnect (or the next
-          // CharacterList) starts from a clean enter-world path instead
-          // of leaving a stale world behind character select. Not a
-          // deliberate logout: keep the last-entered character so
-          // the resume (scheduleResume) re-enters it.
-          const wasInWorld = sessionLifecycle.inWorld;
-          // A session ended under the player: its socket had opened and we did not close it (SessionLiveness.ts).
-          const unexpected = sessionDropped(event);
-          // UX.chargen-resume / UX.charselect-resume — a drop in chargen keeps the draft, one at character
-          // select keeps the list and selection, one while Entering World waits enters the same character:
-          // each resumes the same way (session/UnexpectedDrop.ts armDropResume).
-          const dropResume = armDropResume(sessionLifecycle, {
-            unexpected,
-            wasInWorld,
-            enterPending: sessionLifecycle.enterWorldPending,
-            screen: preworldScreenAtDrop(sessionLiveness.isLive),
-            keepChargenDraft,
-            selection: () => gameUI.charSelectSelectionId,
-          });
-          sessionLiveness.noteEnded();
-          const droppedInWorld = dropResume !== null;
-          // RELEASE.first-minute — the world session ended under the player (a no-op after a tab close).
-          // BUG.hidden-tab-session-drop — with what ended it (a network close vs the client's own verdict).
-          // OBS.dm-stall-diagnostics — with the connection's state at the drop (the worker's
-          // snapshot that came with this event); WorldReporter keeps it only for a silent / closed session.
-          const dropNet = aceConnection.getDiagnostics();
-          if (event.endCause === 'server_silent' || event.endCause === 'client_suspended' || event.endCause === 'socket_closed') {
-            console.warn(`[AC:NET] Session ended (${event.endCause}${event.closeCode ? ` ${event.closeCode}` : ''}) — connection diagnostics: ${JSON.stringify(dropNet)}`);
-          }
-          worldReporter?.left('disconnected', { endCause: event.endCause, closeCode: event.closeCode, net: dropNet });
-          sessionLifecycle.noteDisconnected();
-          if (gameStarted || gameplayUi.isShown) teardownWorldState();
-          // FAITHFUL.260 — drop the 'connection' indicator on disconnect.
-          gameUI.setIndicatorActive('connection', false);
-          // A session-not-attached client has no meaningful latency to show.
-          pingLatencyTracker.reset();
-          // CORE.17.k.b — a live session dropped by the other side is
-          // ClientNet::RemoveConnection's ServerDied → the Disconnected
-          // screen. Our own disconnect() (logOffSent_ set) and a socket
-          // that never opened (no recipient existed; the 'error' event
-          // already raised ID_NetError_CantSocket) do not raise it. The
-          // old "Disconnected from ACE server. Type /reconnect to retry."
-          // chat line was a client diagnostic retail never printed.
-          if (unexpected) {
-            // Before the world (a resume attempt's session counts: its world_left already went out).
-            if (!wasInWorld) preworldReporter?.dropped(event.closeCode ?? null, event.endCause ?? null, dropNet);
-            // In the world (or mid-resume): reconnect and re-enter on our own first.
-            if (droppedInWorld && scheduleResume({ silentRelogin: silentReloginDrop(event.endCause, activeEra) })) {
-              if (sessionLifecycle.resumingWorld) { worldResumePending = true; drainHandover.onSessionDropped(); }
-              break;
-            }
-            raiseServerDied();
-          }
+          pageHideClose.ended((pageHideDrop) => onSessionEnded(event, pageHideDrop));
           break;
 
         case 'loginUnanswered': {

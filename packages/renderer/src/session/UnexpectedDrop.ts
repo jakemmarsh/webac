@@ -109,15 +109,93 @@ export interface DropResumeState {
 export function armDropResume(lifecycle: SessionLifecycle, s: DropResumeState): DropResumeKind | null {
   if (!s.unexpected) return null;
   if (s.wasInWorld || lifecycle.resumingAfterDrop) return 'world';
-  if (s.keepChargenDraft()) return 'chargen';
+  // BUG.beforeunload-silent-disconnect (sweep) — the 'disconnected' handler runs inside the
+  // connection's listener loop, which only console-logs a throw (NetWorkerClient.receive): a
+  // draft capture that threw ended the handler before the resume or the Disconnected screen,
+  // and the player sat on a dead session with nothing said. A capture that fails keeps no
+  // draft; the drop goes on to the next kind (or the Disconnected screen).
+  if (attempt(s.keepChargenDraft, false)) return 'chargen';
   // The player chose a character and the server had not answered: the world resume enters it
   // (noteEnterWorldRequested left it the last-entered character, and no logout intent).
   if (s.enterPending && lifecycle.lastEnteredCharacterGuid !== null) return 'enter';
   if (s.screen === 'char-select') {
-    lifecycle.beginCharSelectResume(s.selection?.());
+    lifecycle.beginCharSelectResume(s.selection ? attempt(s.selection, undefined) : undefined);
     return 'charselect';
   }
   return null;
+}
+
+function attempt<T>(f: () => T, fallback: T): T {
+  try { return f(); } catch (err) {
+    console.error('[AC] drop handling: a step threw — going on without it', err);
+    return fallback;
+  }
+}
+
+/**
+ * BUG.beforeunload-silent-disconnect — the page closes its session when it is
+ * really going away, on `pagehide` (main.ts installUnloadSessionClose). That
+ * close is ours (deliberate), so on its own it never resumes. A page the
+ * browser keeps in its back/forward cache comes back (`pageshow` with
+ * `persisted`) with that session gone, and for the player that is a drop like
+ * any other: this turns the close's 'disconnected' event into one, so it goes
+ * down path 1 of docs/reconnect.md (armDropResume → scheduleResume /
+ * the chargen resume), not a new reconnect.
+ *
+ * The close's event can arrive at any point: at once (Connection1999 ends
+ * in disconnect()), from the socket's close task, or from the network worker,
+ * whose reply a frozen page receives only after it is restored. So:
+ *  - before `pageshow` (the page may be gone for good) the event is held, and
+ *    nothing runs: a real unload reports and schedules nothing;
+ *  - `pageshow` runs a held event as a drop;
+ *  - an event arriving after `pageshow` is a drop;
+ *  - the page's next connect forgets an older close (nothing came of it).
+ */
+export class PageHideClose {
+  private state: 'none' | 'hidden' | 'restored' = 'none';
+  private held: (() => void) | null = null;
+
+  /** pagehide is closing a live session. Call BEFORE the disconnect: a close can report at once. */
+  closing(): void { this.state = 'hidden'; this.held = null; }
+
+  /** pageshow: true when the page came back from the back/forward cache. */
+  shown(persisted: boolean): void {
+    if (!persisted || this.state !== 'hidden') return;
+    const run = this.held;
+    this.held = null;
+    if (run) { this.state = 'none'; run(); } else this.state = 'restored';
+  }
+
+  /**
+   * The connection's 'disconnected' event: `handle(pageHideDrop)` now, later
+   * (held across a pagehide), or with `pageHideDrop` true when the close was
+   * ours on pagehide and the page has come back.
+   */
+  ended(handle: (pageHideDrop: boolean) => void): void {
+    if (this.state === 'hidden') { this.held = () => handle(true); return; }
+    const drop = this.state === 'restored';
+    this.state = 'none';
+    handle(drop);
+  }
+
+  /** The page starts a connect: an earlier pagehide close no longer applies. */
+  connectAttempt(): void { this.state = 'none'; this.held = null; }
+}
+
+/**
+ * BUG.beforeunload-silent-disconnect (inverse sweep) — a request that needs
+ * the live session (chargen FINISH's CharacterCreate, the enter-world request)
+ * went out on a connection that was no longer connected and vanished: the
+ * player waited out its timeout (FINISH: 20 s, then the catch-all refusal).
+ * The send now finds the session dead first and ends it the way the 40 s link
+ * check does (handleUnexpectedDrop: the chargen / enter / char-select resume,
+ * else the Disconnected screen). True when the session is live and the send
+ * may go.
+ */
+export function sessionLiveForSend(connection: { readonly isConnected: boolean }, endDeadSession: () => void): boolean {
+  if (connection.isConnected) return true;
+  endDeadSession();
+  return false;
 }
 
 /**

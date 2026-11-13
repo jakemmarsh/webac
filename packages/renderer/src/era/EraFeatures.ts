@@ -470,6 +470,18 @@ export interface EraClientRules {
    */
   statRaiseTen: boolean;
   /**
+   * BUG.ac1999-skill-xp-bar (webac#32) — whether a trained skill's "XP cost to raise skill" row is a
+   * meter filled with the XP the skill already banked toward its next rank. 1999: yes, the
+   * SkillInfoBox meter (ctor 0x00545250: track 0x060011a6, fill 0x06000f8a, at (5, 0x13) 0xe6 x 0xf)
+   * set by SetProficiencyPoints @ 0x00545ed0 to (pp − XpTable[rank]) / (XpTable[rank + 1] −
+   * XpTable[rank]), 0 when pp ≤ XpTable[rank]. The local DAT keeps that row as the meter footer
+   * 0x21000045:0x10000247 (page state 0x10000013, meter 0x10000247, fill child 0x2). End of retail:
+   * no. gmSkillUI::DisplaySelectionFooter_Trained @ 0049b860 sets the same fraction through
+   * GetFooterMeter @ 004f0260, but only page states 0x10000011 / 0x10000012 are ever set and the
+   * button footer 0x10000241 has no meter child, so nothing draws.
+   */
+  skillFooterMeter: boolean;
+  /**
    * The prompt before training a skill ("%d" credits, "%s" skill), or null when the client trains
    * at once. End of retail: gmSkillUI::TrainSkill @ 0049c5f0's .rdata 0x7a7864. 1999: the Raise
    * press sends 0x47 TrainSkill with no dialog (0x005471f9).
@@ -1259,6 +1271,7 @@ const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
   equipSlotMask: 0xffffffff,
   statFooterText: EOR_STAT_FOOTER_TEXT,
   statRaiseTen: true,
+  skillFooterMeter: false,
   trainSkillConfirm: EOR_TRAIN_SKILL_CONFIRM,
   combatBarOptions: Object.freeze(['repeatAttacks', 'autoTarget', 'keepCombatTargetsInView'] as const),
   // gmSpellbookUI::DeleteSpell @ 0048bd50 (.rdata 0x7a3ea8, its only reference @ 0048bdb6).
@@ -1340,6 +1353,7 @@ const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
   equipSlotMask: 0x1bf8000, // InventoryPanel @ 0x522fc0
   statFooterText: AC1999_STAT_FOOTER_TEXT,
   statRaiseTen: false,
+  skillFooterMeter: true,
   trainSkillConfirm: null,
   combatBarOptions: Object.freeze(['repeatAttacks', 'autoTarget'] as const), // CombatPanel @ 0x589bc0
   // 0x604e60 (its three leading layout newlines dropped), _snprintf'd with the row's spell name @ 0x516701.

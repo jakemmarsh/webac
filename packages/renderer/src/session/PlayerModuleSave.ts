@@ -14,7 +14,7 @@
  *    calls SaveToServer(false).
  *
  * The browser adds one exit retail never had: closing the tab. The save must
- * go out BEFORE the connection is torn down (the old beforeunload handler
+ * go out BEFORE the connection is torn down (an older unload handler
  * disconnected first, and the pagehide flush that followed had no socket).
  */
 
@@ -72,19 +72,57 @@ export function closeSessionOnUnload(module: PlayerModuleFlush, connection: { di
 }
 
 /**
- * main.ts's beforeunload: the pre-world reporter reads the screen FIRST
- * (PreworldReporter.pageUnloading), then the save + disconnect, then
- * `after`. The disconnect tears the world down, so a reporter that read the
- * screen later saw 'connecting' and counted every in-world tab close as a
+ * main.ts's page-leave wiring. On `pagehide` (the page is really going: closed,
+ * navigated away, or put in the back/forward cache): the reporters read the
+ * screen FIRST (PreworldReporter.pageUnloading), then the save + disconnect,
+ * then `after`. The disconnect tears the world down, so a reporter that read
+ * the screen later saw 'connecting' and counted every in-world tab close as a
  * pre-world walk-away.
+ *
+ * BUG.beforeunload-silent-disconnect — this ran on `beforeunload` until
+ * 2026-11-12. beforeunload is a request, not a departure: a "Leave site?"
+ * prompt answered Stay, or a navigation that turned into a download or an
+ * external protocol, keeps the page, and production saw the session closed
+ * under a player in chargen (a deliberate close, so no resume: FINISH went out
+ * on a dead socket and timed out) and the telemetry sample frozen at
+ * chargen/skills for the rest of the page. beforeunload was chosen only to stop
+ * zombie sockets (50fc1c8e2); pagehide covers that, and fires in every
+ * browser where beforeunload does not (iOS Safari). The server still gets the
+ * clean CharacterLogOff + Disconnect on a real unload.
+ *
+ * `pageshow` with `persisted` (back from the back/forward cache, the session
+ * closed): the reporters are live again (`reporter.pageRestored`) and
+ * `restored` runs (main.ts: PageHideClose.shown, the drop's resume).
+ * `closing` runs before the disconnect, only when a session is connected.
  */
+export interface PageLeaveTarget {
+  addEventListener(type: 'pagehide' | 'pageshow', listener: (ev: { persisted?: boolean }) => void): void;
+}
+
 export function installUnloadSessionClose(
-  win: { addEventListener(type: 'beforeunload', listener: () => void): void },
-  o: { module: PlayerModuleFlush; connection: { disconnect(): void }; reporter?: { pageUnloading(): void } | null; after?: () => void },
+  win: PageLeaveTarget,
+  o: {
+    module: PlayerModuleFlush;
+    connection: { disconnect(): void; readonly isConnected?: boolean };
+    reporter?: { pageUnloading(): void; pageRestored?(): void } | null;
+    after?: () => void;
+    closing?: () => void;
+    restored?: (persisted: boolean) => void;
+  },
 ): void {
-  win.addEventListener('beforeunload', () => {
+  win.addEventListener('pagehide', () => {
     try { o.reporter?.pageUnloading(); } catch { /* reporting must never block the save */ }
+    if (o.connection.isConnected !== false) {
+      try { o.closing?.(); } catch { /* never blocks the save */ }
+    }
     closeSessionOnUnload(o.module, o.connection);
     o.after?.();
+  });
+  win.addEventListener('pageshow', (ev) => {
+    const persisted = ev?.persisted === true;
+    if (persisted) {
+      try { o.reporter?.pageRestored?.(); } catch { /* reporting never blocks the resume */ }
+    }
+    o.restored?.(persisted);
   });
 }

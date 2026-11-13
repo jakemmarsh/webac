@@ -992,10 +992,10 @@ export const vendorBuyStep: Step = {
     const screenshots = await shots(ctx, 'vendor-open');
     const me = await self(ctx);
     const pick = cheapestAffordable(parseVendorListing(opened.message), me?.pyreals);
-    if (!pick) return skip(`${v.name} sells nothing ${me?.pyreals ?? 0} pyreals pay for`, { screenshots });
+    if (!pick) return skip(`${v.name} sells nothing ${me?.pyreals ?? 0} pyreals pay for`, { screenshots, allow: [VENDOR_BUSY] });
     const before = await driver.call<AgentItem[]>('inventory');
     const bought = await driver.call<AgentResult>('buy', [pick.guid, 1, v.guid], 60_000);
-    if (!bought.ok) return fail(`buying ${pick.name} (${pick.price}) from ${v.name}: ${msg(bought)}`, { screenshots });
+    if (!bought.ok) return fail(`buying ${pick.name} (${pick.price}) from ${v.name}: ${msg(bought)}`, { screenshots, allow: [VENDOR_BUSY] });
     // A new object, or (a stackable buy merged onto a stack the character held) that stack grown; the stack size can
     // arrive a moment after the buy's answer, so look for up to 3 s.
     let got: AgentItem | null = null;

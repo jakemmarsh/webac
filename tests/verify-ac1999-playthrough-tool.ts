@@ -380,6 +380,18 @@ describe('playthrough: vendor', () => {
     expect(r.status).toBe('skipped');
     expect(r.detail).toMatch(/sells nothing 0 pyreals pay for/);
   });
+  it('a vendor busy at first, then open, with nothing affordable: a skip that allows the retried "is busy" (gate 2026-11-12)', async () => {
+    let calls = 0;
+    const d = new FakeDriver({
+      observe: () => ({ me: null, nearby: [{ guid: 5, name: 'Merchant', kind: 'vendor', dist: 20, bearing: 0, relBearing: 0, dz: 0 }], remembered: [], dialogs: [] }),
+      self: () => ({ pyreals: 1 }),
+      vendorAt: () => (++calls === 1 ? { ok: false, message: 'Merchant is busy.' } : { ok: true, message: 'Merchant sells:\n  #00000009 Apple  5' }),
+    });
+    const r = await vendorBuyStep.run(ctxOf(d));
+    expect(calls).toBe(2);
+    expect(r.status).toBe('skipped');
+    expect(r.allow?.some((re) => re.test('_ is busy.'))).toBe(true);
+  });
 });
 
 describe('playthrough: chat commands', () => {

@@ -85,7 +85,7 @@ import type { UbMapUi, UbMapWhich } from './maps/UbMaps.js';
 type UbMapsControl = { toggle(which: UbMapWhich): string; closeAll(): void; close(which: UbMapWhich): void; isOpen(which: UbMapWhich): boolean };
 /** UtilityBelt's settings as the main window reads and flips them (agent/ub/ubSettings.ts UbStore). */
 type UbSettingsControl = { name(n: string): string | null; get(n: string): unknown; bool(n: string): boolean; setValue(k: string, v: boolean): void; display(k: string): string };
-import { UbNet, browserNetChannel, setActiveUbNet } from '../agent/ubNet.js';
+import { UbNet, bindUbNetToPage, browserNetChannel, setActiveUbNet } from '../agent/ubNet.js';
 import type { VtNames } from '@ac/shared';
 import { CHARACTER_SETTINGS_PAGE, CHARACTER_SETTINGS_ROWS, characterSettingString, characterSettingsRowForKey } from './CharacterSettingsModel.js';
 import {
@@ -1125,7 +1125,12 @@ export interface GameUIStreamingOptions {
 
 export interface GameUICallbacks {
   /** FINISH's CharacterCreate. Returning false means nothing went out (no session to send on). */
-  onCharacterCreated?: (wizard: CharacterCreateWizard) => boolean | void;
+  /**
+   * Send the CharacterCreate: true when sent; false when there is no session to send on (the
+   * catch-all refusal); 'session_lost' when the session was found dead and the page is ending it
+   * through the drop path (a resume or the Disconnected screen follows; no dialog here).
+   */
+  onCharacterCreated?: (wizard: CharacterCreateWizard) => boolean | 'session_lost' | void;
   /**
    * BUG.chargen-finish-silent — what FINISH did, for telemetry: 'sent' (a
    * CharacterCreate went out), 'blocked' + why nothing went out, or
@@ -8266,7 +8271,7 @@ export class GameUI {
     // catch-all refusal (RecvNotice_CharGenVerificationResponse's default
     // case, ID_Character_Err_NameDBDown) with FINISH usable again; the
     // exception still reaches the page's error reporting.
-    let sent: boolean | void;
+    let sent: boolean | 'session_lost' | void;
     try {
       sent = this.callbacks.onCharacterCreated?.(this.wizard);
     } catch (e) {
@@ -8279,6 +8284,12 @@ export class GameUI {
     if (sent === false) {
       this.chargenVerificationPending = false;
       this.showChargenFailureDialog();
+      return blocked('not_sent');
+    }
+    // BUG.beforeunload-silent-disconnect — the session was dead under FINISH: nothing went out,
+    // and the drop path takes over (the chargen resume keeps every choice; FINISH is usable again).
+    if (sent === 'session_lost') {
+      this.chargenVerificationPending = false;
       return blocked('not_sent');
     }
     this.callbacks.onChargenFinish?.('sent');
@@ -22051,6 +22062,20 @@ export class GameUI {
   }
 
   /**
+   * BUG.ac1999-skill-xp-bar (webac#32) — the 1999 SkillInfoBox meter's fill:
+   * SetProficiencyPoints @ 0x00545ed0 sets (pp − XpTable[rank]) / (XpTable[rank + 1] −
+   * XpTable[rank]) when pp > XpTable[rank], else 0 (an empty bar at a rank boundary). At the
+   * table's last rank there is no next step (ExperienceToSkillLevel gives 0xFFFFFFFF there and the
+   * 1999 meter clamps the negative ratio): 0. No pp, no table: 0.
+   */
+  static skillPartFraction(table: number[] | undefined, level: number, pp?: number): number {
+    const part = GameUI.skillPartFilled(table, level, pp);
+    if (!table || part <= 0) return 0;
+    const step = table[level + 1] - table[level];
+    return step > 0 ? Math.min(1, part / step) : 0;
+  }
+
+  /**
    * BUG.ac1999-attribute-raise (webac#4) — retail prices against the XP the
    * record says is spent: GetCostToRaise = ExperienceToAttributeLevel(ranks + 1)
    * − ExperienceSpent, GetCostToRaise10 the same at ranks + min(10, max − ranks)
@@ -22500,6 +22525,12 @@ export class GameUI {
     line2Label: string; line2Value: string;
     raiseEnabled: boolean; raise10Visible: boolean; raise10Enabled: boolean;
     onRaise: () => void; onRaise10: () => void;
+    /**
+     * BUG.ac1999-skill-xp-bar — the fill of the line-one meter (0..1), set only where the era draws
+     * one (EraClientRules.skillFooterMeter: the 1999 SkillInfoBox); the footer then shows the meter
+     * footer 0x10000247 in place of the button footer 0x10000241.
+     */
+    meterFraction?: number;
   } | null {
     // BUG.ac1999-eor-ui-values — the era client's footer wording (EraClientRules.statFooterText).
     const T = this.clientRules.statFooterText;
@@ -22586,6 +22617,8 @@ export class GameUI {
         raise10Enabled: costs.cost10 > 0 && costs.cost10 <= availXp,
         onRaise: () => this.raiseCallbacks.onRaiseSkill?.(skill.id, costs.cost1),
         onRaise10: () => this.raiseCallbacks.onRaiseSkill?.(skill.id, costs.cost10),
+        ...(this.clientRules.skillFooterMeter
+          ? { meterFraction: GameUI.skillPartFraction(table, skill.raises, skill.pp) } : {}),
       };
     }
     // Untrained/Unusable — train with skill credits (CORE.6.c: Unusable
@@ -22642,10 +22675,21 @@ export class GameUI {
   private renderStatPaneFooter(body: HTMLElement, kind: 'attributes' | 'skills'): void {
     const model = this.statFooterModel(kind);
 
+    // BUG.ac1999-skill-xp-bar — a model with a meter fill uses the DAT's meter footer 0x10000247
+    // (page state 0x10000013: the button footer's children plus the line-one meter 0x10000247,
+    // track 0x060011a6 under fill child 0x2, 0x06000f8a), the 1999 SkillInfoBox's row. Without
+    // one it stays hidden (end of retail never sets that state).
     const meterFooter = this.datChild(body, 0x10000247);
-    if (meterFooter) meterFooter.style.display = 'none';
+    const useMeter = model?.meterFraction !== undefined && meterFooter !== null;
+    if (meterFooter) meterFooter.style.display = useMeter ? 'block' : 'none';
     const promptFooter = this.datChild(body, 0x10000240);
-    const buttonFooter = this.datChild(body, 0x10000241);
+    const buttonOnlyFooter = this.datChild(body, 0x10000241);
+    if (useMeter && buttonOnlyFooter) buttonOnlyFooter.style.display = 'none';
+    const buttonFooter = useMeter ? meterFooter : buttonOnlyFooter;
+    if (useMeter && meterFooter) {
+      const fill = this.datChild(this.datChild(meterFooter, 0x10000247) ?? meterFooter, 0x2);
+      if (fill) fill.style.width = `${((model?.meterFraction ?? 0) * 100).toFixed(2)}%`;
+    }
 
     if (!model) {
       if (buttonFooter) buttonFooter.style.display = 'none';
@@ -24716,9 +24760,12 @@ export class GameUI {
   // UtilityBelt networking between this browser's game tabs (agent/ubNet.ts): /ub bc, bct, netclients, vital and cast sharing.
   private ubNet: UbNet | null = null;
   private ubNetTimer: ReturnType<typeof setInterval> | null = null;
+  private ubNetPageUnbind: (() => void) | null = null;
   private startUbNet(source: VTankSource | null): void {
     if (this.ubNetTimer) clearInterval(this.ubNetTimer);
     this.ubNetTimer = null;
+    this.ubNetPageUnbind?.();
+    this.ubNetPageUnbind = null;
     this.ubNet?.close();
     this.ubNet = null;
     setActiveUbNet(null);
@@ -24742,8 +24789,8 @@ export class GameUI {
     setActiveUbNet(net);
     net.start();
     this.ubNetTimer = setInterval(() => net.tick(), 300);
-    // A closed tab says goodbye, so the others drop it at once (else after 10 s of silence).
-    globalThis.addEventListener?.('pagehide', () => { if (this.ubNet === net) net.stop(); }, { once: true });
+    // A closed tab says goodbye; one back from the back/forward cache says hello again.
+    this.ubNetPageUnbind = bindUbNetToPage(globalThis as never, net, () => this.ubNet === net);
   }
 
   /** Names for a VirindiTank .usd's ids: the spell table, and what you carry or wear (vtankUsd.ts VtNames). */

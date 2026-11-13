@@ -279,7 +279,7 @@ describe('FINISH sends or says why (no DATs)', () => {
   afterAll(() => fx?.teardown());
   afterEach(() => { vi.useRealTimers(); });
 
-  function open(onCreate: (w: any) => boolean | void = () => true): { ui: any; sent: () => number; events: string[] } {
+  function open(onCreate: (w: any) => boolean | 'session_lost' | void = () => true): { ui: any; sent: () => number; events: string[] } {
     const { ui } = fx;
     ui.hideMessageDialog();
     ui.hideConfirmationDialog();
@@ -404,6 +404,23 @@ describe('FINISH sends or says why (no DATs)', () => {
     expect(ui.charGenVerificationPending).toBe(false);
     expect(messageText()).not.toBeNull();
     expect(events).toEqual(['blocked:not_sent']);
+  });
+
+  // BUG.beforeunload-silent-disconnect — the host found the session dead under FINISH and handed it to the drop
+  // path (main.ts: the chargen resume). No dialog here (the resume's screens follow), FINISH usable again, the
+  // block reported, and a draft captured after the call (main.ts queues the drop) is not "FINISH sent".
+  it('a host whose session is dead (onCharacterCreated → session_lost) shows no dialog, reports not_sent, and the drop sees no pending FINISH', async () => {
+    let captured: { pending: boolean } | null = null;
+    const { ui, events } = open(() => { queueMicrotask(() => { captured = ui.captureChargenDraft(); }); return 'session_lost'; });
+    spendAll(ui);
+    type('Brenna Qaeol');
+    press();
+    await Promise.resolve();
+    expect(ui.charGenVerificationPending).toBe(false);
+    expect(messageText()).toBeNull();
+    expect(events).toEqual(['blocked:not_sent']);
+    expect(captured).not.toBeNull();
+    expect(captured!.pending).toBe(false);
   });
 
   it('a message dialog whose element went away does not swallow FINISH\'s dialog', () => {
