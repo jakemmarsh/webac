@@ -19,6 +19,8 @@
  *   brush        @create PORTAL, strafe 2.6 m, walk forward past it: no try.
  *   side         @create PORTAL, strafe 0.8 m, walk forward: an off-centre walk-in.
  *   ontop        @teleloc onto a portal's own position, wait, walk 1 m.
+ *   rim          teleloc RIM_D m east / north of a portal (standing start), then forward / strafe-left: 2026-11-13
+ *                in 0x01110108 only the strafe aimed at the portal teleported; tangent moves from 1.80-1.92 m never did.
  *   graze        MON 2026-11-13 (prod traces 80bb16163b8ab6fb sentClosest 1.88, fa1539f3d8670e79 1.91, both
  *                against reach 1.92, no teleport): strafe GRAZE_MS (ms list, default 950..1150) off-centre and
  *                walk straight past, one pass per value; prints the body's closest pass, whether it teleported,
@@ -189,6 +191,29 @@ if (run('graze')) {
     const min = await ev<number>('window.__portalProbeMin');
     await ev(`clearInterval(window.__portalProbeTimer)`);
     console.log(`${ts()} GRAZE strafeMs=${strafeMs} closest=${min.toFixed(2)} teleported=${(await teleports()) > before}`);
+  }
+}
+if (run('rim')) {
+  // 2026-11-13: the 2026-11-08 shape (progress.md: teleloc'd standing at the rim of a portal in 0x01AA010D, then strafed
+  // along it: teleport up to 1.92 m) against today's walk-past (indoors nothing at >= 1.85 m). Per RIM_D offset (m), each of
+  // offset east / north x move forward / strafe left, from a standing start; one of each pair is a tangent move.
+  const ds = (process.env.RIM_D ?? '1.80,1.88,1.92').split(',').map(Number);
+  for (const d of ds) for (const [axis, key] of [['x', 'KeyW'], ['x', 'KeyZ'], ['y', 'KeyW'], ['y', 'KeyZ']] as const) {
+    await fresh(`rim: teleloc ${d} m ${axis === 'x' ? 'east' : 'north'} of a portal, then ${key === 'KeyW' ? 'forward' : 'strafe'}`);
+    await spawn(PORTAL);
+    const [p] = await portalsNear(PORTAL);
+    const pos = p?.pos as { landblock: number; x: number; y: number; z: number } | undefined;
+    if (!pos) { console.log('no portal'); continue; }
+    const x = pos.x + (axis === 'x' ? d : 0), y = pos.y + (axis === 'y' ? d : 0);
+    await chatLine(page, `@teleloc 0x${(pos.landblock >>> 0).toString(16).padStart(8, '0')} [${x.toFixed(2)} ${y.toFixed(2)} ${(pos.z + 0.05).toFixed(2)}] 1 0 0 0`);
+    await page.waitForTimeout(3000);
+    await waitFor(page, `!window.__ac.gameUI.worldHiddenByPortalSpace`, { timeoutMs: 60_000, reloadEveryMs: 0 });
+    await page.waitForTimeout(3000);
+    const start = await player(); const [q] = await portalsNear(PORTAL);
+    await hold(key, 1200);
+    await page.waitForTimeout(7000);
+    const end = await player();
+    console.log(`${ts()} RIM d=${d} offset=${axis} move=${key} startDist=${q?.d} startCell=${start.cell} endCell=${end.cell} teleported=${end.cell !== start.cell && Math.hypot(end.x - start.x, end.z - start.z) > 20}`);
   }
 }
 if (run('side')) {

@@ -66,7 +66,7 @@ function rig(snapshot: () => PortalSnapshot | null = () => snap()) {
 describe('sentPathReach: the server\'s swept move between two sent positions', () => {
   const reach = (a: SentPoint, b: SentPoint) => sentPathReach(a, b, PORTAL_AT, HUMAN_SPHERES, PORTAL_SPHERES, 1.919);
 
-  it('the server reaches ~0.1 m past the body touch (1.835 m → ~1.936 m for a human at the stock portal)', () => {
+  it('outdoors (the default tolerance) the server reaches ~0.1 m past the body touch (1.835 m → ~1.936 m for a human at the stock portal)', () => {
     expect(bodyTouchesPortal(1.83, 0, HUMAN_SPHERES, PORTAL_SPHERES)).toBe(true);
     expect(bodyTouchesPortal(1.9, 0, HUMAN_SPHERES, PORTAL_SPHERES)).toBe(false);
     // A move straight in that stops at 1.92 m (the live strafe distance that still teleported) reaches; 1.98 m does not.
@@ -127,10 +127,12 @@ describe('PortalUseReporter: a silent walk-in judged on the path the server was 
   });
 
   it('a tangent segment whose chord passes inside, both ends outside, counts as reached → portal_use_failed', () => {
+    // BUG.portal-rim-brush-indoor-reach: this dungeon (an EnvCell) is judged on the plain radius sum (1.837 m),
+    // so the chord passes at 1.75 m; a 1.85 m chord here is a rim brush (tests/verify-portal-rim-brush-indoor-reach.ts).
     const g = rig();
-    g.r.positionSent({ x: PORTAL_AT.x - 3, y: PORTAL_AT.y + 1.85, z: PORTAL_AT.z });
-    g.walkIn(1.8, [{ x: PORTAL_AT.x + 3, y: PORTAL_AT.y + 1.85, z: PORTAL_AT.z }]);
-    expect(g.events[0]).toMatchObject({ outcome: 'portal_use_failed', sentReached: true, sentClosest: 1.85 });
+    g.r.positionSent({ x: PORTAL_AT.x - 3, y: PORTAL_AT.y + 1.75, z: PORTAL_AT.z });
+    g.walkIn(1.7, [{ x: PORTAL_AT.x + 3, y: PORTAL_AT.y + 1.75, z: PORTAL_AT.z }]);
+    expect(g.events[0]).toMatchObject({ outcome: 'portal_use_failed', sentReached: true, sentClosest: 1.75 });
   });
 
   it('the segment into the last position before the watch is part of the path', () => {

@@ -124,7 +124,7 @@
  * walk-in either: this is retail behaviour. The watch now follows the path the server was sent
  * (positionSent / positionPlaced from MovementSync and the server's placements) and, when no segment of it
  * came within the server's collision reach (sentPathReach: the same Setup spheres bodyTouchesPortal uses
- * plus SERVER_REACH_TOLERANCE_M), a silent walk-in ends as `portal_rim_brush` (every field kept, plus
+ * plus serverReachTolerance: 0.1 m outdoors, 0 indoors since BUG.portal-rim-brush-indoor-reach), a silent walk-in ends as `portal_rim_brush` (every field kept, plus
  * `sentClosest` / `sentReached`). A silent walk-in whose sent path DID come inside stays `portal_use_failed`.
  * Era-neutral: ACE, GDLE and the AC1999 server all learn our position only from these two messages.
  */
@@ -299,10 +299,38 @@ export function serverFramePoint(cellId: number, x: number, y: number, z: number
 
 /**
  * BUG.portal-rim-brush-telemetry — how much wider the server's collision reaches than bodyTouchesPortal
- * (progress.md 2026-11-03: about 0.1 m; live 2026-11-08, a strafe along the rim of 24230 teleported at 1.92 m
- * against the 1.835 m body touch).
+ * OUTDOORS (progress.md 2026-11-03: about 0.1 m; live 2026-11-13 on local ACE at Holtburg (landcell), a
+ * spawned 1087 passed at 1.93 / 1.94 / 1.97 / 1.99 / 2.00 m teleported every time; the 2026-11-08 "strafe
+ * along the rim at 1.92 m" was indoors and a move into the portal, see SERVER_REACH_TOLERANCE_INDOOR_M).
  */
 export const SERVER_REACH_TOLERANCE_M = 0.1;
+/**
+ * BUG.portal-rim-brush-indoor-reach (2026-11-13) — indoors (an EnvCell portal) the server's reach is the plain
+ * radius sum. Live on local ACE (end of retail), tools/probe-portal-walk-in.ts graze: a spawned 1087 in the
+ * EnvCells 0x01110108 ("Storage") and 0x00070143 ("Town Network"), passes of the body centre at 1.41 / 1.52 /
+ * 1.64 / 1.76 m teleported; 1.85 / 1.86 / 1.90 / 1.90 m did not (no WeenieError, no teleport, and the page
+ * reported `portal_use_failed` with sentReached true), nor did 1.98-2.30 m. The 0.1 m band misfiled prod
+ * traces 80bb16163b8ab6fb (2026-11-10, cell 0x01110105, sentClosest 1.88) and fa1539f3d8670e79 (2026-11-13,
+ * portal cell 0x0007012a, sentClosest 1.91) as findings. The 2026-11-08 rim strafes that teleported at up to
+ * 1.92 m from a standing teleloc (0x01AA010D, indoors) were moves INTO the portal: re-run 2026-11-13
+ * (probe-portal-walk-in.ts rim, 0x01110108, teleloc'd at 1.80 / 1.88 / 1.92 m), the strafe that pointed at
+ * the portal teleported from every distance, and every tangent move (forward or strafe) from every distance,
+ * 1.80 included, did not.
+ */
+export const SERVER_REACH_TOLERANCE_INDOOR_M = 0;
+
+/**
+ * The tolerance the sent path is judged with for a portal in `portalCell` (fall back to the player's cell when
+ * the portal's is unknown): an EnvCell (low 16 bits >= 0x0100) gets SERVER_REACH_TOLERANCE_INDOOR_M, a
+ * landcell or an unknown cell SERVER_REACH_TOLERANCE_M (the wider band keeps an unknown case a finding).
+ * One rule in every era: the measurements are ACE; GDLE and the AC1999 server have none either way and ran
+ * the one outdoor-measured band until now.
+ */
+export function serverReachTolerance(portalCell: number | null | undefined, playerCell?: number | null): number {
+  const cell = portalCell ?? playerCell ?? null;
+  if (cell === null || !Number.isFinite(cell)) return SERVER_REACH_TOLERANCE_M;
+  return ((cell >>> 0) & 0xffff) >= 0x100 ? SERVER_REACH_TOLERANCE_INDOOR_M : SERVER_REACH_TOLERANCE_M;
+}
 /**
  * A sent segment that starts nearest the portal and leaves it at more than this cosine to the outward
  * direction is a move out of the overlap: ACE reports no collision for it (live 2026-11-08: backing straight
@@ -317,7 +345,7 @@ export interface SentSegmentReach { closest: number; reached: boolean }
  * The server's swept move from `a` to `b` (two positions it was sent, body origins) against the portal at
  * `portal`: `closest` = the segment's nearest horizontal approach to the portal's centre (comparable with
  * the body's `closest`); `reached` = some pair of the body's and the portal's Setup spheres (the shapes
- * bodyTouchesPortal tests, on the vertical axis) comes within their radius sum + SERVER_REACH_TOLERANCE_M on
+ * bodyTouchesPortal tests, on the vertical axis) comes within their radius sum + `toleranceM` (serverReachTolerance) on
  * the way, moving in or along (a chord that dips inside counts even with both ends outside), not leaving
  * an overlap it started in. A segment with no length is no move (standing still collides with nothing).
  * With either shape unknown, the portal's part-array `fallbackReach` stands in, horizontally.
@@ -327,7 +355,9 @@ export function sentPathReach(
   body: readonly { z: number; radius: number }[] | null | undefined,
   portalSpheres: readonly { z: number; radius: number }[] | null | undefined,
   fallbackReach: number,
+  toleranceM: number = SERVER_REACH_TOLERANCE_M,
 ): SentSegmentReach {
+  const tol = Number.isFinite(toleranceM) ? Math.max(0, toleranceM) : SERVER_REACH_TOLERANCE_M;
   const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
   // Horizontal nearest approach.
   const h2 = dx * dx + dy * dy;
@@ -337,9 +367,9 @@ export function sentPathReach(
   if (!(len > 1e-4)) return { closest, reached: false };
   const pairs: { off: number; r: number; horizontal: boolean }[] = [];
   if (body?.length && portalSpheres?.length) {
-    for (const s of body) for (const p of portalSpheres) pairs.push({ off: p.z - s.z, r: s.radius + p.radius + SERVER_REACH_TOLERANCE_M, horizontal: false });
+    for (const s of body) for (const p of portalSpheres) pairs.push({ off: p.z - s.z, r: s.radius + p.radius + tol, horizontal: false });
   } else {
-    pairs.push({ off: 0, r: Math.max(0, fallbackReach) + SERVER_REACH_TOLERANCE_M, horizontal: true });
+    pairs.push({ off: 0, r: Math.max(0, fallbackReach) + tol, horizontal: true });
   }
   let reached = false;
   for (const pr of pairs) {
@@ -358,6 +388,20 @@ export function sentPathReach(
     if (cos <= SENT_OUTWARD_COS) { reached = true; break; }
   }
   return { closest, reached };
+}
+
+/**
+ * The nominal reach sentPathReach judges a snapshot's portal with: the largest body/portal radius sum (the
+ * part-array reach with either shape unknown) + serverReachTolerance for the portal's cell.
+ */
+export function sentReachOf(s: Pick<PortalSnapshot, 'reach' | 'bodySpheres' | 'portalSpheres' | 'portalCell' | 'playerCell'>): number {
+  let sum = 0;
+  if (s.bodySpheres?.length && s.portalSpheres?.length) {
+    for (const b of s.bodySpheres) for (const p of s.portalSpheres) sum = Math.max(sum, b.radius + p.radius);
+  } else {
+    sum = Math.max(0, s.reach || 0);
+  }
+  return sum + serverReachTolerance(s.portalCell, s.playerCell);
 }
 
 /** A server chat line worth a template: it speaks of portals or teleports. */
@@ -474,6 +518,12 @@ export interface PortalUseFailedEvent extends Ids {
    */
   sentClosest: number | null;
   sentReached: boolean | null;
+  /**
+   * BUG.portal-rim-brush-indoor-reach — the reach `sentClosest` was judged against, m 0.01: the largest body/portal
+   * Setup-sphere radius sum (or the part-array `reach` with either shape unknown) + serverReachTolerance for the
+   * portal's cell (0.1 m on a landcell, 0 in an EnvCell). `reach` stays the portal's part-array radius.
+   */
+  sentReach: number | null;
 }
 
 export const PORTAL_RIM_BRUSH = 'portal_rim_brush' as const;
@@ -676,7 +726,8 @@ export class PortalUseReporter {
   private sentSegment(a: SentPoint, b: SentPoint): void {
     const w = this.watch;
     if (!w || !w.snap.portalAt) return;
-    const r = sentPathReach(a, b, w.snap.portalAt, w.snap.bodySpheres, w.snap.portalSpheres, w.snap.reach);
+    const r = sentPathReach(a, b, w.snap.portalAt, w.snap.bodySpheres, w.snap.portalSpheres, w.snap.reach,
+      serverReachTolerance(w.snap.portalCell, w.snap.playerCell));
     if (w.sentClosest === null || r.closest < w.sentClosest) w.sentClosest = r.closest;
     if (r.reached) w.sentReached = true;
   }
@@ -820,6 +871,7 @@ export class PortalUseReporter {
       refusalLeadMs: w.refusalLeadMs,
       sentClosest: w.sentClosest === null ? null : r2(w.sentClosest),
       sentReached: w.sentClosest === null ? null : w.sentReached,
+      sentReach: s.portalAt ? r2(sentReachOf(s)) : null,
     });
   }
 

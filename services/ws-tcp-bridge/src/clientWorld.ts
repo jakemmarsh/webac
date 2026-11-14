@@ -243,7 +243,8 @@ function perfFields(b: Record<string, unknown>): Partial<ClientFirstMinuteEvent>
  * BUG.portal-rim-brush-telemetry: a silent walk-in whose path as SENT to the server (MoveToState /
  * AutonomousPosition segments) never came within the server's collision reach is `portal_rim_brush` (the body
  * brushed the rim between positions; the server collides on the sent path only); every failure carries
- * `sentClosest` (m) / `sentReached`.
+ * `sentClosest` (m) / `sentReached`. BUG.portal-rim-brush-indoor-reach: `sentReach` (m) is the collision reach the
+ * sent path was judged against (the largest radius sum + the tolerance: 0.1 m for a landcell portal, 0 indoors).
  */
 export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_cancelled', 'portal_rim_brush', 'portal_used'] as const;
 export const PORTAL_TRIGGERS = ['use', 'walk_in'] as const;
@@ -296,6 +297,8 @@ export interface ClientPortalUseFailedEvent extends WorldIds {
   /** The sent path's nearest horizontal approach to the portal (m 0.01), and whether it came within the server's collision reach. */
   sentClosest: number | null;
   sentReached: boolean | null;
+  /** The reach the sent path was judged against: the largest body/portal radius sum + the cell's tolerance (m 0.01). */
+  sentReach: number | null;
 }
 
 export interface ClientPortalUsedEvent extends WorldIds {
@@ -376,6 +379,7 @@ function sanitizePortal(outcome: typeof PORTAL_OUTCOMES[number], ids: WorldIds, 
     refusalLeadMs: uint(b.refusalLeadMs, 10_000),
     sentClosest: metres(b.sentClosest, 100_000, 2),
     sentReached: bool(b.sentReached),
+    sentReach: metres(b.sentReach, 1000, 2),
   };
 }
 
