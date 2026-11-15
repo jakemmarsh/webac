@@ -102,6 +102,22 @@ describe('agent path planner (movement-probe A*)', () => {
     }
   });
 
+  it('a search\'s signature: the same for the same spot (to a quarter metre) whatever its reach, and a smaller reach finds no way where a bigger one found none (BUG.nav-planner-load-dependent)', () => {
+    const goal = { x: -2, y: 5 }; // inside the pillar: no way at any reach under its half-width
+    const wide = new PathSearch(probe, { x: 0, y: 0, z: 0 }, goal, { maxNodes: 400, within: 0.9 });
+    const tight = new PathSearch(probe, { x: 0.05, y: 0, z: 0 }, goal, { maxNodes: 400, within: 0.3 });
+    expect(tight.signature).toBe(wide.signature);
+    expect([wide.reach, tight.reach]).toEqual([0.9, 0.3]);
+    const a = wide.step(Infinity)!, b = tight.step(Infinity)!;
+    expect([a.status, b.status]).toEqual(['none', 'none']);
+    expect(b.expanded).toBe(a.expanded);
+    // Anything else that decides the answer makes another signature: the spot, the goal's floor, the budget, the grid.
+    expect(new PathSearch(probe, { x: 1, y: 0, z: 0 }, goal, { maxNodes: 400 }).signature).not.toBe(wide.signature);
+    expect(new PathSearch(probe, { x: 0, y: 0, z: 0 }, { ...goal, z: 6 }, { maxNodes: 400 }).signature).not.toBe(wide.signature);
+    expect(new PathSearch(probe, { x: 0, y: 0, z: 0 }, goal, { maxNodes: 500 }).signature).not.toBe(wide.signature);
+    expect(new PathSearch(probe, { x: 0, y: 0, z: 0 }, goal, { maxNodes: 400, spacing: 1 }).signature).not.toBe(wide.signature);
+  });
+
   it('runs incrementally: a step with no budget returns nothing yet, later steps finish', () => {
     const s = new PathSearch(probe, { x: 0, y: -4, z: 0 }, { x: 9, y: -4 });
     let t = 0;
@@ -424,5 +440,11 @@ describe.skipIf(!existsSync(AC1999_PORTAL) || !existsSync(AC1999_CELL) || !ac199
     const { host, r } = await walk(50, false);
     expect(r.ok).toBe(false);
     expect(r.message, host.traces.join('\n')).toMatch(/locked, or it needs a key; the way down through the floor opening is past a rail higher than your jump clears\)\. A Tutorial Dungeon Key lies \d+ m away/);
-  }, 120_000);
+    // BUG.nav-planner-load-dependent: the stall replans asked the same box and jump searches from the same spot over the
+    // same world again (2 × ~26 s of probing in node, ~50 s more standing each live); the walk now takes their answer.
+    // Nine searches had run (116 s of the test's 120 s alone; it timed out under load), six run now.
+    const reused = host.traces.filter((l) => /the same search from here found no way .* nothing it sees has changed/.test(l));
+    expect(reused.length, host.traces.join('\n')).toBeGreaterThanOrEqual(3);
+    expect(host.traces.filter((l) => /walk search none after/.test(l)).length - reused.length).toBeLessThanOrEqual(6);
+  }, 240_000);
 });

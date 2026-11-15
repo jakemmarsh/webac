@@ -330,9 +330,18 @@ export interface PreworldEvent {
   /** Capability problems the probe found (null when none). */
   caps: CapabilityIssue[] | null;
   /**
-   * OBS.dm-stall-diagnostics — 'dropped' only, when the session went silent
-   * or its socket closed: the connection's NetDiagnostics, bounded
-   * (@ac/network boundNetDiagnostics). Absent otherwise.
+   * OBS.dm-stall-diagnostics — 'dropped', when the session went silent or its
+   * socket closed: the connection's NetDiagnostics, bounded (@ac/network
+   * boundNetDiagnostics).
+   *
+   * OBS.preworld-page-left-net — and on the waits the page or the player gave
+   * up on while this attempt's socket was open (since loginStarted):
+   * page_left / page_hidden, connect_failed and the netError login_refused
+   * (a login the server never answered, or answered with silence),
+   * chargen_refused 'timeout' and enter_refused 'timeout'. Whether the
+   * awaited reply sat in our reorder buffer behind a gap (rxHeld /
+   * rxMissing) or never came (rxAgoMs, rxOpcode). Absent otherwise (a
+   * launcher-only page, a socket that never opened).
    */
   net?: NonNullable<ReturnType<typeof boundNetDiagnostics>>;
   /**
@@ -627,6 +636,8 @@ export class PreworldReporter {
   private attemptSerial = 0;
   private tabId: string | null = null;
   private readonly bid: string | null;
+  /** OBS.preworld-page-left-net — the session connection's getDiagnostics (setNetDiagnostics). */
+  private netDiagnostics: (() => unknown) | null = null;
 
   constructor(private readonly opts: PreworldReporterOptions) {
     this.now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
@@ -641,6 +652,31 @@ export class PreworldReporter {
   /** OBS.login-refusal-identity — this page's AccountTabGuard id (the guard is made after the reporter). */
   setTabId(id: string | null): void {
     this.tabId = wireTabId(id);
+  }
+
+  /**
+   * OBS.preworld-page-left-net — the session connection's diagnostics
+   * (ClientConnection / NetWorkerClient getDiagnostics; the connection is
+   * made after the reporter). Read only while this attempt's socket is open.
+   */
+  setNetDiagnostics(read: (() => unknown) | null): void {
+    this.netDiagnostics = read;
+  }
+
+  /**
+   * The bounded diagnostics of this attempt's connection, when its socket
+   * opened (loginStarted, cleared by connectAttempt) and a reader is set;
+   * null otherwise (the launcher, a socket that never opened).
+   */
+  private liveNet(): PreworldEvent['net'] | null {
+    if (this.loginAt === null || !this.netDiagnostics) return null;
+    try { return boundNetDiagnostics(this.netDiagnostics()); } catch { return null; }
+  }
+
+  /** `{ net }` when liveNet has one, else nothing. */
+  private liveNetField(): { net?: PreworldEvent['net'] } {
+    const net = this.liveNet();
+    return net ? { net } : {};
   }
 
   /** The bridge's event URL for a ws(s):// bridge URL (null when it isn't one). */
@@ -732,7 +768,19 @@ export class PreworldReporter {
 
   /** BUG.chargen-finish-silent — a CharacterCreate went unanswered (CHARGEN_REPLY_TIMEOUT_MS): chargen_refused, token "timeout". */
   chargenNoReply(): void {
-    this.report('chargen_refused', { token: 'timeout' });
+    this.report('chargen_refused', { token: 'timeout', ...this.liveNetField() });
+  }
+
+  /**
+   * OBS.preworld-page-left-net — an enter-world request went unanswered for
+   * retail's REQUEST_TIMEOUT (CPlayerSystem::UseTime @ 0x00563110 raises
+   * ServerDied): enter_refused, token "timeout", with the connection's
+   * diagnostics. Nothing reported this end before.
+   */
+  enterTimedOut(): void {
+    const sinceEnterMs = this.enterAt !== null ? Math.round(this.now() - this.enterAt) : null;
+    this.enterAt = null;
+    this.report('enter_refused', { token: 'timeout', sinceEnterMs, ...this.liveNetField() });
   }
 
   /** CharacterEnterWorldRequest went out (character select, or straight after creation). */
@@ -912,12 +960,16 @@ export class PreworldReporter {
     // no; the rest are the client giving up (no socket: ID_NetError_CantSocket; no answer:
     // ID_ConnectionError_ClientTimedOutServer).
     if (event.netErrorId) {
-      if (SERVER_REFUSAL_NET_ERRORS.has(event.netErrorId)) { this.report('login_refused', { token: safeToken(event.netErrorId) }); return; }
+      if (SERVER_REFUSAL_NET_ERRORS.has(event.netErrorId)) {
+        this.report('login_refused', { token: safeToken(event.netErrorId), ...this.liveNetField() });
+        return;
+      }
       const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
       const why = event.openTimedOut ? 'open_timeout' : offline ? 'offline' : event.openFailed ? 'open_failed' : undefined;
       const openMs = typeof event.openMs === 'number' && Number.isFinite(event.openMs) && event.openMs >= 0 ? Math.round(event.openMs) : null;
       this.report('connect_failed', {
         token: safeToken(event.netErrorId), ...(why ? { why } : {}), ...(openMs !== null ? { openMs } : {}), hidden: this.pageHiddenNow(),
+        ...this.liveNetField(),
       });
     }
   }
@@ -1080,7 +1132,7 @@ export class PreworldReporter {
     const key = `${screen}|${step ?? ''}`;
     if (this.hiddenOn.has(key)) return;
     this.hiddenOn.add(key);
-    this.report('page_hidden', {});
+    this.report('page_hidden', this.liveNetField());
   }
 
   /** The page is going away (pagehide) on a pre-world screen. Once. */
@@ -1089,7 +1141,7 @@ export class PreworldReporter {
     const { screen } = this.sample();
     if (!PRE_WORLD.has(screen)) return;
     this.left = true;
-    this.report('page_left', {});
+    this.report('page_left', this.liveNetField());
   }
 
   /**

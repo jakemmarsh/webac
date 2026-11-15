@@ -8700,6 +8700,9 @@ async function main() {
   });
   accountTabGuard.watch(aceConnection, () => (aceAccount ? accountSessionKey(connectUrl, aceAccount) : null));
   preworldReporter?.setTabId(accountTabGuard.tabId);
+  // OBS.preworld-page-left-net — page_left / page_hidden and the given-up waits before the world carry
+  // this connection's diagnostics while its socket is open (a list held behind a gap vs never sent).
+  preworldReporter?.setNetDiagnostics(() => aceConnection.getDiagnostics());
   // Close the session when the page really goes (pagehide), so no zombie socket is left.
   // The dirty PlayerModule goes out before the socket closes; the reporters read the
   // screen before the disconnect tears the world down.
@@ -8820,6 +8823,8 @@ async function main() {
     enterRequestTimer.schedule(() => {
       if (!sessionLifecycle.enterRequestTimedOut(REQUEST_TIMEOUT_S * 1000)) return;
       console.warn(`[AC] ACE: no answer to the enter-world request in ${REQUEST_TIMEOUT_S} s — ServerDied`);
+      // OBS.preworld-page-left-net — this end reported nothing; now enter_refused "timeout" with the diagnostics.
+      preworldReporter?.enterTimedOut();
       raiseServerDied();
     }, REQUEST_TIMEOUT_S * 1000);
   };

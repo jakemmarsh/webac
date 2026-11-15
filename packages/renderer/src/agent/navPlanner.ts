@@ -223,6 +223,27 @@ export class PathSearch {
   /** Whether this search may take jumps and drops. */
   get hasJumps(): boolean { return !!this.jumps; }
 
+  /** How near the goal counts as reached (m). */
+  get reach(): number { return this.within; }
+
+  /**
+   * What decides this search's answer besides `reach` and the world the probe sees: the start and goal (to a quarter
+   * metre, height to half a metre), the grid, the box, the budgets and the jump rules. Two searches from one spot with
+   * the same signature over the same world expand the same points in the same order (the heap orders by cost and
+   * distance to the goal, never by `within`), so one that found no way says the same of any with that signature and a
+   * reach no bigger: `within` only decides which point counts as arrived.
+   */
+  get signature(): string {
+    const q = (v: number, s = 4): number => Math.round(v * s);
+    const js = this.jumps;
+    return [
+      q(this.start.x), q(this.start.y), q(this.start.z, 2),
+      q(this.goal.x), q(this.goal.y), this.goal.z === undefined ? '-' : q(this.goal.z, 2), this.goal.zTop === undefined ? '-' : q(this.goal.zTop, 2),
+      this.spacing, this.maxI - this.minI, this.maxJ - this.minJ, this.maxNodes, this.tolerance,
+      js ? `j${Math.round(js.maxDamage)},${js.penalty ?? 8},${js.maxFlights ?? 1500}` : '-',
+    ].join(',');
+  }
+
   /** Probe for about `budgetMs`; the result once the search ends, else null. */
   step(budgetMs = 8, now: () => number = () => performance.now()): PlanResult | null {
     if (this.done) return this.done;

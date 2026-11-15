@@ -159,7 +159,11 @@ export interface ClientPreworldEvent {
   lateMs?: number;
   /** The page's id for this event, the same on every resend (eventIds.ts): the bridge logs each once. */
   eid?: string;
-  /** OBS.dm-stall-diagnostics — 'dropped' only: the connection's state when a silent / closed session ended (netDiag.ts). */
+  /**
+   * OBS.dm-stall-diagnostics — the connection's state (netDiag.ts) on NET_DIAG_OUTCOMES: 'dropped' when a
+   * silent / closed session ended; OBS.preworld-page-left-net, page_left / page_hidden and the waits given up
+   * (connect_failed, login_refused, chargen_refused / enter_refused 'timeout') while the socket was open.
+   */
   net?: NetDiag;
   /** chargen_ok / chargen_refused only: the requested HeritageGroup, 1–13 (an Olthoi refused by olthoi_play_disabled is code 2 + 12/13). */
   heritage?: number;
@@ -271,6 +275,15 @@ export function lateField(v: unknown, max: number): { lateMs?: number } {
   return n === null ? {} : { lateMs: n };
 }
 
+/**
+ * The outcomes that may carry `net` (OBS.dm-stall-diagnostics, OBS.preworld-page-left-net): a drop, the
+ * player leaving or hiding the page, and the waits the page gave up on. The page sends it only while
+ * the attempt's socket was open.
+ */
+export const NET_DIAG_OUTCOMES: ReadonlySet<PreworldOutcome> = new Set<PreworldOutcome>([
+  'dropped', 'page_left', 'page_hidden', 'connect_failed', 'login_refused', 'chargen_refused', 'enter_refused',
+]);
+
 /** Validate a posted body field by field; null when it is not an event. Unknown fields are dropped. */
 export function sanitizeClientPreworld(body: unknown): ClientPreworldEvent | null {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
@@ -302,7 +315,7 @@ export function sanitizeClientPreworld(body: unknown): ClientPreworldEvent | nul
     ...streamField(b.stream),
     ...lateField(b.lateMs, MAX_MS),
     ...eidField(b.eid),
-    ...(outcome === 'dropped' ? netDiagField(b.net) : {}),
+    ...(NET_DIAG_OUTCOMES.has(outcome) ? netDiagField(b.net) : {}),
     ...(outcome === 'handover' ? handoverFields(b) : {}),
     ...(outcome === 'login_retry' ? loginRetryField(b.retry) : {}),
     ...(outcome === 'login_refused' || outcome === 'login_retry' ? heldByTabField(b.heldByTab) : {}),

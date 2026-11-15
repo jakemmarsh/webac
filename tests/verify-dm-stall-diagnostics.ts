@@ -460,7 +460,7 @@ describe('OBS.dm-stall-diagnostics — the bridge validates net field by field',
     expect(sanitizeNetDiag({ name: 'Bob' })).toBeNull();
   });
 
-  it('client_world keeps net on both outcomes; client_preworld only on dropped; events without it are unchanged', () => {
+  it('client_world keeps net on both outcomes; client_preworld only on the drop / leave / given-up-wait outcomes; events without it are unchanged', () => {
     const base = { era: 'dm', server: 'snowreap', trace: 'feedc0de12345678', build: 'abc1234' };
     const left = sanitizeClientWorld({ ...base, outcome: 'world_left', exit: 'disconnected', sessionMs: 240_000, endCause: 'link_dead', net: { rxAck: 5, rxAgoMs: 40_100 } });
     expect(left?.net).toEqual({ rxAck: 5, rxAgoMs: 40_100 });
@@ -472,6 +472,123 @@ describe('OBS.dm-stall-diagnostics — the bridge validates net field by field',
     expect(dropped?.net).toEqual({ rxAck: 5 });
     const suspended = sanitizeClientPreworld({ ...base, outcome: 'dropped', token: 'client_suspended', net: { rxAck: 5 } });
     expect(suspended).toMatchObject({ token: 'client_suspended', net: { rxAck: 5 } });
+    // OBS.preworld-page-left-net — the leave and given-up-wait outcomes keep it too; others still drop it.
+    for (const outcome of ['page_left', 'page_hidden', 'connect_failed', 'login_refused', 'chargen_refused', 'enter_refused'] as const) {
+      expect(sanitizeClientPreworld({ ...base, outcome, net: { rxHeld: 1, rxMissing: 1 } })?.net).toEqual({ rxHeld: 1, rxMissing: 1 });
+    }
+    for (const outcome of ['enter_ok', 'chargen_ok', 'page_reload', 'resume_ended', 'login_retry'] as const) {
+      const ev = sanitizeClientPreworld({ ...base, outcome, net: { rxHeld: 1 } });
+      expect(ev && 'net' in ev).toBe(false);
+    }
+  });
+});
+
+// ── OBS.preworld-page-left-net ──
+
+describe('OBS.preworld-page-left-net — leaving or giving up before the world says where the awaited reply was', () => {
+  /** A reporter on `screen()` whose diagnostics come from `conn` (null: no reader set). */
+  function preworldRig(screen: () => PreworldEvent['screen'], read: (() => unknown) | null) {
+    const sent: PreworldEvent[] = [];
+    const raw: string[] = [];
+    const r = new PreworldReporter({
+      endpoint: 'http://x/client-preworld', build: 'abc1234', era: () => 'eor', server: () => 'dreamweave',
+      screen, chargenStep: () => null, now: () => Date.now(), trace: 'feedc0de12345678',
+      send: (_u, b) => { raw.push(b); sent.push(JSON.parse(b) as PreworldEvent); },
+    });
+    if (read) r.setNetDiagnostics(read);
+    return { r, sent, raw };
+  }
+
+  /** DreamWeave 2026-11-14 (trace 6e40b70b3ea5cece): the login's reply held behind a missing packet. */
+  function heldBehindGap() {
+    const s = session();
+    s.ws.receive(serverMessage(2, 1)); // delivered
+    s.ws.receive(serverMessage(4, 3)); // 3 never came: 4 waits in the reorder buffer
+    expect(tags(s.events)).toEqual([1]);
+    return s;
+  }
+
+  it('page_left on Connecting with the socket open carries the connection\'s bounded diagnostics, and the bridge keeps them', () => {
+    const s = heldBehindGap();
+    const p = preworldRig(() => 'connecting', () => s.conn.getDiagnostics());
+    p.r.connectAttempt();
+    p.r.loginStarted();
+    vi.advanceTimersByTime(41_000);
+    p.r.pageLeft();
+    const left = p.sent.find(e => e.outcome === 'page_left')!;
+    expect(left).toMatchObject({ screen: 'connecting', sinceLoginMs: 41_000 });
+    expect(left.net).toMatchObject({ rxHeld: 1, rxMissing: 1, rxAck: 2, rxHigh: 4, rxOpcode: '0x0000dead' });
+    expect(left.net).toEqual(boundNetDiagnostics(s.conn.getDiagnostics()));
+    expect(typeof left.net?.rxAgoMs).toBe('number');
+    expect(p.raw[0].length + 80).toBeLessThanOrEqual(CLIENT_PREWORLD_MAX_BODY);
+    expect(sanitizeClientPreworld(left)?.net).toMatchObject({ rxHeld: 1, rxMissing: 1, rxOpcode: '0x0000dead' });
+  });
+
+  it('page_hidden on Connecting with the socket open carries them too', () => {
+    const s = heldBehindGap();
+    const p = preworldRig(() => 'connecting', () => s.conn.getDiagnostics());
+    p.r.connectAttempt();
+    p.r.loginStarted();
+    p.r.pageHidden();
+    const hidden = p.sent.find(e => e.outcome === 'page_hidden')!;
+    expect(hidden.net).toMatchObject({ rxHeld: 1, rxMissing: 1, rxOpcode: '0x0000dead' });
+    expect(sanitizeClientPreworld(hidden)?.net).toMatchObject({ rxHeld: 1 });
+  });
+
+  it('the launcher with no connection: page_hidden / page_left carry no net (reader set or not)', () => {
+    const read = vi.fn(() => fullDiag());
+    const p = preworldRig(() => 'server-select', read);
+    p.r.pageHidden();
+    p.r.pageLeft();
+    expect(p.sent.map(e => e.outcome)).toEqual(['page_hidden', 'page_left']);
+    for (const e of p.sent) expect('net' in e).toBe(false);
+    expect(read).not.toHaveBeenCalled();
+
+    const q = preworldRig(() => 'connecting', null); // a socket open, but no reader (older wiring)
+    q.r.loginStarted();
+    q.r.pageLeft();
+    expect('net' in q.sent[0]).toBe(false);
+  });
+
+  it('a new connect attempt whose socket never opened carries none (the last session\'s state is not this attempt\'s)', () => {
+    const p = preworldRig(() => 'resuming', () => fullDiag());
+    p.r.loginStarted();
+    p.r.connectAttempt(); // the resume's socket, not open yet
+    p.r.pageHidden();
+    p.r.connectionError({ netErrorId: 'ID_NetError_CantSocket', openFailed: true, openMs: 400 });
+    expect(p.sent.map(e => e.outcome)).toEqual(['page_hidden', 'connect_failed']);
+    for (const e of p.sent) expect('net' in e).toBe(false);
+  });
+
+  it('the waits the page gives up on with the socket open carry it: login timeout, chargen and enter timeouts', () => {
+    const screen = { v: 'connecting' as PreworldEvent['screen'] };
+    const p = preworldRig(() => screen.v, () => fullDiag());
+    p.r.connectAttempt();
+    p.r.loginStarted();
+    p.r.connectionError({ netErrorId: 'ID_ConnectionError_ClientTimedOutServer' });
+    screen.v = 'chargen';
+    p.r.chargenNoReply();
+    screen.v = 'portal-space';
+    p.r.enterRequested();
+    vi.advanceTimersByTime(110_000);
+    p.r.enterTimedOut();
+    expect(p.sent.map(e => [e.outcome, e.token])).toEqual([
+      ['connect_failed', 'ID_ConnectionError_ClientTimedOutServer'], ['chargen_refused', 'timeout'], ['enter_refused', 'timeout'],
+    ]);
+    for (const e of p.sent) expect(e.net).toMatchObject({ rxHeld: 1, rxMissing: 1, rxOpcode: '0x0000f74c' });
+    expect(p.sent[2].sinceEnterMs).toBe(110_000);
+    for (const e of p.sent) expect(sanitizeClientPreworld(e)?.net).toMatchObject({ rxHeld: 1 });
+  });
+
+  it('a reader that throws or returns junk sends the event without net', () => {
+    const p = preworldRig(() => 'connecting', () => { throw new Error('worker gone'); });
+    p.r.loginStarted();
+    p.r.pageHidden();
+    const q = preworldRig(() => 'connecting', () => 'junk');
+    q.r.loginStarted();
+    q.r.pageLeft();
+    expect('net' in p.sent[0]).toBe(false);
+    expect('net' in q.sent[0]).toBe(false);
   });
 });
 

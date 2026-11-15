@@ -19,7 +19,7 @@
  */
 import { skillKey, spellLineName } from './spellFamilies.js';
 import { BODY_RADIUS_M, PORTAL_REPORT_NEAR_M, STEP_CLEAR_M, avoidDisks, chordNeedsReport, portalGuard, portalStepThreat, type AvoidDisk } from './portalAvoid.js';
-import { PathSearch, SKIP_TAKEOFF_M, floorPlan, onGoalLevel, straightWalk, type JumpSearch, type NavPoint, type NavProbe, type NavStep } from './navPlanner.js';
+import { PathSearch, SKIP_TAKEOFF_M, floorPlan, onGoalLevel, straightWalk, type JumpSearch, type NavPoint, type NavProbe, type NavStep, type PlanResult } from './navPlanner.js';
 import { BUFF_LOW_S, buffTimeText, compassPoint, filterInventory, isJunk, isSellable, MANA_STONE_CHARGING, PACK_SLOTS_LOW, unplacedText } from './format.ts';
 import { BODY_BITS, casterGap, equipSwapText, gearEmptyFacts, shieldRefusal } from './gear.ts';
 import { routineSuppliesMissing, supplyOf } from './macro/routineSupplies.ts';
@@ -10904,6 +10904,12 @@ export class AgentApi {
     // The search being run and when it started, for SEARCH_WALL_MS.
     let timed: PathSearch | null = null;
     let timedAt = start;
+    // Searches this walk ran to no way, by their signature and the world they saw (searchWorld): the same search from the
+    // same spot over the same world finds no way again. The stall replans ran the same box and jump searches from the same
+    // spot up to three times (AC1999 tutorial 0x0179, Jump 50 and no key: 2 × 26 s of probing over again, ~50 s more
+    // standing for each live, and the test that walks it passed alone at 116 s of its 120 and timed out under load).
+    const searchMemo = new Map<string, { reach: number; r: PlanResult; at: number }>();
+    let timedWorld = '';
     let lastTick = start;
     let best = Infinity;
     let movedFrom: { x: number; y: number } | null = null;
@@ -11300,6 +11306,14 @@ export class AgentApi {
     const npcBodies = (): AvoidDisk[] => npcDisks().map((d) => ({ ...d, r: Math.max(0.1, d.r - AgentApi.NPC_CLEAR_M + AgentApi.NPC_BODY_M) }));
     const jumpAvoid = (): ReadonlyArray<AvoidDisk> => { const n = npcBodies(); return n.length ? [...portals(), ...n] : portals(); };
     const jumpSearch = (): JumpSearch | null => { const js = this.jumpSearch(); return js ? { ...js, avoid: jumpAvoid, skipFrom: () => stayedFrom } : null; };
+    // What a search's probe and flights see that can change during a walk (searchMemo): the doors' open state, the disks
+    // kept clear (portals, NPCs, monsters, to half a metre), and the take-offs a jump already came back down on.
+    const searchWorld = (): string => {
+      const disks = [...fixedDisks(), ...monsterDisks()].map((d) => `${Math.round(d.x * 2)}:${Math.round(d.y * 2)}:${Math.round(d.z * 2)}:${Math.round(d.r * 2)}`).sort();
+      const doors: string[] = [];
+      for (const o of this.host.objects()) if (o.physicsState !== undefined && classify(o, false) === 'door') doors.push(`${o.guid >>> 0}:${isOpenNow(o.guid) ? 1 : 0}`);
+      return `${doors.sort().join(',')}|${disks.join(',')}|${stayedFrom.length}`;
+    };
     const wideOpts = { spacing: 1, margin: 35, maxNodes: 6000 };
     // The far search (outdoors, once per leg): a coarse grid over a much bigger area, for a wall whose way through lies
     // outside the wide box. Its own wall clock: it is the one search that may stand longer.
@@ -12704,8 +12718,18 @@ export class AgentApi {
         this.key('KeyW', false);
         this.key('ShiftLeft', false);
         const sr = search as PathSearch;
-        if (sr !== timed) { timed = sr; timedAt = now; cutShortUnderAttack = false; }
-        let r = sr.step(Math.min(25, Math.max(6, frameMs * AgentApi.SEARCH_FRAME_SHARE)));
+        let r: PlanResult | null = null;
+        if (sr !== timed) {
+          timed = sr; timedAt = now; cutShortUnderAttack = false;
+          timedWorld = searchWorld();
+          const seen = searchMemo.get(`${sr.signature}|${timedWorld}`);
+          if (seen && seen.reach >= sr.reach) {
+            r = seen.r;
+            this.trace(`walk: the same search from here found no way ${((now - seen.at) / 1000).toFixed(0)} s ago, and nothing it sees has changed; not standing through it again`);
+          }
+        }
+        let fresh = false;
+        if (!r) { r = sr.step(Math.min(25, Math.max(6, frameMs * AgentApi.SEARCH_FRAME_SHARE))); fresh = !!r; }
         if (!r && underAttack && now - timedAt > AgentApi.FLEE_SEARCH_MS) {
           // Hit while standing searching: a player under attack doesn't stand still to think. Take what the search
           // has (below) after a moment.
@@ -12715,9 +12739,15 @@ export class AgentApi {
         }
         if (!r && now - timedAt > (sr === farSearch ? AgentApi.FAR_SEARCH_WALL_MS : AgentApi.SEARCH_WALL_MS)) {
           r = sr.abandon();
+          fresh = true; // run its full standing time: the same search again stands as long for no more
           this.trace(`walk search stopped after ${Math.round((now - timedAt) / 1000)} s standing still`);
         }
         if (!r) return null;
+        // Remembered only when the world it saw held still to its end (a door swung or an NPC stepped mid-search: run it again).
+        if (fresh && r.status === 'none' && searchWorld() === timedWorld) {
+          const k = `${sr.signature}|${timedWorld}`;
+          if ((searchMemo.get(k)?.reach ?? -1) < sr.reach) searchMemo.set(k, { reach: sr.reach, r, at: now });
+        }
         search = null;
         legs = r.status === 'found' ? r.path : [];
         noWay = r.status === 'none';
