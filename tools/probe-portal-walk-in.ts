@@ -262,6 +262,32 @@ if (run('ontop')) {
   }
 }
 
+if (run('pk-use')) {
+  // MON 2026-11-15 (DreamWeave, PvE+PvP, traces a8bd00927b4a6e66): a portal Use from 3.5 m and from ~15 m came back
+  // UseDone(0) with no teleport. ACE runs a PK player's walk on its own physics (Player_Tick FastTick => IsPKType,
+  // CreateMoveToChain2) and fails it silently when that walk stops out of range. Use the same portal at each range as
+  // NPK, then as PK (PK_RANGES_MS: back-off hold times).
+  const ranges = (process.env.PK_RANGES_MS ?? '1400,5500').split(',').map(Number);
+  for (const state of ['npk', 'pk'] as const) for (const backMs of ranges) {
+    await fresh(`pk-use: ${state}, back off ${backMs} ms, use a purple portal`);
+    await chatLine(page, `@pk ${state}`);
+    await page.waitForTimeout(1500);
+    await spawn(PORTAL);
+    await hold('KeyX', backMs);
+    await page.waitForTimeout(1500);
+    const [p] = await portalsNear(PORTAL);
+    const name = await ev<string>(`(() => { const o = window.__ac.serverObjectManager.getAllObjects().get(${p?.guid ?? 0}); return o ? o.name : ''; })()`);
+    const sel = await ev(`JSON.stringify(window.__acAgent.select(${JSON.stringify(name)}))`);
+    await page.mouse.click(640, 650);
+    const before = await teleports(); const nEv = events.length;
+    await page.keyboard.press('KeyR');
+    await page.waitForTimeout(9000);
+    const got = events.slice(nEv).map((e) => `${e.outcome}${e.firstUseDoneMs != null ? ` useDone@${e.firstUseDoneMs}` : ''}${e.closest != null ? ` closest=${e.closest}` : ''}`);
+    console.log(`${ts()} PKUSE state=${state} startDist=${p?.d} select=${sel} teleported=${(await teleports()) > before} events=${JSON.stringify(got)}`);
+  }
+  await chatLine(page, '@pk npk');
+}
+
 console.log(`\n${ts()} cleanup`);
 await fresh('cleanup');
 console.log(`EVENTS ${JSON.stringify(events)}`);

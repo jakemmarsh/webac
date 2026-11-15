@@ -34,6 +34,39 @@
  *    stays under UP_PREDICT_MS: restore draw distance first, then step the
  *    ratio up by UP_FACTOR toward full.
  *
+ * PERF.render-adapt-cpu-bound (prod 2026-11-15, Reddit "graphics often appear
+ * blurry ... I'm on a Mac"): a MacBook Air (Intel HD 5000, dpr 1) sat at the
+ * 50 % floor with a 33 ms median and 28 ms of CPU work per frame; its render
+ * phase cost MORE at half size (17.4 ms, 520 draw calls) than at full size
+ * elsewhere (13 ms, 330 draw calls). Frame intervals are vsync-quantized
+ * (16.7 / 33 / 50 ms), so a steady 30 FPS median of 33 sits between UP_MS and
+ * DOWN_MS forever: once a heavy moment (a 50 ms window) put it at the floor it
+ * never climbed back. Fast machines (RTX 4070 at 8 ms frames, RTX 5080 and an
+ * Apple GPU at 16 ms) were also at the floor at the 60 s mark: loading windows
+ * over DOWN_MS stepped them down (FAR steps reach the floor in two windows),
+ * each step "gained" because the load ended, and the climb back was one
+ * UP_FACTOR step per ~3 s behind a back-off the loading's ups and downs had
+ * doubled. The rules that fix both:
+ *
+ *  - the host also passes each frame's CPU work (main.ts: frame start to
+ *    after the draw). A median frame that the median work explains to within
+ *    one refresh (work + VSYNC_MS >= median) is set by the CPU, not by the
+ *    pixel count: a step down then takes a draw-distance step first (draw
+ *    calls are the cost), and the ratio only when there is none left (still
+ *    checked by the no-gain rule, so a GPU whose submission blocks still gets
+ *    its reduction);
+ *  - in the band (UP_MS..DOWN_MS) a CPU-explained window PROBES the ratio up
+ *    by PROBE_FACTOR. A probe that makes the median worse (past DOWN_MS, or by
+ *    more than GAIN_REQUIRED) is undone and in-band probes stay at or below
+ *    the ratio it left for a hold that doubles per failure; a down step that
+ *    helped sets the same ceiling, so it never re-probes straight into the
+ *    step it just took;
+ *  - with headroom (median < UP_MS) the ratio jumps to the highest one the
+ *    conservative prediction (median x area ratio) keeps under UP_PREDICT_MS,
+ *    with one draw-distance step restored in the same change, and the
+ *    back-off holds such a raise at most HEADROOM_HOLD_MS after the last step
+ *    down. An 8 ms machine at the floor is back at full within two steps.
+ *
  * Hysteresis: the up and down bands are far apart, every change opens a
  * SETTLE_MS window that is not measured (the buffer reallocation's own
  * hitch), every down step blocks up steps for a back-off that doubles each
@@ -68,7 +101,16 @@ export const BACKOFF_MAX_MS = 120_000;
 export const FLAP_MS = 15_000;
 export const RATIO_QUANTUM = 0.05;
 /** A down step that did not cut the median by at least this much bought nothing. */
-const GAIN_REQUIRED = 0.92;
+export const GAIN_REQUIRED = 0.92;
+/** One display refresh at 60 Hz: the quantum frame intervals snap to. */
+export const VSYNC_MS = 1000 / 60;
+/** An in-band probe up multiplies the ratio by this (pixels are not what sets the frame there). */
+export const PROBE_FACTOR = 1.25;
+/** A raise with clear headroom (median < UP_MS) waits at most this long after the last step down. */
+export const HEADROOM_HOLD_MS = BACKOFF_START_MS;
+/** How long the probe ceiling first holds (a failed probe, or a down step that helped); doubles per failed probe. */
+export const PROBE_HOLD_MS = NO_GAIN_MS;
+export const PROBE_HOLD_MAX_MS = 8 * 60_000;
 const MAX_SAMPLES = 512;
 
 export interface DynamicResolutionOptions {
@@ -97,6 +139,9 @@ export class DynamicResolution {
   private readonly onChange: ((ratio: number, distanceSteps: number) => void) | undefined;
 
   private readonly samples = new Float32Array(MAX_SAMPLES);
+  /** The CPU work of the same frames (ms); valid only while workKnown. */
+  private readonly works = new Float32Array(MAX_SAMPLES);
+  private workKnown = true;
   private count = 0;
   /** Summed length of the window's samples, ms. */
   private sum = 0;
@@ -109,6 +154,13 @@ export class DynamicResolution {
   /** The median before the last ratio step down, and that step's ratio before it. */
   private pendingDown: { median: number; from: number } | null = null;
   private noGainUntil = -Infinity;
+  /** The median before the last in-band probe up, and the ratio it left. */
+  private pendingUp: { median: number; from: number } | null = null;
+  /** In-band probes stay at or below this ratio until probeCeilingUntil. */
+  private probeCeiling = Infinity;
+  private probeCeilingUntil = -Infinity;
+  private probeHoldMs = PROBE_HOLD_MS;
+  private lastDownAt = -Infinity;
   private upAllowedAt = -Infinity;
   private backoffMs = BACKOFF_START_MS;
   private lastUpAt = -Infinity;
@@ -144,9 +196,11 @@ export class DynamicResolution {
 
   /**
    * One drawn frame at `now` (ms). `eligible`: the frame drew the world in a
-   * visible tab (no portal space, no loading cover).
+   * visible tab (no portal space, no loading cover). `workMs`: the frame's own
+   * CPU work (its script time up to and including the draw call), when the
+   * host measures it.
    */
-  frame(now: number, eligible: boolean): void {
+  frame(now: number, eligible: boolean, workMs?: number): void {
     // An ineligible frame breaks the chain: the next interval would span it.
     const last = this.lastFrameAt;
     this.lastFrameAt = eligible ? now : null;
@@ -162,22 +216,28 @@ export class DynamicResolution {
       sample = Math.min(dt, LONG_FRAME_CAP_MS);
     }
     if (this.windowStart === null) this.windowStart = last;
-    if (this.count < MAX_SAMPLES) { this.samples[this.count++] = sample; this.sum += sample; }
+    if (this.count < MAX_SAMPLES) {
+      if (workMs !== undefined && Number.isFinite(workMs) && workMs >= 0) this.works[this.count] = workMs;
+      else this.workKnown = false;
+      this.samples[this.count++] = sample;
+      this.sum += sample;
+    }
     if (now - this.windowStart >= EVAL_MS
       && (this.count >= MIN_SAMPLES || (this.count >= MIN_SLOW_SAMPLES && this.sum >= EVAL_MS))) this.evaluate(now);
   }
 
-  private median(): number {
-    const s = Array.from(this.samples.subarray(0, this.count)).sort((a, b) => a - b);
+  private median(arr: Float32Array = this.samples): number {
+    const s = Array.from(arr.subarray(0, this.count)).sort((a, b) => a - b);
     const m = s.length >> 1;
     return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
   }
 
   private evaluate(now: number): void {
     const med = this.median();
-    this.count = 0;
-    this.sum = 0;
-    this.windowStart = null;
+    const work = this.workKnown && this.count > 0 ? this.median(this.works) : null;
+    this.resetWindow();
+    // The CPU work explains the frame to within one refresh: the pixel count is not what sets it.
+    const cpuExplained = work !== null && work + VSYNC_MS >= med;
 
     // Did the last step down help? If not, pixels are not the cost: undo it.
     if (this.pendingDown) {
@@ -188,9 +248,31 @@ export class DynamicResolution {
         this.apply(from, this._distanceSteps, now);
         return;
       }
+      // It helped: in-band probes stay at or below where it landed for a while.
+      this.setProbeCeiling(this._ratio, now);
+    }
+
+    // Did the last probe up cost frames? Then pixels were the cost after all: undo it.
+    if (this.pendingUp) {
+      const { median: before, from } = this.pendingUp;
+      this.pendingUp = null;
+      if (med > DOWN_MS || med * GAIN_REQUIRED > before) {
+        this.setProbeCeiling(from, now);
+        this.probeHoldMs = Math.min(PROBE_HOLD_MAX_MS, this.probeHoldMs * 2);
+        this.down(now);
+        this.apply(from, this._distanceSteps, now);
+        return;
+      }
+      this.probeHoldMs = PROBE_HOLD_MS;
     }
 
     if (med > DOWN_MS) {
+      // CPU-set frames: fewer draw calls first; the ratio only once there is no distance left.
+      if (cpuExplained && this._distanceSteps < this.maxDistanceSteps) {
+        this.down(now);
+        this.apply(this._ratio, this._distanceSteps + 1, now);
+        return;
+      }
       const canRatio = this._ratio > this._min && now >= this.noGainUntil;
       if (canRatio) {
         const minFactor = med > FAR_DOWN_MS ? FAR_MIN_DOWN_FACTOR : MIN_DOWN_FACTOR;
@@ -211,29 +293,56 @@ export class DynamicResolution {
       return;
     }
 
-    if (med < UP_MS && now >= this.upAllowedAt) {
-      if (this._distanceSteps > 0) {
-        this.lastUpAt = now;
-        this.apply(this._ratio, this._distanceSteps - 1, now);
-        return;
+    if (med < UP_MS) {
+      // Clear headroom: a back-off left by a loading burst never holds this for long.
+      if (now < Math.min(this.upAllowedAt, this.lastDownAt + HEADROOM_HOLD_MS)) return;
+      // The highest ratio the conservative prediction (median x area ratio) keeps under UP_PREDICT_MS.
+      const room = this._ratio * Math.sqrt(UP_PREDICT_MS / med);
+      let next = this._ratio;
+      if (room >= this._max) next = this._max;
+      else {
+        const q = Math.floor(room / RATIO_QUANTUM + 1e-9) * RATIO_QUANTUM;
+        if (q > this._ratio + 1e-9) next = q;
       }
-      if (this._ratio < this._max) {
-        let next = quantize(this._ratio * UP_FACTOR);
-        if (next <= this._ratio) next = this._ratio + RATIO_QUANTUM;
-        next = Math.min(this._max, next);
-        const predicted = med * (next / this._ratio) ** 2;
-        if (predicted < UP_PREDICT_MS) {
-          this.lastUpAt = now;
-          this.apply(next, this._distanceSteps, now);
-        }
+      const steps = Math.max(0, this._distanceSteps - 1);
+      if (next > this._ratio || steps !== this._distanceSteps) {
+        this.lastUpAt = now;
+        this.apply(next, steps, now);
+      }
+      return;
+    }
+
+    // The band (UP_MS..DOWN_MS): a CPU-set frame probes the ratio up; pixels are not what sets it.
+    if (cpuExplained && this._ratio < this._max && now >= this.upAllowedAt) {
+      const ceiling = now < this.probeCeilingUntil ? this.probeCeiling : this._max;
+      let next = quantize(this._ratio * PROBE_FACTOR);
+      if (next <= this._ratio) next = this._ratio + RATIO_QUANTUM;
+      next = Math.min(this._max, ceiling, next);
+      if (next > this._ratio + 1e-9) {
+        this.lastUpAt = now;
+        this.pendingUp = { median: med, from: this._ratio };
+        this.apply(next, this._distanceSteps, now);
       }
     }
+  }
+
+  private setProbeCeiling(ratio: number, now: number): void {
+    this.probeCeiling = ratio;
+    this.probeCeilingUntil = now + this.probeHoldMs;
+  }
+
+  private resetWindow(): void {
+    this.count = 0;
+    this.sum = 0;
+    this.windowStart = null;
+    this.workKnown = true;
   }
 
   /** A step down: block raises, longer each time a raise was undone soon after. */
   private down(now: number): void {
     if (now - this.lastUpAt < FLAP_MS) this.backoffMs = Math.min(BACKOFF_MAX_MS, this.backoffMs * 2);
     this.upAllowedAt = now + this.backoffMs;
+    this.lastDownAt = now;
   }
 
   private clamp(r: number): number {
@@ -247,9 +356,7 @@ export class DynamicResolution {
     this._distanceSteps = distanceSteps;
     this.changes++;
     this.settleUntil = now + SETTLE_MS;
-    this.count = 0;
-    this.sum = 0;
-    this.windowStart = null;
+    this.resetWindow();
     this.lastFrameAt = null;
     this.prevDt = null;
     try { this.onChange?.(r, distanceSteps); } catch { /* the host's apply must not stop the loop */ }

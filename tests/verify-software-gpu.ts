@@ -194,7 +194,8 @@ describe('PERF.render-adapt — DynamicResolution', () => {
     const firstUp = s.changes.findIndex(([, , d], i) => i > 0 && d < s.changes[i - 1][2]);
     const ratioUpAfterDistance = s.changes.findIndex(([, r], i) => i > 0 && r > s.changes[i - 1][1]);
     expect(firstUp).toBeGreaterThan(-1);
-    expect(ratioUpAfterDistance).toBeGreaterThan(firstUp);
+    // A raise with headroom restores a distance step in the same change as the ratio (PERF.render-adapt-cpu-bound); never the ratio first.
+    expect(ratioUpAfterDistance).toBeGreaterThanOrEqual(firstUp);
   });
 
   it('frames not bound by pixels: a step down that buys nothing is undone; draw distance is used instead', () => {

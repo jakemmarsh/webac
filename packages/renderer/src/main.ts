@@ -188,6 +188,7 @@ import { NametagAssessQueue, NametagOverlay, chooseNametags, nametagAllegiance, 
 import { exposeDebugGlobal, readDebugGlobal, debugBag, debugGlobalsEnabled } from './utils/debugGlobals.js';
 import { resolveUrlLogin, resolveUrlWorld, withoutUrlWorld } from './launcher/urlLogin.js';
 import { urlOverridesEnabled } from './config/urlOverrides.js';
+import { MatrixInvariant, matrixInvariantRequested } from './scene/MatrixInvariant.js';
 import { accountBootLoginText, bridgeHttpOrigin, bridgeUrlWithServer, loadWorldDirectory, loginFailureText, perIpCharacterLimit, type World } from './launcher/worldDirectory.js';
 import { charselWorldName, eraSwitchFor, eraSwitchLogin, launcherEraTarget, launcherLogin, resumableEraSwitch, type LauncherEnter, type LauncherLogin } from './launcher/launcherLogin.js';
 import { EOR_ERA_ID, eraProfile, type DatRole, type EraProfile } from './era/EraProfiles.js';
@@ -3790,6 +3791,8 @@ async function main() {
       portalAt: p && p.landblock ? serverFramePoint(p.landblock, p.x, p.y, p.z) : null,
       bodySpheres: serverObjectManager?.getObject(aceCharGuid ?? myPlayerGuid ?? 0)?.physicsSpheres ?? null,
       portalSpheres: o.physicsSpheres ?? null,
+      // OBS.portal-use-pk-status — the int mirror PlayerDescription seeds (no default: absent = unknown).
+      pk: playerState.serverIntProps.get(PropertyInt.PlayerKillerStatus) ?? null,
     };
   }
   /** TELEMETRY.objsend-diagnostics — when handleTeleportToPosition last placed the player (performance.now ms); null = not this session. */
@@ -15682,7 +15685,16 @@ async function main() {
     };
 
     const acDebugEnabled = pageDebugToolsEnabled(window.location.search);
+    // PERF.integrated-gpu-cpu-bound — the live world-matrix invariant (off by default).
+    if (acDebugEnabled && matrixInvariantRequested(window.location.search)) sceneManager.matrixInvariant = new MatrixInvariant();
     if (acDebugEnabled) (window as any).acDebug = {
+      /** PERF.integrated-gpu-cpu-bound — turn the world-matrix invariant on / off (no argument: just read); returns its counters. */
+      matrixInvariant: (on?: boolean) => {
+        if (on === true && !sceneManager.matrixInvariant) sceneManager.matrixInvariant = new MatrixInvariant();
+        const stats = sceneManager.matrixInvariant?.stats ?? null;
+        if (on === false) sceneManager.matrixInvariant = null;
+        return stats;
+      },
       /** Clear the OPFS DAT cache so the next load re-downloads fresh DATs. */
       clearDatCache: async () => {
         await datCacheStore.clear();
@@ -21853,11 +21865,13 @@ async function main() {
       tunnelState: gameUI.portalSpaceState, warm: rendererWarmup?.phaseName ?? 'none',
     });
     // RELEASE.first-minute — counters only (WorldReporter.frame); the world counts as drawn once no portal space covers it.
-    if (draw) worldReporter?.frame(now, gameStarted && !gameUI.portalSpaceCovering, performance.now() - workStart, framePhases.frameMs);
-    // PERF.render-adapt — dynamic resolution measures only frames that drew the world in a visible tab.
+    const frameWorkMs = performance.now() - workStart;
+    if (draw) worldReporter?.frame(now, gameStarted && !gameUI.portalSpaceCovering, frameWorkMs, framePhases.frameMs);
+    // PERF.render-adapt — dynamic resolution measures only frames that drew the world in a visible tab;
+    // the frame's CPU work tells it when the CPU, not the pixel count, sets the frame (PERF.render-adapt-cpu-bound).
     if (draw) {
       sceneManager.dynamicResolution?.frame(now, gameStarted && !gameUI.portalSpaceCovering
-        && !gameUI.worldHiddenByPortalSpace && document.visibilityState === 'visible');
+        && !gameUI.worldHiddenByPortalSpace && document.visibilityState === 'visible', frameWorkMs);
     }
     // SceneTool::UpdateFPSCounter runs after every flip; gmSmartBoxUI::UseTime redraws the meter each frame.
     if (framerateMeter) {

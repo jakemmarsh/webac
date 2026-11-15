@@ -961,3 +961,53 @@ describe('OBS.portal-use-server-walk-run: the server walk our client ran, and wh
     expect(junk).toMatchObject({ moveTypes: [7, 9], moveEnds: ['arrived', null], moveDist: null, movePhase: null, chainBreaks: null, chainBreakTypes: [0xf61b] });
   });
 });
+
+describe('OBS.portal-use-pk-status: the player\'s PlayerKillerStatus on a portal failure', () => {
+  /** ACE Enum/PlayerKillerStatus.cs. */
+  const NPK = 0x02, PK = 0x04, PKLITE = 0x40;
+  const failWith = (pkAtStart: number | null | undefined, pkAtEnd: number | null | undefined = pkAtStart) => {
+    let started = false;
+    const g = rig(() => {
+      const s = snap({ pk: started ? pkAtEnd : pkAtStart });
+      started = true;
+      return s;
+    });
+    g.r.useAttempt(PORTAL_GUID, portalObj, true);
+    g.r.serverMovement();
+    g.r.useDone(0);
+    g.run(PORTAL_REPLY_MS + 100);
+    expect(g.events).toHaveLength(1);
+    return g.events[0] as PortalUseFailedEvent;
+  };
+
+  it('a PK (4) player\'s silent use carries pk 4 (ACE FastTick: the walk ran on server physics)', () => {
+    expect(failWith(PK)).toMatchObject({ outcome: 'portal_use_failed', pk: PK });
+    expect(failWith(PKLITE).pk).toBe(PKLITE);
+  });
+
+  it('an NPK (2) player carries pk 2', () => {
+    expect(failWith(NPK).pk).toBe(NPK);
+  });
+
+  it('unknown (no PlayerDescription value) is null, and so is a value that is no status', () => {
+    expect(failWith(undefined).pk).toBeNull();
+    expect(failWith(null).pk).toBeNull();
+    expect(failWith(-1).pk).toBeNull();
+    expect(failWith(2.5).pk).toBeNull();
+    expect(failWith(Number.NaN).pk).toBeNull();
+  });
+
+  it('the status when the watch began is the one reported, not a change during the watch', () => {
+    expect(failWith(NPK, PK).pk).toBe(NPK);
+  });
+
+  it('the bridge keeps a valid pk and drops junk', () => {
+    const sent = failWith(PK);
+    expect(sanitizeClientPortal(sent)).toEqual(sent);
+    expect(sanitizeClientPortal(failWith(undefined))).toMatchObject({ pk: null });
+    for (const junk of [-4, 1.5, '4', 2 ** 33, true, null, undefined]) {
+      expect(sanitizeClientPortal({ ...sent, pk: junk })).toMatchObject({ pk: null });
+    }
+    expect(sanitizeClientPortal({ ...sent, pk: 0 })).toMatchObject({ pk: 0 });
+  });
+});

@@ -490,3 +490,40 @@ and terrain (~257 at every heading), not far furniture or punches.
 - Streaming: a landblock crossing rebuilds the touched pool meshes in ~1–1.4 ms
   (4× throttle) and the next render is ~4 ms slower once (the upload); no frame
   over 100 ms in two minutes of running.
+
+## Integrated-GPU CPU pass (PERF.integrated-gpu-cpu-bound, 2026-11-15)
+
+Input: prod telemetry (322 integrated-GPU sessions, median CPU work 15 ms, 35%
+at ≤ 30 FPS) and `verification/perf/profile-2026-11-15T11-56-25-719Z.json`
+(4× throttle, Holtburg yaw 210, 30.5 fps). **Read profile line numbers against
+`packages/renderer/node_modules/.vite/deps/three.js`**: the profile's
+"setFromRotationMatrix 6427" is *Euler*.setFromRotationMatrix (Object3D's
+quaternion → rotation sync), not Quaternion's.
+
+Shipped, one commit each, each output-identical by test:
+
+| fix | work removed (unit-test counts) |
+|---|---|
+| DegradeLod `partScaleZ` (no per-part decompose) | 1 decompose + 1 Quaternion.setFromRotationMatrix per registered part per frame → 0 |
+| `world/RaycastBroadPhase` (three's sphere early-out first) | camera-boom / fallback casts: 582-mesh town, 3,000 rays: 1,746,000 → 4,068 objects flipped and cast |
+
+Live check: `acDebug.matrixInvariant(true)` (or `?matrixInvariant`) compares
+every drawn node's world matrix with a stock recomputation after each render.
+
+Measured and rejected:
+- **Dirty-tracked updateMatrixWorld** (skip compose / multiply when a node's
+  position, quaternion, scale and parent are unchanged). A micro-benchmark with
+  the real three.js (2,551 nodes, 240 animated) ran the stock walk at
+  115–200 µs/frame and the dirty walk at 163 µs with version checks only and
+  270 µs with the content snapshots needed to stay exact under out-of-band
+  `updateWorldMatrix` / `updateMatrix` calls. V8 does the matrix math faster
+  than the bookkeeping; the walk's cost is visiting nodes, not arithmetic. Only
+  not visiting helps (the 2026-10-31 hidden-subtree skip, freezeStatic).
+- **DatLightBudget's per-frame `traverseVisible`** (2.7% self): counting
+  external point lights without it needs a hook on every PointLight's
+  construction (a prototype setter on `isPointLight`). Its result only sizes
+  zero-intensity fillers (program keys, no pixels), so it is safe, but it is a
+  global three.js hook for ~3%, so it was not shipped in this core-rendering
+  batch (Jake: fewer, safer wins).
+
+**Held (2026-11-15, lead):** `scene/LazyObjectEuler` (Object3D.rotation converted from the quaternion only when read; 3.6% of the throttled frame) is not shipped: it patches three.js's Euler / Quaternion prototypes globally, and a three upgrade could silently break it. Revisit only with a three-version guard and a live A/B showing it matters. Branch worktree-agent-a736344154b2c1bc9, a5fdc9658.

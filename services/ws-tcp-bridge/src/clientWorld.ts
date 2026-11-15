@@ -250,6 +250,8 @@ function perfFields(b: Record<string, unknown>): Partial<ClientFirstMinuteEvent>
  * start / end (`moveDist` / `moveLeft`, m), how far the body moved (`moveMoved`, m), how long it ran (`moveMs`),
  * its last sampled phase (`movePhase`, PORTAL_MOVE_PHASES); and the actions sent after the Use that stop ACE's
  * move-to chain besides a MoveToState (`chainBreaks`, `chainBreakTypes`: GameActionType codes).
+ * OBS.portal-use-pk-status: `pk`, the player's raw PlayerKillerStatus (PropertyInt 134) when the watch began (a
+ * non-negative integer, else null): PK 0x04 / PKLite 0x40 = ACE walked the use on server physics (FastTick).
  */
 export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_cancelled', 'portal_rim_brush', 'portal_used'] as const;
 export const PORTAL_TRIGGERS = ['use', 'walk_in'] as const;
@@ -324,6 +326,8 @@ export interface ClientPortalUseFailedEvent extends WorldIds {
   /** Actions sent after the Use that stop ACE's move-to chain (not MoveToState), and their GameActionType codes. */
   chainBreaks: number | null;
   chainBreakTypes: number[] | null;
+  /** OBS.portal-use-pk-status — the player's raw PlayerKillerStatus (PropertyInt 134) when the watch began; null = unknown. */
+  pk: number | null;
 }
 
 export interface ClientPortalUsedEvent extends WorldIds {
@@ -414,6 +418,7 @@ function sanitizePortal(outcome: typeof PORTAL_OUTCOMES[number], ids: WorldIds, 
     movePhase: pick(b.movePhase, PORTAL_MOVE_PHASES),
     chainBreaks: uint(b.chainBreaks, 10_000),
     chainBreakTypes: Array.isArray(b.chainBreakTypes) ? b.chainBreakTypes.slice(0, PORTAL_MOVE_RECORDS).map((c) => uint(c, U32)).filter((c): c is number => c !== null) : null,
+    pk: uint(b.pk, U32),
   };
 }
 

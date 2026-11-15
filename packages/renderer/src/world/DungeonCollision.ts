@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { rayCandidates } from './RaycastBroadPhase.js';
 import type { CellStruct } from '@ac/dat-parser/file-types/Environment.js';
 import type { Frame } from '@ac/dat-parser/file-types/Frame.js';
 import type { GfxObj } from '@ac/dat-parser/file-types/GfxObj.js';
@@ -1369,19 +1370,25 @@ export class DungeonCollision {
    * instead of being written into the materials.
    */
   private intersectRenderMeshes(): THREE.Intersection[] {
+    // PERF.integrated-gpu-cpu-bound — only the meshes three's own bounding-
+    // sphere early-out would not reject are flipped and cast (RaycastBroadPhase:
+    // the same test, so the same hits in the same order).
+    const meshes = rayCandidates(this.renderMeshes, this.raycaster, this.rayCandidateScratch);
     const restore: Array<[THREE.Material, THREE.Side]> = [];
-    for (const mesh of this.renderMeshes) {
+    for (const mesh of meshes) {
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       for (const m of mats) {
         if (m.side !== THREE.DoubleSide) { restore.push([m, m.side]); m.side = THREE.DoubleSide; }
       }
     }
     try {
-      return this.raycaster.intersectObjects(this.renderMeshes, false);
+      return this.raycaster.intersectObjects(meshes, false);
     } finally {
       for (const [m, side] of restore) m.side = side;
+      meshes.length = 0;
     }
   }
+  private readonly rayCandidateScratch: THREE.Mesh[] = [];
 
   setPhysicsMeshes(_objects: THREE.Object3D[]): void {
     // No longer needed — BSP handles collision directly

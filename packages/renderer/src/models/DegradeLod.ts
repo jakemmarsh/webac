@@ -486,6 +486,22 @@ const ANC_EXCLUDED = 2;
 const ANC_LAND_CELL = 4;
 
 /**
+ * PERF.integrated-gpu-cpu-bound — the `scale.y` Matrix4.decompose would give
+ * (three.js y = AC z, so gfxobj_scale.z), without the rest of decompose.
+ * updateParts used to decompose every registered part's world matrix every
+ * frame only to read this: decompose also normalises a matrix copy and runs
+ * Quaternion.setFromRotationMatrix. Same arithmetic as three r186
+ * Matrix4.decompose (determinantAffine 0 → scale 1; sy = |column 1|, never
+ * sign-flipped), so the value is bit-identical.
+ */
+export function partScaleZ(m: THREE.Matrix4): number {
+  if (m.determinantAffine() === 0) return 1;
+  const te = m.elements;
+  const x = te[4], y = te[5], z = te[6];
+  return Math.sqrt(x * x + y * y + z * z);
+}
+
+/**
  * CPhysicsObj::UpdateViewerDistance @ 00510b30: with the viewer's 2-D
  * (horizontal — three.js x/z) distance² to the OBJECT origin below
  * Render::object_distance_2dsq every part measures its own sort-center
@@ -740,8 +756,8 @@ export class DegradeLod {
       let level = 0;
       let from: DistanceSource = 'part';
       if (!excluded) {
-        part.matrixWorld.decompose(_wp, _wq, _ws);
-        const scaleZ = _ws.y > 1e-6 ? _ws.y : 1;
+        const sy = partScaleZ(part.matrixWorld);
+        const scaleZ = sy > 1e-6 ? sy : 1;
         this.objectPosition(entry, _op);
         let dist: number;
         // CORE.17.h.g.c.c.c — RenderDeviceD3D::UpdateObjCell: a land cell

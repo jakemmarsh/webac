@@ -144,6 +144,15 @@
  * after the first Use that stop ACE's chain besides a MoveToState (`movesSent`) and a re-use of this portal
  * (`attempts`) are `chainBreaks` / `chainBreakTypes` (CHAIN_BREAK_ACTIONS). Telemetry only: nothing moves
  * differently.
+ *
+ * OBS.portal-use-pk-status (2026-11-15): which of ACE's two move-to paths ran. ACE runs a PK-type player
+ * (PlayerKillerStatus PK 0x04 or PKLite 0x40: Player_Combat.cs IsPKType) on server physics
+ * (Player_Tick.cs `FastTick => IsPKType`): a use walks through Player_Move2.cs CreateMoveToChain2, whose
+ * HandleMoveToCallback fails silently when the server's own body ends out of range; everyone else gets
+ * Player_Move.cs's WithinUseRadius poll on the positions we send. Every failure carries `pk`: the player's
+ * raw PropertyInt.PlayerKillerStatus (134) as the client knew it when the watch began (PortalSnapshot.pk,
+ * from PlayerDescription / PrivateUpdatePropertyInt), null when unknown. Era-neutral: GDLE and the AC1999
+ * server send the same property; only ACE splits its move-to on it.
  */
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 import type { MoveToPhase } from '../controllers/MoveToManager.js';
@@ -494,6 +503,11 @@ export interface PortalSnapshot {
   /** The player's and the portal's Setup spheres (the shapes bodyTouchesPortal tests); absent = unknown. */
   bodySpheres?: readonly { z: number; radius: number }[] | null;
   portalSpheres?: readonly { z: number; radius: number }[] | null;
+  /**
+   * OBS.portal-use-pk-status — the local player's raw PropertyInt.PlayerKillerStatus (134) as the client knows it
+   * (PlayerDescription / PrivateUpdatePropertyInt); null/absent = unknown (no PlayerDescription value yet).
+   */
+  pk?: number | null;
 }
 
 interface Ids { era: string; server: string | null; trace: string; build: string }
@@ -606,6 +620,12 @@ export interface PortalUseFailedEvent extends Ids {
    */
   chainBreaks: number;
   chainBreakTypes: number[];
+  /**
+   * OBS.portal-use-pk-status — the player's raw PlayerKillerStatus (PropertyInt 134; ACE Enum/PlayerKillerStatus.cs:
+   * NPK 0x02, PK 0x04, Free 0x20, PKLite 0x40…) when the watch began; null = unknown. PK / PKLite = ACE ran this
+   * use's walk on server physics (Player_Tick.cs FastTick, Player_Move2.cs CreateMoveToChain2).
+   */
+  pk: number | null;
 }
 
 export const PORTAL_RIM_BRUSH = 'portal_rim_brush' as const;
@@ -712,6 +732,9 @@ const u32 = (v: number): number => (Number.isFinite(v) ? v >>> 0 : 0);
 const finitePoint = (p: MovePoint | null | undefined): MovePoint | null =>
   (p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z) ? { x: p.x, y: p.y, z: p.z } : null);
 const dist3 = (a: MovePoint | null, b: MovePoint | null): number | null => (a && b ? r2(Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)) : null);
+/** OBS.portal-use-pk-status — a PlayerKillerStatus as reported: a non-negative integer (u32), else null (unknown). */
+const pkOf = (v: number | null | undefined): number | null =>
+  (typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 0xffffffff ? v : null);
 /** A MoveToManager completion status (CleanUpAndCallWeenie) with no named caller, as a MOVE_TO_ENDS token. */
 function endOfStatus(status: number): MoveToEnd {
   switch (u32(status)) {
@@ -1061,6 +1084,7 @@ export class PortalUseReporter {
       movePhase: mv ? mv.phase : null,
       chainBreaks: w.chainBreaks,
       chainBreakTypes: [...w.chainBreakTypes],
+      pk: pkOf(s.pk),
     });
   }
 

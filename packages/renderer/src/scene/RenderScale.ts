@@ -15,6 +15,12 @@
  *    buffer STARTS at about 1280×720's pixel count, and portal space's
  *    context is capped the same way.
  *
+ * Since 2026-11-15 (PERF.render-adapt-cpu-bound, a Reddit "blurry on my old
+ * Mac" report) the controller also reads each frame's CPU work: frames the CPU
+ * sets step draw distance before resolution and probe the resolution back up,
+ * a fast machine jumps back to full instead of climbing 12 % per step, and a
+ * hardware GPU's floor is 0.75 of the CSS resolution (software keeps 0.5).
+ *
  * Browser UX (CLAUDE.md: rendering resolution adapts to the browser
  * environment); nothing retail changes.
  *
@@ -28,8 +34,26 @@
 /** About 1280×720 of drawn pixels: where a software-rendered buffer starts. */
 export const SOFTWARE_START_BUFFER_PIXELS = 1280 * 720;
 
-/** The lowest effective pixel ratio dynamic resolution goes to (half the CSS resolution). */
+/** The lowest effective pixel ratio dynamic resolution goes to with software rendering (half the CSS resolution). */
 export const MIN_RENDER_PIXEL_RATIO = 0.5;
+
+/**
+ * PERF.render-adapt-cpu-bound — the floor on a hardware GPU: three quarters of
+ * the CSS resolution (56 % of the pixels). Prod first-minute 2026-11-15: every
+ * hardware session at the 0.5 floor that week was not pixel-bound (an Intel
+ * HD 5000 at dpr 1 drew its render phase in 17.4 ms at half size against 13 ms
+ * at full size elsewhere, 28 of its 33 ms frame CPU work; RTX 4070 / 5080 and
+ * Apple GPUs at 8–16 ms frames), so going below this only blurred. Software
+ * rendering (SwiftShader ~12 FPS at 2500×1200, 2026-10-14) is truly fill-bound
+ * and keeps MIN_RENDER_PIXEL_RATIO.
+ */
+export const HARDWARE_MIN_RENDER_PIXEL_RATIO = 0.75;
+
+/** Dynamic resolution's floor for this device (never above the device ratio itself). */
+export function minRenderPixelRatio(dpr: number, software: boolean): number {
+  const d = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+  return Math.min(d, software ? MIN_RENDER_PIXEL_RATIO : HARDWARE_MIN_RENDER_PIXEL_RATIO);
+}
 
 /**
  * The pixel ratio for a canvas of `cssW`×`cssH` CSS px. Without the cap it is

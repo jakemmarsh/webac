@@ -3,10 +3,11 @@ import { mirrorCameraX, installMirrorAwareCulling, type MirrorCullingRenderer } 
 import { retailVerticalFovDeg } from './RetailCamera.js';
 import { fovForViewDistanceRatio } from '../effects/PortalSpaceModel.js';
 import { ProgramRetention, type RetainableProgram } from './ProgramRetention.js';
-import { renderPixelRatio, renderAdaptConfig, contextAntialias, MIN_RENDER_PIXEL_RATIO } from './RenderScale.js';
+import { renderPixelRatio, renderAdaptConfig, contextAntialias, minRenderPixelRatio } from './RenderScale.js';
 import { DynamicResolution } from './DynamicResolution.js';
 import { renderIndoorView, type IndoorViewContext } from './IndoorView.js';
 import { installHiddenSubtreeMatrixSkip } from './HiddenSubtreeMatrixSkip.js';
+import type { MatrixInvariant } from './MatrixInvariant.js';
 import { sampleCanvasLuma, type LumaScratch } from './CanvasLuma.js';
 import type { LumaSample } from '../telemetry/WorldReporter.js';
 
@@ -195,7 +196,7 @@ export class SceneManager {
   private adaptPixelRatio(width: number, height: number): number {
     const cfg = renderAdaptConfig();
     const dpr = this.devicePixelRatio();
-    const min = Math.min(dpr, MIN_RENDER_PIXEL_RATIO);
+    const min = minRenderPixelRatio(dpr, cfg.software);
     if (!this.dynamicResolution) {
       let lastSteps = 0;
       this.dynamicResolution = new DynamicResolution({
@@ -349,6 +350,9 @@ export class SceneManager {
    */
   indoorView: IndoorViewContext | null = null;
 
+  /** Debug-only (off = null): `?matrixInvariant` / `acDebug.matrixInvariant(true)`. */
+  matrixInvariant: MatrixInvariant | null = null;
+
   render(): void {
     if (this.renderer?.domElement?.style?.visibility === 'hidden') {
       this.skipDraw();
@@ -356,6 +360,9 @@ export class SceneManager {
     }
     if (this.indoorView && this.renderer) renderIndoorView(this.renderer, this.scene, this.camera, this.indoorView);
     else this.renderer?.render(this.scene, this.camera);
+    // PERF.integrated-gpu-cpu-bound — debug-only: every drawn node's world
+    // matrix against a from-scratch stock recomputation (MatrixInvariant.ts).
+    if (this.matrixInvariant) this.matrixInvariant.check(this.scene);
     if (this.pendingCaptures.length) this.flushCaptures();
     if (this.pendingLuma) this.flushLuma();
     // PERF.gpu-soak-frame-hitches-28a525da — no program is ever relinked.
