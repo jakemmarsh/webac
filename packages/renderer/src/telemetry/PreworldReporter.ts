@@ -41,7 +41,8 @@ export type PreworldOutcome =
   | 'login_refused' | 'connect_failed' | 'char_list' | 'char_error' | 'chargen_ok' | 'chargen_refused'
   | 'chargen_sent' | 'chargen_blocked'
   | 'enter_refused' | 'enter_ok' | 'dropped' | 'page_hidden' | 'page_left' | 'page_reload' | 'boot_slow' | 'boot_failed'
-  | 'enter_retry' | 'left_for_launcher' | 'resume_ended' | 'login_retry' | 'handover' | 'boot_done' | 'enter_held' | 'login_held';
+  | 'enter_retry' | 'left_for_launcher' | 'resume_ended' | 'login_retry' | 'handover' | 'boot_done' | 'enter_held' | 'login_held'
+  | 'resume_held';
 
 /**
  * A draining bridge's session moving to the new deployment (session/DrainHandover.ts): why
@@ -363,6 +364,8 @@ export interface PreworldEvent {
   path?: HandoverPath;
   /** 'handover' only: a running macro held this long for the move (DrainHandover.noteYield); absent: none held. */
   yieldedMs?: number;
+  /** BUG.sleep-darkwake-resume-loop — 'resume_held' with token 'released' only: how long the hidden tab held the resume. */
+  heldMs?: number;
   /**
    * UX.gdle-first-login-retry — 'login_retry' only: why the page retried
    * ('proven': these credentials got in earlier on the page; 'first_time': a
@@ -904,6 +907,15 @@ export class PreworldReporter {
   }
 
   /**
+   * BUG.sleep-darkwake-resume-loop — a resume after the machine slept waits while the tab is hidden
+   * (session/ResumeRunner.ts): 'resume_held' with token 'held' when the wait begins, and 'released'
+   * with `heldMs` when the tab is shown and the attempt goes.
+   */
+  resumeHeld(phase: 'held' | 'released', heldMs: number): void {
+    this.report('resume_held', { token: phase, ...(phase === 'released' ? { heldMs: Math.max(0, Math.round(heldMs)) } : {}) });
+  }
+
+  /**
    * A planned handover finished (session/DrainHandover.ts): 'handover' with its time, why and
    * how; `token` names a failed attempt's step and reason (absent when it worked).
    */
@@ -1204,7 +1216,7 @@ export class PreworldReporter {
 
   // ── Transport ────────────────────────────────────────────────────────
 
-  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'heritage' | 'handoverMs' | 'reason' | 'path' | 'yieldedMs' | 'retry' | 'why' | 'openMs' | 'hidden' | 'afterRefusal' | 'heldByTab' | 'holderQuery' | 'holders' | 'tabs' | 'holdersClosed'>>, withStream = false): void {
+  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'heritage' | 'handoverMs' | 'reason' | 'path' | 'yieldedMs' | 'retry' | 'why' | 'openMs' | 'hidden' | 'afterRefusal' | 'heldByTab' | 'holderQuery' | 'holders' | 'tabs' | 'holdersClosed' | 'heldMs'>>, withStream = false): void {
     // OBS.login-after-refusal — every refused attempt, sent or not. A case retry's refusal
     // (case_verbatim / case_lower, LoginCaseFallback) is the page trying the password's other
     // case, not the server refusing what the player typed, so it is not counted.
@@ -1242,6 +1254,7 @@ export class PreworldReporter {
       ...(f.heritage !== undefined ? { heritage: f.heritage } : {}),
       ...(outcome === 'handover' ? { handoverMs: f.handoverMs, reason: f.reason, path: f.path, ...(f.yieldedMs !== undefined ? { yieldedMs: f.yieldedMs } : {}) } : {}),
       ...(outcome === 'login_retry' && f.retry ? { retry: f.retry } : {}),
+      ...(outcome === 'resume_held' && f.heldMs !== undefined ? { heldMs: f.heldMs } : {}),
       ...((outcome === 'login_refused' || outcome === 'login_retry') && f.heldByTab === true ? { heldByTab: true as const } : {}),
       ...((outcome === 'login_refused' || outcome === 'login_retry') && f.holderQuery ? {
         holderQuery: f.holderQuery,

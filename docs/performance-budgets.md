@@ -153,7 +153,8 @@ retail's menu range; anything else exits 1; ignored with a warning under
 **Nightly real-GPU run:** `tools/local-gpu-perf.sh` (launchd, 04:10 local,
 installed by `tools/install-local-gpu-perf.sh`; `--uninstall` removes it). It
 checks origin/main out in a private worktree, brings up Docker/ACE/bridge/Vite
-as needed, runs `measure-perf --gpu --ratchet`, and pushes the JSON (renderer
+as needed, runs `measure-perf --gpu --ratchet --throttle 4` (the 4x CPU pass
+since 2026-11-15, below), and pushes the JSON (renderer
 string "ANGLE Metal … Apple M3 Max"). **Cloud cycles:** the latest such JSON is
 the real-GPU reference. Quote it next to your SwiftShader scene costs, and treat
 an fps or hitch drop between two consecutive nightly runs as a PERF finding
@@ -525,5 +526,63 @@ Measured and rejected:
   zero-intensity fillers (program keys, no pixels), so it is safe, but it is a
   global three.js hook for ~3%, so it was not shipped in this core-rendering
   batch (Jake: fewer, safer wins).
+
+### The standing 4x CPU-throttled number (2026-11-15)
+
+**What it stands in for.** The players behind this task are CPU-bound, not
+fill-bound: old MacBooks on Intel HD 5000 and similar integrated GPUs at about
+20 fps, whose frame is mostly our main-thread work (prod: an HD 5000 at dpr 1
+spent 28 of its 33 ms frame in CPU work). The M3 Max is unthrottled at
+100+ fps, so the nightly number could not see a regression that costs them
+5 fps. CDP `Emulation.setCPUThrottlingRate 4` slows only the main thread and
+lands the Holtburg town view (yaw 210) at 24-30 fps, close to those players.
+measure-perf's idle and running phases face yaw 0, out of town (49-60 fps at
+4x on 2026-10-31); the turning phase sweeps the whole circle, town included.
+It does not emulate their GPU; it measures our CPU cost.
+
+**Where it lives.** `tools/measure-perf.ts --throttle N` runs the normal
+idle / turning / running phases, re-parks at the Holtburg POI (the running
+phase moved the character), settles at full speed, then runs the same three
+phases under N x throttle and resets the rate to 1 (also on error, so an
+`--attach` tab is left at full speed). The nightly `tools/local-gpu-perf.sh`
+passes `--throttle 4` (`STANDING_CPU_THROTTLE` in `tools/perf-ratchet-lib.ts`).
+Both passes land in the same `verification/perf/perf-<utc>.json`:
+
+- top level, as before: `phases` (avgFps, p50 / p95 frame ms, hitches),
+  `render` (scene costs), `renderJs`, and now `work`;
+- `throttled`: `{ rate, phases, renderJs, work, ratchetVerdict, warnings }`.
+  No scene costs: the scene is the same, and the unthrottled pass ratchets them.
+
+`work[phase]` is the game's own CPU time per frame: frameStep from its first
+line through `renderer.render()`, the sum of the page's FramePhaseTimer phases
+(`__ac.framePhases`, read once per frame through its `frames` counter), the
+same quantity prod telemetry reports as `workMedianMs` / `workP95Ms`. It has
+`p50Ms`, `p95Ms`, `meanMs` and `phaseMs` (mean ms per frame in each
+FRAME_PHASES phase: physics, anim, camera, fx, stream, hud, lod, render, ...),
+so a throttled regression names its phase.
+
+**Ratchet.** The throttled pass ratchets only against earlier throttled passes
+at the same rate (`throttledView` / `compareThrottled`): same renderer,
+location, phase length, sampling, draw distance and dynamic-resolution state,
+median of the last 3, the PERF.6 noise rule. Throttled and unthrottled numbers
+never meet. Tolerances are the existing ones: avgFps a 10% drop, hitch100 up by
+more than 2, renderJs p50 and work p50 25% (both wall-clock CPU time). JSON from
+before 2026-11-15 has no `throttled` section and no `work`; it still serves as
+an unthrottled baseline (work is compared only once every baseline has it) and
+never as a throttled one, so the first throttled run is `no-baseline` and the
+chain starts there. Each pass keeps its own verdict (top-level `ratchetVerdict`
+is the unthrottled pass's, `throttled.ratchetVerdict` the throttled one's), and
+measure-perf exits 2 if either regressed, so the nightly job quarantines the
+whole JSON. The 10% fps tolerance was set for unthrottled runs; if the first
+week of throttled passes shows a wider same-code spread, widen it for the
+throttled pass with that week's numbers rather than letting it cry wolf.
+
+**Dynamic resolution stays off.** `renderAdaptConfigFor` (scene/RenderScale.ts)
+turns it off whenever `navigator.webdriver` is set unless the URL has
+`?renderAdapt=1`, and every launched run (`--gpu`, SwiftShader, `--headed`) is
+a Playwright browser, so the buffer is fixed and the number is CPU cost, not
+the controller's. An `--attach` tab in an ordinary Chrome has it on: the run
+records `dynamicResolution` (whether `sceneManager.dynamicResolution` exists),
+warns, and compares only with runs in the same state (absent = off).
 
 **Held (2026-11-15, lead):** `scene/LazyObjectEuler` (Object3D.rotation converted from the quaternion only when read; 3.6% of the throttled frame) is not shipped: it patches three.js's Euler / Quaternion prototypes globally, and a three upgrade could silently break it. Revisit only with a three-version guard and a live A/B showing it matters. Branch worktree-agent-a736344154b2c1bc9, a5fdc9658.

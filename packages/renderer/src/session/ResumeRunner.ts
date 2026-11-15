@@ -12,6 +12,18 @@
  * whole time. Nothing connects once the resume is over (a deliberate logout,
  * back in the world, given up) or after a newer schedule / cancel.
  *
+ * BUG.sleep-darkwake-resume-loop — a resume that began from the machine
+ * sleeping (SessionLifecycle.holdWhileHidden) waits, before the network
+ * check, while the page is hidden: for the page's 'visibilitychange' to
+ * visible, however long, then goes on at once. A sleeping Mac dark-wakes
+ * about every 17 min; each wake found the session dead ('client_suspended'),
+ * resumed it in the hidden tab, and the re-sleep dropped it again (prod
+ * 2026-11-15, FrostfACE: 15 unattended logins in a few hours). The hold is
+ * the attempt already granted, so it spends nothing (no attempt, no grace,
+ * no page cap); the connecting screen stays up, so the player opening the
+ * lid sees it reconnect. Other causes (a socket close, a drain's cut, a
+ * silent server) never hold: a background window must come back from a blip.
+ *
  * Part of the named automatic-reconnect browser-UX exception (CLAUDE.md).
  */
 import type { SessionLifecycle } from './SessionLifecycle.js';
@@ -62,11 +74,38 @@ export function attemptFoundNoNetwork(
   return offline || event.openTimedOut === true || event.openFailed === true;
 }
 
+/** The page's visibility: document.visibilityState and its 'visibilitychange' event. */
+export interface VisibilitySource {
+  isHidden(): boolean;
+  /** Call `fn` on each change to visible; returns the unsubscribe. */
+  onVisible(fn: () => void): () => void;
+}
+
+/** The VisibilitySource of a document. */
+export function documentVisibilitySource(d: {
+  visibilityState?: string;
+  addEventListener(type: 'visibilitychange', fn: () => void): void;
+  removeEventListener(type: 'visibilitychange', fn: () => void): void;
+}): VisibilitySource {
+  return {
+    isHidden: () => d.visibilityState === 'hidden',
+    onVisible: (fn) => {
+      const h = () => { if (d.visibilityState !== 'hidden') fn(); };
+      d.addEventListener('visibilitychange', h);
+      return () => d.removeEventListener('visibilitychange', h);
+    },
+  };
+}
+
 export interface ResumeRunnerOptions {
-  lifecycle: Pick<SessionLifecycle, 'resumingAfterDrop' | 'unreachableGraceLeftMs' | 'noteNetworkOut'>;
+  lifecycle: Pick<SessionLifecycle, 'resumingAfterDrop' | 'unreachableGraceLeftMs' | 'noteNetworkOut'> & { readonly holdWhileHidden?: boolean };
   /** Open the attempt's connection (NetConnection.connect with the session's credentials). */
   connect(): void;
   online: OnlineSource;
+  /** BUG.sleep-darkwake-resume-loop — absent: never held. */
+  visibility?: VisibilitySource;
+  /** A held attempt: 'held' when the wait begins, 'released' (with how long) when the page shows. */
+  onHold?(phase: 'held' | 'released', heldMs: number): void;
   log?(text: string): void;
   now?(): number;
   setTimer?(fn: () => void, ms: number): unknown;
@@ -78,12 +117,18 @@ export class ResumeRunner {
   private unsubscribe: (() => void) | null = null;
   private generation = 0;
   private waiting = false;
+  private heldSince: number | null = null;
 
   constructor(private readonly o: ResumeRunnerOptions) {}
 
   /** The attempt due is waiting for the browser to come back online. */
   get waitingForNetwork(): boolean {
     return this.waiting;
+  }
+
+  /** BUG.sleep-darkwake-resume-loop — the attempt due is held until the page is visible. */
+  get heldWhileHidden(): boolean {
+    return this.heldSince !== null;
   }
 
   /** Run the next attempt after `delayMs` (replacing any attempt still pending). */
@@ -97,6 +142,7 @@ export class ResumeRunner {
   cancel(): void {
     this.generation++;
     this.waiting = false;
+    this.heldSince = null;
     if (this.timer !== null) (this.o.clearTimer ?? ((t) => clearTimeout(t as ReturnType<typeof setTimeout>)))(this.timer);
     this.timer = null;
     this.unsubscribe?.();
@@ -113,6 +159,7 @@ export class ResumeRunner {
 
   private due(gen: number): void {
     if (gen !== this.generation || !this.o.lifecycle.resumingAfterDrop) return; // gave up or logged out meanwhile
+    if (this.o.lifecycle.holdWhileHidden === true && this.o.visibility?.isHidden() === true) { this.holdUntilVisible(gen); return; }
     if (!this.o.online.isOffline()) { this.fire(gen); return; }
     this.o.lifecycle.noteNetworkOut(this.now());
     const left = this.o.lifecycle.unreachableGraceLeftMs(this.now());
@@ -133,6 +180,24 @@ export class ResumeRunner {
     };
     this.unsubscribe = this.o.online.onOnline(() => done('online'));
     this.arm(left, () => done('grace'));
+  }
+
+  private holdUntilVisible(gen: number): void {
+    const since = this.now();
+    this.heldSince = since;
+    this.o.log?.('[AC] ACE: the machine slept and this tab is hidden — the resume waits until the tab is shown');
+    this.o.onHold?.('held', 0);
+    this.unsubscribe = this.o.visibility!.onVisible(() => {
+      if (gen !== this.generation || this.heldSince === null) return;
+      this.unsubscribe?.();
+      this.unsubscribe = null;
+      this.heldSince = null;
+      if (!this.o.lifecycle.resumingAfterDrop) return; // a logout, a give-up or the launcher ended it meanwhile
+      const heldMs = Math.max(0, this.now() - since);
+      this.o.log?.(`[AC] ACE: the tab is shown — resuming (held ${Math.round(heldMs / 1000)} s)`);
+      this.o.onHold?.('released', heldMs);
+      this.due(gen);
+    });
   }
 
   private fire(gen: number): void {

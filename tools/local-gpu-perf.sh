@@ -11,9 +11,14 @@
 #      cleans verification/perf there
 #   2. brings up what's missing: Docker Desktop, ace-db + ace-server, the
 #      ws-tcp-bridge on :9090, a Vite server on :3190 for that worktree
-#   3. `measure-perf.ts --gpu --ratchet` (headless, ANGLE Metal; no window)
+#   3. `measure-perf.ts --gpu --ratchet --throttle 4` (headless, ANGLE Metal;
+#      no window): the unthrottled phases, then the same phases again at 4x
+#      CPU throttle, the stand-in for the low-end CPU-bound laptops
+#      (PERF.integrated-gpu-cpu-bound). Both land in one JSON; each pass
+#      ratchets only against its own kind (docs/performance-budgets.md).
 #   4. commits the JSON (verification/perf/, CI-ignored) and pushes — ONLY
-#      when measure-perf exits 0. A regression (exit 2) or failure (exit 1)
+#      when measure-perf exits 0. A regression in either pass (exit 2) or a
+#      failure (exit 1)
 #      is moved to ~/Library/Logs/acjs/gpu-perf-quarantine/ and never
 #      committed: a committed regressed run would become the next baseline.
 #      (The JSON also records ratchetVerdict, which findBaseline skips.)
@@ -113,7 +118,7 @@ skip_if_in_use "before measuring"
 # 3. measure
 cd "$WT" || die "cd $WT"
 AC_URL='http://localhost:3190/?ace&bridge=ws://localhost:9090&account=testacjs&password=testacjs&cb=gpuperf' \
-  npx tsx tools/measure-perf.ts --gpu --ratchet
+  npx tsx tools/measure-perf.ts --gpu --ratchet --throttle 4
 rc=$?
 echo "measure-perf exit $rc"
 
@@ -137,7 +142,7 @@ esac
 # 4. commit + push the new JSON (retry on a race with the cloud loop)
 [[ -z "$new" ]] && { echo "no new perf JSON"; exit 0; }
 git add -- verification/perf || die "git add verification/perf"
-git commit -q -m "PERF: real-GPU measure-perf run (local Mac, --gpu, $(date -u +%F)) [skip-tests]
+git commit -q -m "PERF: real-GPU measure-perf run (local Mac, --gpu --throttle 4, $(date -u +%F)) [skip-tests]
 
 Scheduled by tools/local-gpu-perf.sh. The cloud loop only sees SwiftShader;
 this is its real-GPU reference (docs/performance-budgets.md)." || die "git commit"

@@ -216,6 +216,32 @@ if (run('rim')) {
     console.log(`${ts()} RIM d=${d} offset=${axis} move=${key} startDist=${q?.d} startCell=${start.cell} endCell=${end.cell} teleported=${end.cell !== start.cell && Math.hypot(end.x - start.x, end.z - start.z) > 20}`);
   }
 }
+if (run('real')) {
+  // 2026-11-15 prod trace c113cf8509073bf9 (FrostfACE): a walk-in to the REAL Town Network portal in Yaraq (wcid 43066,
+  // 0x7D640025 [103.0 106.79 12.2]) came 0.37 m inside and the server did nothing. From REAL_D m out on each bearing in
+  // REAL_BEARINGS (the approach heading), face the portal, run forward REAL_MS ms, and report whether it teleported.
+  const PX = Number(process.env.REAL_X ?? 102.999), PY = Number(process.env.REAL_Y ?? 106.787), PZ = Number(process.env.REAL_Z ?? 12.198);
+  const LB = Number(process.env.REAL_LB ?? 0x7d64);
+  const d = Number(process.env.REAL_D ?? 8);
+  const bearings = (process.env.REAL_BEARINGS ?? '0,45,90,135,180,225,270,315').split(',').map(Number);
+  for (const b of bearings) {
+    await fresh(`real: run into the real portal from ${d} m, approach heading ${b}`);
+    const rad = (b * Math.PI) / 180;
+    const x = PX - d * Math.sin(rad), y = PY - d * Math.cos(rad);
+    const cell = ((LB << 16) | (Math.floor(x / 24) * 8 + Math.floor(y / 24) + 1)) >>> 0;
+    await chatLine(page, `@teleloc 0x${cell.toString(16).padStart(8, '0')} [${x.toFixed(2)} ${y.toFixed(2)} ${(PZ + 0.5).toFixed(2)}] 1 0 0 0`);
+    await page.waitForTimeout(3000);
+    await waitFor(page, `!window.__ac.gameUI.worldHiddenByPortalSpace`, { timeoutMs: 60_000, reloadEveryMs: 0 });
+    await page.waitForTimeout(3000);
+    await ev(`JSON.stringify(window.__acAgent.turn(${b}))`);
+    await page.waitForTimeout(1500);
+    const start = await player();
+    await hold('KeyW', Number(process.env.REAL_MS ?? 3500));
+    await page.waitForTimeout(6000);
+    const end = await player();
+    console.log(`${ts()} REAL bearing=${b} start=${JSON.stringify(start)} end=${JSON.stringify(end)} teleported=${!end.cell.startsWith(LB.toString(16))}`);
+  }
+}
 if (run('side')) {
   await fresh('side: walk into a purple portal 0.8 m off-centre');
   await spawn(PORTAL);

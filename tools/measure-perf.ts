@@ -37,7 +37,17 @@
  *                     the fps numbers become garbage. Your browser and tab
  *                     stay open afterwards. This is the harness-safe path.
  *
- * Usage:  npx tsx tools/measure-perf.ts [--headed | --attach [url]] [--secs N] [--ratchet] [--no-reset] [--program-keys]
+ * Usage:  npx tsx tools/measure-perf.ts [--headed | --attach [url]] [--secs N] [--ratchet] [--no-reset] [--program-keys] [--throttle N]
+ *   --throttle N  (PERF.integrated-gpu-cpu-bound, 2026-11-15) after the normal
+ *                 phases, re-park and run idle / turning / running again under
+ *                 CDP Emulation.setCPUThrottlingRate N; recorded as `throttled`
+ *                 in the same JSON and ratcheted only against earlier throttled
+ *                 passes at the same rate (perf-ratchet-lib throttledView). The
+ *                 nightly real-GPU run passes --throttle 4: the stand-in for the
+ *                 low-end CPU-bound laptops (~20 fps on Intel HD 5000).
+ * Every phase also records `work`: the game's own CPU time per frame
+ * (frameStep through render, from __ac.framePhases), p50 / p95 / mean and the
+ * mean per frameStep phase; work p50 ratchets at the renderJs tolerance (25%).
  * URL override: AC_URL=http://localhost:<port>/?ace&bridge=… (default :3000).
  * Requires: vite dev server (:3000), ws-tcp-bridge (:9090), ACE stack.
  * NOTE: uses the testacjs account — close other clients on that account first.
@@ -94,9 +104,12 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   isSoftwareRenderer,
-  compareToHistory, droppedFrameWarnings, estimateRealGpu, findBaselines, landblockOf, parseDrawDistance, summarizeInfoSamples,
-  type PerfInfoSample, type PerfInfoSummary, type PerfLocation, type PerfRun, type PerfRenderJsStats,
+  compareThrottled, compareToHistory, droppedFrameWarnings, estimateRealGpu, findBaselines, landblockOf, parseDrawDistance, parseThrottle,
+  summarizeInfoSamples, summarizeWork,
+  type PerfFrameStats, type PerfInfoSample, type PerfInfoSummary, type PerfLocation, type PerfRun, type PerfRenderJsStats,
+  type PerfThrottledPass, type PerfWorkStats, type RatchetVerdict,
 } from './perf-ratchet-lib.js';
+import { FRAME_PHASES } from '../packages/renderer/src/telemetry/MainThreadCost.js';
 import { PROBE_CHARGEN_REOPEN_JS } from './lib/game-session.js';
 import { DRAW_CENSUS_SRC, SCENE_CENSUS_SRC, type DrawCensus, type SceneCensus } from './lib/scene-census.js';
 
@@ -146,6 +159,23 @@ async function programKeys(page: Page): Promise<string[] | null> {
     const r = window.__ac && window.__ac.sceneManager && window.__ac.sceneManager.renderer;
     return r && r.info.programs ? r.info.programs.map(p => p.cacheKey) : null;
   })()`) as Promise<string[] | null>;
+}
+// --throttle N (PERF.integrated-gpu-cpu-bound) — after the normal phases,
+// measure idle / turning / running AGAIN under CDP
+// Emulation.setCPUThrottlingRate N (the main thread N× slower), re-parked at
+// the same spot, and record it as result.throttled in the same JSON. The
+// standing nightly run passes --throttle 4 (perf-ratchet-lib
+// STANDING_CPU_THROTTLE): the stand-in for the low-end CPU-bound laptops.
+const thIdx = process.argv.indexOf('--throttle');
+let THROTTLE: number | undefined;
+if (thIdx > -1) {
+  const raw = process.argv[thIdx + 1];
+  try {
+    THROTTLE = parseThrottle(raw?.startsWith('--') ? undefined : raw);
+  } catch (e) {
+    console.error(`[perf] ${(e as Error).message}`);
+    process.exit(1);
+  }
 }
 const secsArg = process.argv.indexOf('--secs');
 const PHASE_SECS = secsArg > -1 ? Number(process.argv[secsArg + 1]) : 15;
@@ -232,6 +262,10 @@ interface PhaseSamples {
   deltas: number[];
   /** renderer.info read ~once/second during the phase (CORE.14.e) */
   infoSamples: PerfInfoSample[];
+  /** The game's CPU work (frameStep through render, ms) of each frame it ran during the phase. */
+  works: number[];
+  /** Total ms per FRAME_PHASES phase over the same frames; null when the page exposes no __ac.framePhases. */
+  phaseSums: number[] | null;
 }
 
 /**
@@ -250,11 +284,27 @@ async function samplePhase(page: Page, ms: number): Promise<PhaseSamples> {
   return page.evaluate(`new Promise((resolve) => {
     const deltas = [];
     const infoSamples = [];
+    const works = [];
+    let phaseSums = null;
+    let lastFpFrames = -1;
     let last = -1;
     const start = performance.now();
     requestAnimationFrame(function tick(t) {
       if (last >= 0) deltas.push(t - last);
       last = t;
+      // PERF.integrated-gpu-cpu-bound — the frame's own CPU work, from the
+      // page's FramePhaseTimer (telemetry/MainThreadCost.ts): the frame that
+      // ran in this animation frame, counted once (fp.frames tells a new one).
+      const fp = window.__ac && window.__ac.framePhases;
+      if (fp && fp.frameMs && typeof fp.frames === 'number' && fp.frames !== lastFpFrames) {
+        if (lastFpFrames >= 0) {
+          if (!phaseSums) phaseSums = new Array(fp.frameMs.length).fill(0);
+          let w = 0;
+          for (let i = 0; i < fp.frameMs.length; i++) { w += fp.frameMs[i]; phaseSums[i] += fp.frameMs[i]; }
+          works.push(w);
+        }
+        lastFpFrames = fp.frames;
+      }
       // PERF.6 — every frame, with the camera yaw it was drawn at. The game's
       // own rAF callback was queued before this one, so this frame's render
       // has already run: info and yaw describe the same frame.
@@ -269,7 +319,7 @@ async function samplePhase(page: Page, ms: number): Promise<PhaseSamples> {
         yaw: cam && typeof cam.yaw === 'number' ? cam.yaw : undefined,
       });
       if (t - start < ${ms}) requestAnimationFrame(tick);
-      else resolve({ deltas, infoSamples });
+      else resolve({ deltas, infoSamples, works, phaseSums });
     });
   })`) as Promise<PhaseSamples>;
 }
@@ -476,6 +526,77 @@ function isGameUrl(pageUrl: string): boolean {
   }
 }
 
+interface PhaseRunResult {
+  phases: PhaseStats[];
+  render: Record<string, RenderInfo | null>;
+  renderJs: Record<string, PerfRenderJsStats | null>;
+  renderSamples: Record<string, PerfInfoSample[]>;
+  work: Record<string, PerfWorkStats | null>;
+  /** Per-phase cumulative frameStats snapshots, for droppedFrameWarnings. */
+  frameStats: Array<{ phase: string; frameStats?: PerfFrameStats | null }>;
+  /** Every phase's scene costs are in-phase means (false = legacy point-sample semantics). */
+  allPhasesMeanSampled: boolean;
+}
+
+/**
+ * idle / turning / running, each from yaw 0 (unless --no-reset): frame
+ * times, scene costs, renderer.render() time and the game's CPU work. The
+ * unthrottled pass and the --throttle pass both run through here, so the two
+ * measure exactly the same phases. `after(phase)` runs once each phase's
+ * numbers are read (census, program keys).
+ */
+async function runPhases(page: Page, label: string, after?: (phase: string) => Promise<void>): Promise<PhaseRunResult> {
+  const out: PhaseRunResult = {
+    phases: [], render: {}, renderJs: {}, renderSamples: {}, work: {}, frameStats: [], allPhasesMeanSampled: true,
+  };
+  // Point read still supplies textures/programs/frameStats (memory-side
+  // counters, not per-frame); the three per-frame scene-cost metrics come
+  // from the phase mean (CORE.14.e). If any phase had no in-phase samples
+  // (renderer info unavailable) the run degrades to legacy point-sample
+  // semantics and is marked so for the ratchet.
+  const mergeInfo = (point: RenderInfo | null, mean: PerfInfoSummary | null): RenderInfo | null => {
+    if (!mean) out.allPhasesMeanSampled = false;
+    if (!point) return null;
+    if (!mean) return point;
+    return { ...point, drawCalls: mean.drawCalls, triangles: mean.triangles, geometries: mean.geometries };
+  };
+  const yawApplied = NO_RESET ? false : await setYaw(page, 0);
+  if (!NO_RESET && !yawApplied) console.log('[perf] *** setPlayerYaw unavailable — headings not deterministic');
+  await drainRenderTimer(page);
+  // CORE.18 — the controls turned true-handed: ArrowRight now sweeps the
+  // world-space arc (yaw increasing from 0) that ArrowLeft swept for every
+  // pre-CORE.18 baseline, so the ratchet keeps comparing the same scene.
+  // running: streams new landblocks/scenery while moving — the primary hitch
+  // generator (synchronous DAT decode, texture upload, geometry build).
+  const plan: Array<{ phase: string; key?: string }> = [
+    { phase: 'idle' }, { phase: 'turning', key: 'ArrowRight' }, { phase: 'running', key: 'ArrowUp' },
+  ];
+  for (const { phase, key } of plan) {
+    console.log(`[perf] ${label}phase: ${phase} (${PHASE_SECS}s)…`);
+    // Same start heading → same swept arc / same run direction every time.
+    if (phase !== 'idle' && !NO_RESET) await setYaw(page, 0);
+    if (key) await page.keyboard.down(key);
+    const s = await samplePhase(page, PHASE_SECS * 1000);
+    if (key) await page.keyboard.up(key);
+    out.phases.push(stats(phase, s.deltas));
+    out.render[phase] = mergeInfo(await renderInfo(page), summarizeInfoSamples(s.infoSamples));
+    out.renderSamples[phase] = s.infoSamples;
+    out.renderJs[phase] = await drainRenderTimer(page);
+    out.work[phase] = summarizeWork(s.works, s.phaseSums, FRAME_PHASES);
+    out.frameStats.push({ phase, frameStats: out.render[phase]?.frameStats });
+    if (after) await after(phase);
+  }
+  return out;
+}
+
+/** Whether dynamic resolution is running on the page (SceneManager.dynamicResolution exists only when it is on). */
+async function dynamicResolutionOn(page: Page): Promise<boolean> {
+  return page.evaluate(`(() => {
+    const sm = window.__ac && window.__ac.sceneManager;
+    return !!(sm && sm.dynamicResolution);
+  })()`) as Promise<boolean>;
+}
+
 async function main() {
   mkdirSync(OUT_DIR, { recursive: true });
   const REMOTE_CHROMIUM = '/opt/pw-browsers/chromium';
@@ -612,71 +733,66 @@ async function main() {
   console.log(`[perf] location: ${location ? `${location.landblock} (${location.x}, ${location.y}, ${location.z})` : 'unknown'}`);
   const timerOk = await installRenderTimer(page);
   if (!timerOk) console.log('[perf] renderer.render timer unavailable — renderJs will be null');
-
-  const phases: PhaseStats[] = [];
-  const render: Record<string, RenderInfo | null> = {};
-  const renderJs: Record<string, PerfRenderJsStats | null> = {};
-  const renderSamples: Record<string, PerfInfoSample[]> = {};
-  // render[phase] scene-cost values are phase MEANS whenever in-phase samples
-  // exist; if any phase had none (renderer info unavailable) the run degrades
-  // to legacy point-sample semantics and is marked so for the ratchet.
-  let allPhasesMeanSampled = true;
-
-  // Point read still supplies textures/programs/frameStats (memory-side
-  // counters, not per-frame); the three per-frame scene-cost metrics come
-  // from the phase mean (CORE.14.e).
-  const mergeInfo = (point: RenderInfo | null, mean: PerfInfoSummary | null): RenderInfo | null => {
-    if (!mean) allPhasesMeanSampled = false;
-    if (!point) return null;
-    if (!mean) return point;
-    return { ...point, drawCalls: mean.drawCalls, triangles: mean.triangles, geometries: mean.geometries };
-  };
+  // Dynamic resolution is off under automation (navigator.webdriver) unless
+  // ?renderAdapt=1, so a launched run measures a fixed buffer; an --attach tab
+  // in an ordinary Chrome has it on. Recorded, and a comparability key.
+  const dynamicResolution = await dynamicResolutionOn(page);
+  if (dynamicResolution) console.log('[perf] *** dynamic resolution is ON (add ?renderAdapt=0 to measure a fixed buffer); this run compares only with other such runs');
 
   // frameStats counters are cumulative since page load — snapshot before the
   // first phase so per-phase dropped-frame deltas exclude the loading screen.
   const frameStatsStart = (await renderInfo(page))?.frameStats ?? null;
   const keys: Record<string, string[] | null> = {};
   if (PROGRAM_KEYS) keys.settled = await programKeys(page);
-  const yawApplied = NO_RESET ? false : await setYaw(page, 0);
-  if (!NO_RESET && !yawApplied) console.log('[perf] *** setPlayerYaw unavailable — headings not deterministic');
+  // What the idle scene holds and draws (read right after the idle phase).
+  const idleScene: { census: SceneCensus | null; draws: DrawCensus | null } = { census: null, draws: null };
+  const unthrottled = await runPhases(page, '', async (phase) => {
+    if (phase === 'idle') {
+      idleScene.census = await sceneCensus(page);
+      idleScene.draws = await drawCensus(page);
+    }
+    if (PROGRAM_KEYS) keys[phase] = await programKeys(page);
+  });
+  const { census, draws } = idleScene;
+  const { phases, render, renderJs, renderSamples, work, allPhasesMeanSampled } = unthrottled;
 
-  await drainRenderTimer(page);
-  console.log(`[perf] phase: idle (${PHASE_SECS}s)…`);
-  const idleS = await samplePhase(page, PHASE_SECS * 1000);
-  phases.push(stats('idle', idleS.deltas));
-  render.idle = mergeInfo(await renderInfo(page), summarizeInfoSamples(idleS.infoSamples));
-  renderSamples.idle = idleS.infoSamples;
-  renderJs.idle = await drainRenderTimer(page);
-  const census = await sceneCensus(page);
-  const draws = await drawCensus(page);
-  if (PROGRAM_KEYS) keys.idle = await programKeys(page);
-
-  console.log(`[perf] phase: turning (${PHASE_SECS}s)…`);
-  if (!NO_RESET) await setYaw(page, 0); // same start heading → same swept arc
-  // CORE.18 — the controls turned true-handed: ArrowRight now sweeps the
-  // world-space arc (yaw increasing from 0) that ArrowLeft swept for every
-  // pre-CORE.18 baseline, so the ratchet keeps comparing the same scene.
-  await page.keyboard.down('ArrowRight');
-  const turningS = await samplePhase(page, PHASE_SECS * 1000);
-  await page.keyboard.up('ArrowRight');
-  phases.push(stats('turning', turningS.deltas));
-  render.turning = mergeInfo(await renderInfo(page), summarizeInfoSamples(turningS.infoSamples));
-  renderSamples.turning = turningS.infoSamples;
-  renderJs.turning = await drainRenderTimer(page);
-  if (PROGRAM_KEYS) keys.turning = await programKeys(page);
-
-  // Forward run: streams new landblocks/scenery while moving — the primary
-  // hitch generator (synchronous DAT decode, texture upload, geometry build).
-  console.log(`[perf] phase: running (${PHASE_SECS}s)…`);
-  if (!NO_RESET) await setYaw(page, 0); // same run direction every time
-  await page.keyboard.down('ArrowUp');
-  const runningS = await samplePhase(page, PHASE_SECS * 1000);
-  await page.keyboard.up('ArrowUp');
-  phases.push(stats('running', runningS.deltas));
-  render.running = mergeInfo(await renderInfo(page), summarizeInfoSamples(runningS.infoSamples));
-  renderSamples.running = runningS.infoSamples;
-  renderJs.running = await drainRenderTimer(page);
-  if (PROGRAM_KEYS) keys.running = await programKeys(page);
+  // PERF.integrated-gpu-cpu-bound — the throttled pass: re-park (the running
+  // phase carried the character off the spot), settle at full speed, then the
+  // same three phases with the main thread N× slower. Scene costs are the
+  // unthrottled pass's; this pass records frame times and CPU work.
+  let throttled: PerfThrottledPass | undefined;
+  let throttledStart: PerfFrameStats | null = null;
+  let throttledSnapshots: PhaseRunResult['frameStats'] = [];
+  if (THROTTLE !== undefined) {
+    let parked = true;
+    if (!NO_RESET) {
+      const again = await resetToParkSpot(page);
+      console.log(`[perf] throttled pass: re-park telepoi=${again.telepoi}${again.distBefore !== undefined ? ` (was ${again.distBefore}m from park spot)` : ''}`);
+      if (again.telepoi === 'failed') {
+        parked = false;
+        console.log('[perf] *** telepoi never landed — skipping the throttled pass (it would measure another scene)');
+      } else {
+        await setYaw(page, 0);
+        const settle = await waitForSceneSettle(page);
+        console.log(`[perf] throttled pass: scene settle ${settle.meshes} meshes after ${(settle.settleMs / 1000).toFixed(0)}s${settle.plateau ? '' : ' *** never plateaued'}`);
+      }
+    }
+    if (parked) {
+      const cdp = await page.context().newCDPSession(page);
+      throttledStart = (await renderInfo(page))?.frameStats ?? null;
+      await cdp.send('Emulation.setCPUThrottlingRate', { rate: THROTTLE });
+      let t: PhaseRunResult;
+      try {
+        t = await runPhases(page, `${THROTTLE}x CPU `);
+      } finally {
+        // Always back to full speed: an --attach tab is the user's own.
+        await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 }).catch(() => {});
+        await cdp.detach().catch(() => {});
+      }
+      throttledSnapshots = t.frameStats;
+      throttled = { rate: THROTTLE, phases: t.phases, renderJs: t.renderJs, work: t.work };
+    }
+  }
 
   // Attached tabs have whatever size the user's window has — record reality.
   const viewport = page.viewportSize() ?? VIEW;
@@ -695,8 +811,12 @@ async function main() {
   // substeps never turned/moved — its numbers describe the idle scene.
   const warnings = droppedFrameWarnings(
     frameStatsStart,
-    ['idle', 'turning', 'running'].map(phase => ({ phase, frameStats: render[phase]?.frameStats })),
+    unthrottled.frameStats,
   );
+  if (throttled) {
+    throttled.warnings = droppedFrameWarnings(throttledStart, throttledSnapshots).map(w => `throttled ${throttled!.rate}x: ${w}`);
+    warnings.push(...throttled.warnings);
+  }
   const result = {
     utc: new Date().toISOString(),
     url: URL,
@@ -716,10 +836,14 @@ async function main() {
     renderSampling: !allPhasesMeanSampled ? undefined
       : Object.values(renderSamples).every(ss => ss.every(x => typeof x.yaw === 'number')) ? 'frame-heading-binned' : 'frame-mean',
     landscapeDrawDistance,
+    dynamicResolution,
     reset,
     phases,
     render,
     renderJs,
+    work,
+    // PERF.integrated-gpu-cpu-bound — the --throttle pass (absent without it).
+    throttled,
     renderSamples,
     census,
     draws,
@@ -731,16 +855,22 @@ async function main() {
   };
   // Ratchet BEFORE writing so the verdict lands in the JSON itself.
   let ratchet: { v: ReturnType<typeof compareToHistory> } | null = null;
+  let throttledRatchet: RatchetVerdict | null = null;
   if (RATCHET) {
     // PERF.6 — the median of the last RATCHET_HISTORY comparable runs, with
     // in-spread excursions reported as noise (perf-ratchet-lib compareToHistory).
-    const baselines = findBaselines(loadPriorRuns(), result as unknown as PerfRun);
+    const prior = loadPriorRuns();
+    const baselines = findBaselines(prior, result as unknown as PerfRun);
     if (baselines.length) {
       ratchet = { v: compareToHistory(baselines, result as unknown as PerfRun) };
       result.ratchetVerdict = ratchet.v.verdict;
     } else {
       result.ratchetVerdict = 'no-baseline';
     }
+    // The throttled pass ratchets only against earlier throttled passes at the
+    // same rate (perf-ratchet-lib throttledView); its verdict is its own.
+    throttledRatchet = compareThrottled(prior, result as unknown as PerfRun);
+    if (throttled && throttledRatchet) throttled.ratchetVerdict = throttledRatchet.verdict;
   }
   const outFile = join(OUT_DIR, `perf-${result.utc.replace(/[:.]/g, '-')}.json`);
   writeFileSync(outFile, JSON.stringify(result, null, 2));
@@ -785,20 +915,59 @@ async function main() {
     console.log(`  by blend: ${Object.entries(draws.byBlend).map(([k, n]) => `${k} ${n}`).join(', ')}`);
     for (const [cat, n] of Object.entries(draws.byCategory).slice(0, 12)) console.log(`  ${cat.padEnd(22)} ${String(n).padStart(7)}`);
   }
+  printWork('', work);
+  if (throttled) {
+    console.log(`\nthrottled ${throttled.rate}x CPU  frames  avgFps  p50ms  p95ms  >100ms   work p50/p95 ms`);
+    for (const p of throttled.phases as PhaseStats[]) {
+      const w = throttled.work?.[p.phase];
+      console.log(
+        `${p.phase.padEnd(9)}          ${String(p.frames).padStart(6)}  ${String(p.avgFps).padStart(6)}` +
+        `  ${String(p.p50Ms).padStart(5)}  ${String(p.p95Ms).padStart(5)}  ${String(p.hitch100).padStart(6)}` +
+        `   ${w ? `${w.p50Ms}/${w.p95Ms}` : '—'}`,
+      );
+    }
+    printWork(`throttled ${throttled.rate}x `, throttled.work);
+  } else if (THROTTLE !== undefined) {
+    console.log(`\n[perf] *** the ${THROTTLE}x throttled pass did not run (re-park failed)`);
+  }
   for (const w of warnings) console.log(`\n[perf] *** WARNING *** ${w}`);
   console.log(`\n[perf] wrote ${outFile}`);
 
   if (RATCHET) {
+    let regressed = false;
     if (!ratchet) {
       console.log('[perf] ratchet: no comparable baseline (same renderer + same location) — nothing to compare, verdict: no-baseline');
-      return;
+    } else {
+      regressed = printVerdict('ratchet', ratchet.v) || regressed;
     }
-    const { v } = ratchet;
-    console.log(`[perf] ratchet vs median of ${v.baselineUtcs?.length ?? 1} run(s) (${(v.baselineUtcs ?? [v.baselineUtc]).join(', ')}): ${v.verdict.toUpperCase()}`);
-    for (const f of v.findings) console.log(`  REGRESSION ${f.metric}: ${f.baseline} → ${f.current} (${(f.delta * 100).toFixed(1)}%)`);
-    for (const f of v.noise ?? []) console.log(`  noise      ${f.metric}: ${f.baseline} → ${f.current} (${(f.delta * 100).toFixed(1)}%, inside the baseline runs' own range)`);
-    for (const f of v.within) console.log(`  ok         ${f.metric}: ${f.baseline} → ${f.current} (${(f.delta * 100).toFixed(1)}%)`);
-    if (v.verdict === 'regression') process.exit(2);
+    if (throttledRatchet && throttled) {
+      if (throttledRatchet.verdict === 'no-baseline') {
+        console.log(`[perf] throttled ${throttled.rate}x ratchet: no comparable throttled baseline — verdict: no-baseline`);
+      } else {
+        regressed = printVerdict(`throttled ${throttled.rate}x ratchet`, throttledRatchet) || regressed;
+      }
+    }
+    if (regressed) process.exit(2);
+  }
+}
+
+/** The ratchet verdict's log lines; true when it regressed. */
+function printVerdict(name: string, v: RatchetVerdict): boolean {
+  console.log(`[perf] ${name} vs median of ${v.baselineUtcs?.length ?? 1} run(s) (${(v.baselineUtcs ?? [v.baselineUtc]).join(', ')}): ${v.verdict.toUpperCase()}`);
+  for (const f of v.findings) console.log(`  REGRESSION ${f.metric}: ${f.baseline} → ${f.current} (${(f.delta * 100).toFixed(1)}%)`);
+  for (const f of v.noise ?? []) console.log(`  noise      ${f.metric}: ${f.baseline} → ${f.current} (${(f.delta * 100).toFixed(1)}%, inside the baseline runs' own range)`);
+  for (const f of v.within) console.log(`  ok         ${f.metric}: ${f.baseline} → ${f.current} (${(f.delta * 100).toFixed(1)}%)`);
+  return v.verdict === 'regression';
+}
+
+/** Game CPU work per phase, with its five largest frameStep phases. */
+function printWork(label: string, work: Record<string, PerfWorkStats | null> | undefined): void {
+  if (!work || !Object.values(work).some(Boolean)) return;
+  console.log(`\n${label}game CPU work (frameStep through render): p50 / p95 / mean ms, top phases (mean ms/frame)`);
+  for (const [phase, w] of Object.entries(work)) {
+    if (!w) { console.log(`${phase.padEnd(9)} (no __ac.framePhases on this page)`); continue; }
+    const top = Object.entries(w.phaseMs ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, ms]) => `${k} ${ms}`).join(', ');
+    console.log(`${phase.padEnd(9)} ${w.p50Ms} / ${w.p95Ms} / ${w.meanMs}   ${top}`);
   }
 }
 

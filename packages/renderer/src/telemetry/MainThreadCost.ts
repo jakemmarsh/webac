@@ -47,10 +47,13 @@ export const PHASE: { readonly [K in FramePhase]: number } = Object.fromEntries(
 export class FramePhaseTimer {
   /** This frame's ms per phase (FRAME_PHASES order); valid until the next begin(). */
   readonly frameMs = new Float64Array(FRAME_PHASES.length);
+  /** Frames begun so far: a reader sampling frameMs once per animation frame (tools/measure-perf.ts) tells a new frame from one it already counted. */
+  frames = 0;
   private last = 0;
   constructor(private readonly clock: () => number = () => performance.now()) {}
 
   begin(at: number = this.clock()): void {
+    this.frames++;
     this.frameMs.fill(0);
     this.last = at;
   }

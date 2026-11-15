@@ -76,6 +76,8 @@ export class SessionLifecycle {
   private charSelectResume = false;
   /** The character selected at character select when it dropped (CharacterSlot.id), restored on the list. */
   private charSelectSelection: string | undefined = undefined;
+  /** BUG.sleep-darkwake-resume-loop — the resume under way began from the machine sleeping (holdWhileHidden). */
+  private sleepResume = false;
   private inWorldRetries = 0;
   /** BUG.second-tab-in-world-refusal — the holder (another tab) was asked to log out: short waits. */
   private holderLeaving = false;
@@ -98,7 +100,7 @@ export class SessionLifecycle {
    * to resume (no character, a deliberate logout) or the budget is spent —
    * then show the Disconnected screen.
    */
-  nextResumeDelay(opts: { unreachable?: boolean; silentRelogin?: boolean; now?: number } = {}): number | null {
+  nextResumeDelay(opts: { unreachable?: boolean; silentRelogin?: boolean; afterSleep?: boolean; now?: number } = {}): number | null {
     const now = opts.now ?? Date.now();
     const resumable = this.chargenResume || this.charSelectResume || (this.lastEnteredGuid !== null && !this.manualLogout);
     this.lastBound = null;
@@ -146,10 +148,23 @@ export class SessionLifecycle {
       return null;
     }
     this.resuming = true;
+    if (opts.afterSleep) this.sleepResume = true;
     this.attemptLog.push(now);
     const delay = Math.max(RESUME_DELAYS_MS[this.resumeAttempts++], gap);
     this.lastAttemptDueAt = now + delay;
     return delay;
+  }
+
+  /**
+   * BUG.sleep-darkwake-resume-loop — the resume under way began from a drop the
+   * machine's sleep caused (endCause 'client_suspended', nextResumeDelay
+   * `afterSleep`): each of its attempts waits while the page is hidden
+   * (ResumeRunner), so a sleeping laptop's dark wakes don't log the character
+   * in unattended. Holds for the whole resume (an attempt that fails while the
+   * lid is shut again waits too); ends with it.
+   */
+  get holdWhileHidden(): boolean {
+    return this.resuming && this.sleepResume;
   }
 
   /** BUG.resume-outage-fast-fail — attempts the resume under way gave back while the network was out. */
@@ -232,6 +247,7 @@ export class SessionLifecycle {
     this.networkOutSince = null;
     this.givenBack = 0;
     this.lastAttemptDueAt = null;
+    this.sleepResume = false;
     this.chargenResume = false;
     this.charSelectResume = false;
     this.charSelectSelection = undefined;

@@ -411,11 +411,11 @@ import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid } fro
 import { LoginRefusalMemory } from './session/LoginRefusalMemory.js';
 import { ProvenLoginRetry, firstTimeLoginRetryAllowed, type LoginCredentials } from './session/ProvenLoginRetry.js';
 import { LoginCaseFallback, LoginCaseMemory, passwordCaseFor } from './session/LoginCredentialCase.js';
-import { PageHideClose, armDropResume, handleUnexpectedDrop, resumeAttemptRefusalIsFinal, sessionLiveForSend, silentReloginDrop } from './session/UnexpectedDrop.js';
+import { PageHideClose, armDropResume, handleUnexpectedDrop, resumeAttemptRefusalIsFinal, sessionLiveForSend, silentReloginDrop, sleepDrop } from './session/UnexpectedDrop.js';
 import { SessionLiveness, sessionDropped, characterListRole } from './session/SessionLiveness.js';
 import { ChargenDraftStore, decideChargenDraft, CHARGEN_DRAFT_OFFER_TEXT, type ChargenDraftOwner } from './session/ChargenResume.js';
 import { DrainHandover } from './session/DrainHandover.js';
-import { ResumeRunner, attemptFoundNoNetwork, windowOnlineSource } from './session/ResumeRunner.js';
+import { ResumeRunner, attemptFoundNoNetwork, documentVisibilitySource, windowOnlineSource } from './session/ResumeRunner.js';
 import { AccountTabGuard, accountSessionKey, openSessionChannel, type LogoutReason } from './session/AccountTabGuard.js';
 import { InWorldEnterWait, LOGGED_OUT_FOR_OTHER_TAB_TEXT } from './session/InWorldHolder.js';
 import { LoginHolderWait, LOGGED_OUT_FOR_LOGIN_TEXT, stoodDownForOtherTabText } from './session/LoginHolder.js';
@@ -8975,6 +8975,9 @@ async function main() {
       aceConnection.connect(aceAccount, acePassword);
     },
     online: windowOnlineSource(window),
+    // BUG.sleep-darkwake-resume-loop — a resume after the machine slept waits for the tab to be shown.
+    visibility: documentVisibilitySource(document),
+    onHold: (phase, heldMs) => preworldReporter?.resumeHeld(phase, heldMs),
     log: (text) => console.log(text),
   });
   /**
@@ -8982,10 +8985,15 @@ async function main() {
    * that kills a session silently when its account logs in elsewhere (UnexpectedDrop.silentReloginDrop):
    * a session a resume brought back is then not resumed again within RESUME_SILENT_AGAIN_WINDOW_MS.
    */
-  const scheduleResume = (opts: { unreachable?: boolean; silentRelogin?: boolean } = {}): boolean => {
+  /**
+   * BUG.sleep-darkwake-resume-loop — `afterSleep`: the drop was our own stalled thread
+   * ('client_suspended', the machine slept): the resume's attempts wait while the tab is hidden
+   * (SessionLifecycle.holdWhileHidden, ResumeRunner).
+   */
+  const scheduleResume = (opts: { unreachable?: boolean; silentRelogin?: boolean; afterSleep?: boolean } = {}): boolean => {
     const wasResuming = sessionLifecycle.resumingAfterDrop;
     const givenBack = sessionLifecycle.resumeAttemptsGivenBack;
-    const delay = sessionLifecycle.nextResumeDelay({ unreachable: opts.unreachable, silentRelogin: opts.silentRelogin });
+    const delay = sessionLifecycle.nextResumeDelay({ unreachable: opts.unreachable, silentRelogin: opts.silentRelogin, afterSleep: opts.afterSleep });
     if (delay === null) {
       resumeRunner.cancel();
       // BUG.resume-outage-fast-fail — a resume whose attempts ran out, and how many it gave back to the outage.
@@ -9031,7 +9039,7 @@ async function main() {
       },
       // Closes the dead socket itself (a deliberate close: its
       // 'disconnected' reports and schedules nothing more).
-      scheduleResume: () => scheduleResume({ silentRelogin: silentReloginDrop(cause, activeEra) }),
+      scheduleResume: () => scheduleResume({ silentRelogin: silentReloginDrop(cause, activeEra), afterSleep: sleepDrop(cause) }),
       raiseServerDied: () => raiseServerDied(undefined, cause, net),
       // UX.charselect-resume — the tick outlives a logout: a dead session at character select
       // (or in chargen, or Entering World) resumes as the socket's own close does.
@@ -19189,7 +19197,7 @@ async function main() {
         // Before the world (a resume attempt's session counts: its world_left already went out).
         if (!wasInWorld) preworldReporter?.dropped(event.closeCode ?? null, event.endCause ?? null, dropNet);
         // In the world (or mid-resume): reconnect and re-enter on our own first.
-        if (droppedInWorld && scheduleResume({ silentRelogin: silentReloginDrop(event.endCause, activeEra) })) {
+        if (droppedInWorld && scheduleResume({ silentRelogin: silentReloginDrop(event.endCause, activeEra), afterSleep: sleepDrop(event.endCause) })) {
           if (sessionLifecycle.resumingWorld) { worldResumePending = true; drainHandover.onSessionDropped(); }
           return;
         }
@@ -21918,6 +21926,8 @@ async function main() {
   exposeDebugGlobal('__ac', {
     get rendererWarmup() { return rendererWarmup; },
     compileTrace,
+    /** frameStep's phase times for the frame just run (tools/measure-perf.ts reads them every frame). */
+    framePhases,
     sweepUnusedResources,
     sceneManager, cameraController, cameraRig, terrainRenderer, terrainManager,
     textureManager, uiTextureManager, materialFactory, modelRenderer, setupModelRenderer,

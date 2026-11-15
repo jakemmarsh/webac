@@ -10,6 +10,13 @@
  * (the relay killed, restarted NET_BACK_S later) and checks the resume. 2026-10-16 production: a laptop asleep 29 min was labelled
  * 'server_silent'.
  *
+ * MODE=sleep-hidden (BUG.sleep-darkwake-resume-loop) puts another tab in front
+ * before the sleep, so the game tab is hidden like a closed lid's: the drop
+ * must hold its resume while hidden (HOLD_WATCH_S, default 60) and resume as
+ * soon as the game tab is shown.
+ *
+ * MODE=netdrop HIDE=1 hides the tab first: a network drop still resumes at once.
+ *
  * MODE=chargen-netdrop (UX.chargen-resume) cuts the network mid-chargen
  * instead (runChargenNetdrop): chargen opened once the real character list is
  * in, choices made (a name, the Town page), the relay dropped; it passes only
@@ -41,6 +48,8 @@ const RELAY_PORT = Number(process.env.RELAY_PORT ?? 9391);
 const NET_BACK_S = Number(process.env.NET_BACK_S ?? 5);
 /** MODE=netdrop: instead of sleeping the machine, cut the network under a live session (kill the relay, restart it NET_BACK_S later). */
 const MODE = process.env.MODE ?? 'sleep';
+/** MODE=sleep-hidden: how long to watch the hidden tab after the wake (it must stay out of the world). */
+const HOLD_WATCH_S = Number(process.env.HOLD_WATCH_S ?? 60);
 
 /**
  * The bridge pings every 20 s and terminates a silent socket. On a sleeping
@@ -63,6 +72,11 @@ function descendants(root: number): number[] {
   return out;
 }
 
+/** MODE=sleep-hidden: the game tab's document.visibilityState override (headless tabs never hide). */
+async function setGameTabHidden(page: Page, hidden: boolean): Promise<void> {
+  await page.evaluate(`(() => { const v = ${hidden ? "'hidden'" : "'visible'"}; Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => v }); Object.defineProperty(document, 'hidden', { configurable: true, get: () => v === 'hidden' }); document.dispatchEvent(new Event('visibilitychange')); })()`);
+}
+
 async function main(): Promise<void> {
   let relay = spawn(process.execPath, ['-e', RELAY_JS], { stdio: 'ignore' });
   process.env.AC_BRIDGE = `ws://localhost:${RELAY_PORT}`;
@@ -83,6 +97,8 @@ async function main(): Promise<void> {
     console.log('in world; settling 10 s');
     await page.waitForTimeout(10_000);
     if (MODE === 'netdrop') {
+      // HIDE=1: the tab hidden first; a network drop must still resume at once (BUG.sleep-darkwake-resume-loop holds only a sleep).
+      if (process.env.HIDE === '1') { await setGameTabHidden(page, true); console.log(`game tab visibility: ${await page.evaluate('document.visibilityState')}`); }
       console.log(`cutting the network; back in ${NET_BACK_S} s`);
       relay.kill('SIGKILL');
       await new Promise((r) => setTimeout(r, NET_BACK_S * 1000));
@@ -110,6 +126,17 @@ async function main(): Promise<void> {
     const pids = descendants(process.pid).filter((p) => {
       try { return /chrom/i.test(execFileSync('ps', ['-o', 'comm=', '-p', String(p)]).toString()); } catch { return false; }
     });
+    // MODE=sleep-hidden (BUG.sleep-darkwake-resume-loop): another tab in front first, so the game tab is
+    // hidden while the machine "sleeps" (a closed lid). The resume must hold until the game tab is shown.
+    if (MODE === 'sleep-hidden') {
+      // Headless Chromium keeps every tab 'visible' (activating another target changes nothing, checked
+      // 2026-11-15), so the page's own visibility is overridden: document.visibilityState reads 'hidden'
+      // and a 'visibilitychange' fires, as a closed lid / covered tab does. setGameTabHidden(false) shows it.
+      await setGameTabHidden(page, true);
+      const vis = await page.evaluate('document.visibilityState');
+      console.log(`game tab visibility: ${vis}`);
+      if (vis !== 'hidden') { console.log('RESULT sleep-hidden FAIL: could not hide the game tab'); process.exitCode = 1; return; }
+    }
     console.log(`SIGSTOP ${pids.length} browser processes for ${PAUSE_S} s`);
     for (const p of [...pids, relay.pid!]) try { process.kill(p, 'SIGSTOP'); } catch { /* gone */ }
     await new Promise((r) => setTimeout(r, PAUSE_S * 1000));
@@ -117,6 +144,29 @@ async function main(): Promise<void> {
     console.log(`SIGCONT browser; network back in ${NET_BACK_S} s; watching 60 s for the drop line and the resume`);
     await new Promise((r) => setTimeout(r, NET_BACK_S * 1000));
     process.kill(relay.pid!, 'SIGCONT');
+    if (MODE === 'sleep-hidden') {
+      // Hidden: the drop is caught, then the resume holds (no new session) for HOLD_WATCH_S.
+      const holdEnd = Date.now() + HOLD_WATCH_S * 1000;
+      while (Date.now() < holdEnd) await page.waitForTimeout(1000);
+      const drop = lines.find((l) => /No server data|Session ended/.test(l));
+      const cause = drop?.match(/\((client_suspended|link_dead|server_silent|socket_closed)/)?.[1] ?? 'none';
+      const held = lines.some((l) => /resume waits until the tab is shown/.test(l));
+      // A new connection after the drop is the unattended login (inWorld() reads the collision body,
+      // which keeps its last position after the teardown, so it is no signal here).
+      const afterDrop = allLines.slice(allLines.findIndex((l) => /connection lost|No server data|Session ended/.test(l)) + 1);
+      const inWhileHidden = afterDrop.some((l) => /WebSocket connected to bridge/.test(l));
+      const enteredWhileHidden = afterDrop.some((l) => /Entering world with character|we are in the world/.test(l));
+      console.log(`hidden ${HOLD_WATCH_S} s after the wake: cause=${cause} held=${held} connected=${inWhileHidden} entered=${enteredWhileHidden}; showing the game tab`);
+      await setGameTabHidden(page, false);
+      const showEnd = Date.now() + 60_000;
+      while (Date.now() < showEnd && !(await inWorld(page).catch(() => false))) await page.waitForTimeout(1000);
+      const released = lines.some((l) => /the tab is shown — resuming/.test(l));
+      const back = !lines.some((l) => /Disconnected screen/.test(l)) && (await inWorld(page).catch(() => false));
+      const pass = cause === 'client_suspended' && held && !inWhileHidden && !enteredWhileHidden && released && back;
+      console.log(`RESULT sleep-hidden cause=${cause} held=${held} stayed_out_while_hidden=${!inWhileHidden && !enteredWhileHidden} released=${released} back_in_world=${back} => ${pass ? 'PASS' : 'FAIL'}`);
+      process.exitCode = pass ? 0 : 1;
+      return;
+    }
     const end = Date.now() + 60_000;
     while (Date.now() < end && !lines.some((l) => /we are in the world|Disconnected screen/.test(l) && lines.indexOf(l) > lines.findIndex((x) => /No server data|Session ended/.test(x)) && lines.some((x) => /No server data|Session ended/.test(x)))) await page.waitForTimeout(1000);
     const drop = lines.find((l) => /No server data|Session ended/.test(l));

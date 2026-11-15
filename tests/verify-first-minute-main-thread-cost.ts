@@ -68,6 +68,16 @@ describe('FramePhaseTimer — frameStep split at its phase boundaries', () => {
     ph.begin(300);
     expect([...ph.frameMs].every((v) => v === 0)).toBe(true);
   });
+  it('counts the frames begun, so a once-per-animation-frame reader (tools/measure-perf.ts) counts each frame once', () => {
+    const clock = { t: 0 };
+    const ph = new FramePhaseTimer(() => clock.t);
+    expect(ph.frames).toBe(0);
+    ph.begin(0); clock.t = 5; ph.mark(PHASE.render);
+    expect(ph.frames).toBe(1);
+    ph.begin(16); clock.t = 20; ph.mark(PHASE.render);
+    expect(ph.frames).toBe(2);
+    expect(ph.frameMs[PHASE.render]).toBe(4);
+  });
 });
 
 describe('WorldReporter — where the first minute went', () => {

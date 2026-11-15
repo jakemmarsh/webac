@@ -35,6 +35,20 @@ export function silentReloginDrop(endCause: string | null | undefined, era: { re
   return era.reloginKillsSilently === true && (endCause === 'server_silent' || endCause === 'link_dead');
 }
 
+/**
+ * BUG.sleep-darkwake-resume-loop — the session ended because our own thread
+ * stopped ('client_suspended': the machine slept): its resume waits while the
+ * tab is hidden (SessionLifecycle.holdWhileHidden, ResumeRunner), so a
+ * sleeping laptop's dark wakes don't log the character in unattended. Every
+ * other cause resumes as before, hidden or not: a socket close (a network
+ * blip, a drain's hard cut), a silent server, the 40 s link check's
+ * 'link_dead', a server's Disconnect or NetError. A background or occluded
+ * window running automation must come back from those on its own.
+ */
+export function sleepDrop(endCause: string | null | undefined): boolean {
+  return endCause === 'client_suspended';
+}
+
 export interface UnexpectedDropHost {
   lifecycle: SessionLifecycle;
   /** world_left with the drop's cause and diagnostics (WorldReporter.left: once per world session). */

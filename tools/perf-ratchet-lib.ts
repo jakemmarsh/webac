@@ -28,6 +28,8 @@ export interface PerfRenderInfo {
 export interface PerfPhaseStats {
   phase: string;
   avgFps: number;
+  /** Median frame time. Absent in the lib's own medianRun output only when a baseline lacked it. */
+  p50Ms?: number;
   p95Ms: number;
   hitch50: number;
   hitch100: number;
@@ -124,6 +126,39 @@ export function headingBin(yaw: number): number {
   return Math.min(HEADING_BINS - 1, Math.floor((norm / turn) * HEADING_BINS));
 }
 
+/**
+ * PERF.integrated-gpu-cpu-bound — the game's own CPU work per frame over one
+ * phase: frameStep from its first line through `renderer.render()` (the sum
+ * of the page's FramePhaseTimer phases, telemetry/MainThreadCost.ts), the
+ * same quantity prod telemetry reports as `workMedianMs` / `workP95Ms`.
+ */
+export interface PerfWorkStats {
+  frames: number;
+  p50Ms: number;
+  p95Ms: number;
+  meanMs: number;
+  /** Mean ms per frame in each FRAME_PHASES phase (they add up to meanMs). Evidence only; never ratcheted. */
+  phaseMs?: Record<string, number>;
+}
+
+/**
+ * The standing CPU-throttled pass (`measure-perf --throttle N`): the same
+ * idle / turning / running phases measured again under CDP
+ * Emulation.setCPUThrottlingRate N, in the same JSON as the unthrottled pass.
+ * Its numbers only ever compare with other throttled passes at the same rate
+ * (throttledView); the scene costs are the unthrottled pass's, so it carries
+ * none of its own.
+ */
+export interface PerfThrottledPass {
+  rate: number;
+  phases: PerfPhaseStats[];
+  renderJs?: Record<string, PerfRenderJsStats | null>;
+  work?: Record<string, PerfWorkStats | null>;
+  /** This pass's own ratchet verdict (the top-level ratchetVerdict is the unthrottled pass's). */
+  ratchetVerdict?: 'ok' | 'regression' | 'no-baseline';
+  warnings?: string[];
+}
+
 export interface PerfRun {
   utc: string;
   renderer: string;
@@ -146,9 +181,20 @@ export interface PerfRun {
    *  against it would bless the regression (OPS.gpu-perf-job-safety,
    *  2026-09-26). Absent = run without --ratchet, or pre-field JSON. */
   ratchetVerdict?: 'ok' | 'regression' | 'no-baseline';
+  /** Whether dynamic resolution (scene/RenderScale.ts) was running. It is off
+   *  under automation unless ?renderAdapt=1, so a launched run measures a fixed
+   *  buffer; an --attach run in an ordinary Chrome has it on. A resizing buffer
+   *  is a different measurement, so runs only compare with the same value.
+   *  Absent = off (every run before the field was a Playwright launch or an
+   *  attach before dynamic resolution shipped). */
+  dynamicResolution?: boolean;
   phases: PerfPhaseStats[];
   render: Record<string, PerfRenderInfo | null>;
   renderJs?: Record<string, PerfRenderJsStats | null>;
+  /** Per-phase game CPU work (absent in JSON before 2026-11-15). */
+  work?: Record<string, PerfWorkStats | null>;
+  /** The CPU-throttled pass, when the run measured one (absent before 2026-11-15). */
+  throttled?: PerfThrottledPass;
 }
 
 /**
@@ -249,7 +295,8 @@ export function findBaselines(runs: PerfRun[], current: PerfRun, n = RATCHET_HIS
       && r.ratchetVerdict !== 'regression'
       && (r.phaseSecs ?? 15) === (current.phaseSecs ?? 15)
       && (r.renderSampling ?? 'point') === (current.renderSampling ?? 'point')
-      && (r.landscapeDrawDistance ?? 3) === (current.landscapeDrawDistance ?? 3))
+      && (r.landscapeDrawDistance ?? 3) === (current.landscapeDrawDistance ?? 3)
+      && (r.dynamicResolution ?? false) === (current.dynamicResolution ?? false))
     .sort((a, b) => (a.utc < b.utc ? 1 : -1));
   return candidates.slice(0, Math.max(1, n));
 }
@@ -352,6 +399,14 @@ export function compareRuns(
       check(`${phase}.renderJs.p50Ms`, base.p50Ms, cur.p50Ms, false, renderJsTolerance);
     }
   }
+  // Game CPU work per frame: wall-clock CPU time like renderJs, so it shares renderJs's tolerance.
+  if (current.work && baseline.work) {
+    for (const [phase, cur] of Object.entries(current.work)) {
+      const base = baseline.work[phase];
+      if (!cur || !base) continue;
+      check(`${phase}.work.p50Ms`, base.p50Ms, cur.p50Ms, false, renderJsTolerance);
+    }
+  }
   return { verdict: findings.length ? 'regression' : 'ok', baselineUtc: baseline.utc, findings, within };
 }
 
@@ -388,7 +443,11 @@ export function medianRun(baselines: PerfRun[]): PerfRun {
     const ps = baselines.map(b => b.phases.find(x => x.phase === p.phase));
     if (ps.some(x => !x)) continue;
     const pick = (k: 'avgFps' | 'p95Ms' | 'hitch50' | 'hitch100') => median((ps as PerfPhaseStats[]).map(x => x[k]));
-    phases.push({ phase: p.phase, avgFps: pick('avgFps'), p95Ms: pick('p95Ms'), hitch50: pick('hitch50'), hitch100: pick('hitch100') });
+    const p50 = all((ps as PerfPhaseStats[]).map(x => x.p50Ms));
+    phases.push({
+      phase: p.phase, avgFps: pick('avgFps'), ...(p50 ? { p50Ms: median(p50) } : {}),
+      p95Ms: pick('p95Ms'), hitch50: pick('hitch50'), hitch100: pick('hitch100'),
+    });
   }
   let renderJs: PerfRun['renderJs'];
   if (newest.renderJs) {
@@ -400,7 +459,20 @@ export function medianRun(baselines: PerfRun[]): PerfRun {
       renderJs[phase] = p50 && p95 && frames ? { frames: median(frames), p50Ms: median(p50), p95Ms: median(p95) } : null;
     }
   }
-  return { ...newest, render, phases, renderJs };
+  let work: PerfRun['work'];
+  if (newest.work) {
+    work = {};
+    for (const phase of Object.keys(newest.work)) {
+      const ws = baselines.map(b => b.work?.[phase] ?? undefined);
+      const p50 = all(ws.map(w => w?.p50Ms));
+      const p95 = all(ws.map(w => w?.p95Ms));
+      const mean = all(ws.map(w => w?.meanMs));
+      const frames = all(ws.map(w => w?.frames));
+      work[phase] = p50 && p95 && mean && frames
+        ? { frames: median(frames), p50Ms: median(p50), p95Ms: median(p95), meanMs: median(mean) } : null;
+    }
+  }
+  return { ...newest, render, phases, renderJs, work };
 }
 
 /** The value a finding's metric name (`turning.drawCalls`, `idle.renderJs.p50Ms`, `idle.avgFps`) had in `run`. */
@@ -408,6 +480,7 @@ function metricValue(run: PerfRun, metric: string): number | undefined {
   const [phase, ...rest] = metric.split('.');
   const key = rest.join('.');
   if (key === 'renderJs.p50Ms') return run.renderJs?.[phase]?.p50Ms ?? undefined;
+  if (key === 'work.p50Ms') return run.work?.[phase]?.p50Ms ?? undefined;
   if (key === 'avgFps' || key === 'hitch100') return run.phases.find(p => p.phase === phase)?.[key];
   const info = run.render[phase];
   return info ? info[key as keyof PerfRenderInfo] : undefined;
@@ -451,6 +524,84 @@ export function compareToHistory(
     baselineUtcs: baselines.map(b => b.utc),
     findings, within: v.within, noise,
   };
+}
+
+/**
+ * The standing throttle rate (tools/local-gpu-perf.sh `--throttle 4`): 4x CPU
+ * on the M3 Max lands the Holtburg town view (yaw 210) at 24-30 fps, about where the
+ * prod integrated-GPU players sit (PERF.integrated-gpu-cpu-bound, 2026-11-15:
+ * median CPU work 15 ms, 35% of sessions at <= 30 FPS). It stands in for an
+ * old MacBook's CPU, not its GPU: throttling slows the main thread only.
+ */
+export const STANDING_CPU_THROTTLE = 4;
+
+/**
+ * The throttled pass seen as a run of its own, so the ratchet (findBaselines,
+ * compareToHistory) compares it exactly as it compares unthrottled runs. Null
+ * when the run has no throttled pass or (with `rate`) one at another rate, so
+ * old JSON without the section and passes at a different rate never become a
+ * baseline for it, and a throttled number never meets an unthrottled one.
+ * Scene costs are left out (render = {}): the unthrottled pass ratchets them.
+ */
+export function throttledView(run: PerfRun, rate?: number): PerfRun | null {
+  const t = run.throttled;
+  if (!t || !Array.isArray(t.phases)) return null;
+  if (rate !== undefined && t.rate !== rate) return null;
+  return {
+    ...run,
+    phases: t.phases,
+    render: {},
+    renderJs: t.renderJs,
+    work: t.work,
+    ratchetVerdict: t.ratchetVerdict,
+    throttled: undefined,
+  };
+}
+
+/**
+ * The throttled pass's verdict against the last RATCHET_HISTORY comparable
+ * throttled passes at the same rate (same renderer, location, phase length,
+ * sampling, draw distance, dynamic resolution as any baseline). Null when the
+ * current run measured no throttled pass.
+ */
+export function compareThrottled(prior: PerfRun[], current: PerfRun): RatchetVerdict | null {
+  const cur = throttledView(current);
+  if (!cur || !current.throttled) return null;
+  const rate = current.throttled.rate;
+  const views = prior.map(r => throttledView(r, rate)).filter((v): v is PerfRun => v !== null);
+  return compareToHistory(findBaselines(views, cur), cur);
+}
+
+/**
+ * Summarize one phase's per-frame game work (`works`, ms) and the per-phase
+ * sums behind it (`phaseSums[i]` = total ms in `names[i]` over the same
+ * frames) into PerfWorkStats. Null when no frame was sampled.
+ */
+export function summarizeWork(works: number[], phaseSums: number[] | null, names: readonly string[]): PerfWorkStats | null {
+  const ok = works.filter(w => Number.isFinite(w) && w >= 0);
+  if (!ok.length) return null;
+  const sorted = [...ok].sort((a, b) => a - b);
+  const q = (p: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const out: PerfWorkStats = {
+    frames: ok.length,
+    p50Ms: r2(q(0.5)),
+    p95Ms: r2(q(0.95)),
+    meanMs: r2(ok.reduce((a, b) => a + b, 0) / ok.length),
+  };
+  if (phaseSums && phaseSums.length === names.length) {
+    out.phaseMs = Object.fromEntries(names.map((n, i) => [n, r2(phaseSums[i] / ok.length)]));
+  }
+  return out;
+}
+
+/** Validate `measure-perf --throttle N`: a CPU slowdown factor above 1 and at most 20 (CDP's useful range). */
+export function parseThrottle(raw: string | undefined): number {
+  const n = raw === undefined || raw.trim() === '' ? NaN : Number(raw);
+  if (!Number.isFinite(n) || n <= 1 || n > 20) {
+    throw new Error(`--throttle must be a number above 1 and at most 20 (got ${raw ?? 'nothing'})`);
+  }
+  return n;
 }
 
 /**

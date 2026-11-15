@@ -5,9 +5,10 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  compareRuns, compareToHistory, droppedFrameWarnings, estimateRealGpu, findBaseline, findBaselines,
-  headingBin, isSoftwareRenderer, landblockOf, medianRun, parseDrawDistance, sameLocation, summarizeInfoSamples,
-  GEOMETRY_TOLERANCE, HEADING_BINS, RATCHET_HISTORY, REAL_GPU_US_PER_DRAW_CALL, type PerfInfoSample, type PerfRun,
+  compareRuns, compareThrottled, compareToHistory, droppedFrameWarnings, estimateRealGpu, findBaseline, findBaselines,
+  headingBin, isSoftwareRenderer, landblockOf, medianRun, parseDrawDistance, parseThrottle, sameLocation, summarizeInfoSamples,
+  summarizeWork, throttledView,
+  GEOMETRY_TOLERANCE, HEADING_BINS, RATCHET_HISTORY, REAL_GPU_US_PER_DRAW_CALL, STANDING_CPU_THROTTLE, type PerfInfoSample, type PerfRun,
 } from '../tools/perf-ratchet-lib.js';
 
 const holtburg = { x: 32592, y: 34586, z: 94, landblock: landblockOf(32592, 34586) };
@@ -335,5 +336,135 @@ describe('perf ratchet: real-GPU estimate', () => {
   });
   it('puts the 1,500 draw-call budget comfortably above 60 fps', () => {
     expect(estimateRealGpu(1_500).fps).toBeGreaterThan(60);
+  });
+});
+
+describe('perf ratchet: the standing CPU-throttled pass (PERF.integrated-gpu-cpu-bound)', () => {
+  const GPU = 'ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)';
+  const phase = (avgFps: number, p50Ms = 1000 / avgFps): PerfRun['phases'][number] =>
+    ({ phase: 'idle', avgFps, p50Ms, p95Ms: p50Ms * 1.5, hitch50: 0, hitch100: 0 });
+  const work = (p50Ms: number): NonNullable<PerfRun['work']> =>
+    ({ idle: { frames: 400, p50Ms, p95Ms: p50Ms * 1.4, meanMs: p50Ms * 1.05 } });
+  /** A nightly run: unthrottled ~120 fps / 3 ms work, optional 4x pass. */
+  const nightly = (utc: string, throttled?: { fps: number; work: number; rate?: number; verdict?: PerfRun['ratchetVerdict'] },
+    extra: Partial<PerfRun> = {}): PerfRun => ({
+    ...run(utc, 400, { renderer: GPU, phases: [phase(120)], work: work(3) }),
+    ...(throttled ? {
+      throttled: {
+        rate: throttled.rate ?? STANDING_CPU_THROTTLE, phases: [phase(throttled.fps)], work: work(throttled.work),
+        ...(throttled.verdict ? { ratchetVerdict: throttled.verdict } : {}),
+      },
+    } : {}),
+    ...extra,
+  });
+  /** The JSON shape every run before 2026-11-15 has: no work, no throttled, no dynamicResolution. */
+  const legacy = (utc: string, fps = 120): PerfRun =>
+    run(utc, 400, { renderer: GPU, phases: [{ phase: 'idle', avgFps: fps, p95Ms: 9, hitch50: 0, hitch100: 0 }] });
+
+  it('the standing rate is 4x (the M3 Max town view lands near the prod integrated-GPU players)', () => {
+    expect(STANDING_CPU_THROTTLE).toBe(4);
+  });
+
+  it('old JSON without the throttled section still parses as an unthrottled baseline, and the new run compares against it', () => {
+    const hist = [legacy('2026-11-13T09:00:00Z'), legacy('2026-11-14T09:00:00Z')];
+    const cur = nightly('2026-11-16T09:00:00Z', { fps: 28, work: 30 });
+    expect(findBaseline(hist, cur)?.utc).toBe('2026-11-14T09:00:00Z');
+    const v = compareToHistory(findBaselines(hist, cur), cur);
+    expect(v.verdict).toBe('ok');
+    // work p50 is not compared against runs that never recorded it (no partial median).
+    expect([...v.findings, ...v.within].some(f => f.metric.includes('work'))).toBe(false);
+    expect([...v.findings, ...v.within].some(f => f.metric === 'idle.avgFps')).toBe(true);
+  });
+
+  it('old JSON never becomes a throttled baseline: the first throttled run is no-baseline', () => {
+    const v = compareThrottled([legacy('2026-11-14T09:00:00Z')], nightly('2026-11-16T09:00:00Z', { fps: 28, work: 30 }));
+    expect(v?.verdict).toBe('no-baseline');
+    expect(throttledView(legacy('x'))).toBeNull();
+  });
+
+  it('a run without a throttled pass gets no throttled verdict at all', () => {
+    expect(compareThrottled([nightly('2026-11-14T09:00:00Z', { fps: 28, work: 30 })], nightly('2026-11-16T09:00:00Z'))).toBeNull();
+  });
+
+  it('throttled numbers never meet unthrottled ones, in either direction', () => {
+    const hist = [nightly('2026-11-14T09:00:00Z', { fps: 28, work: 30 }), nightly('2026-11-15T09:00:00Z', { fps: 29, work: 31 })];
+    const cur = nightly('2026-11-16T09:00:00Z', { fps: 28, work: 30 });
+    // 28 fps against the unthrottled 120 would be a -77% "regression": it must never be compared.
+    const t = compareThrottled(hist, cur)!;
+    expect(t.verdict).toBe('ok');
+    for (const f of [...t.findings, ...t.within]) expect(f.baseline).toBeLessThan(40);
+    // And the unthrottled verdict sees only the unthrottled numbers.
+    const u = compareToHistory(findBaselines(hist, cur), cur);
+    expect(u.verdict).toBe('ok');
+    expect([...u.findings, ...u.within].find(f => f.metric === 'idle.avgFps')).toMatchObject({ baseline: 120, current: 120 });
+  });
+
+  it('a throttled fps drop or work rise past tolerance is a throttled regression; the unthrottled verdict stays ok', () => {
+    const hist = [nightly('2026-11-15T09:00:00Z', { fps: 28, work: 30 }), nightly('2026-11-14T09:00:00Z', { fps: 29, work: 31 }),
+      nightly('2026-11-13T09:00:00Z', { fps: 28, work: 30 })];
+    const slower = nightly('2026-11-16T09:00:00Z', { fps: 22, work: 30 });
+    const t = compareThrottled(hist, slower)!;
+    expect(t.verdict).toBe('regression');
+    expect(t.findings.map(f => f.metric)).toEqual(['idle.avgFps']);
+    expect(compareToHistory(findBaselines(hist, slower), slower).verdict).toBe('ok');
+    // CPU work gates at the renderJs tolerance (25%): +20% passes, +40% fails.
+    expect(compareThrottled(hist, nightly('2026-11-16T09:00:00Z', { fps: 28, work: 36 }))!.verdict).toBe('ok');
+    const heavier = compareThrottled(hist, nightly('2026-11-16T09:00:00Z', { fps: 28, work: 42 }))!;
+    expect(heavier.verdict).toBe('regression');
+    expect(heavier.findings).toEqual([expect.objectContaining({ metric: 'idle.work.p50Ms', baseline: 30, current: 42 })]);
+  });
+
+  it('only passes at the same rate compare; a pass that regressed is skipped, keyed by its own verdict', () => {
+    const hist = [
+      nightly('2026-11-12T09:00:00Z', { fps: 29, work: 30 }),
+      nightly('2026-11-13T09:00:00Z', { fps: 12, work: 70, rate: 6 }),
+      nightly('2026-11-14T09:00:00Z', { fps: 20, work: 45, verdict: 'regression' }),
+      // The unthrottled pass regressed here, the throttled one did not: it stays a throttled baseline.
+      nightly('2026-11-15T09:00:00Z', { fps: 28, work: 31 }, { ratchetVerdict: 'regression' }),
+    ];
+    const t = compareThrottled(hist, nightly('2026-11-16T09:00:00Z', { fps: 28, work: 30 }))!;
+    expect(t.baselineUtcs).toEqual(['2026-11-15T09:00:00Z', '2026-11-12T09:00:00Z']);
+    expect(throttledView(hist[1], 4)).toBeNull();
+    expect(throttledView(hist[1], 6)?.phases[0].avgFps).toBe(12);
+  });
+
+  it('the throttled view carries the pass\'s own numbers and none of the unthrottled scene costs', () => {
+    const v = throttledView(nightly('2026-11-16T09:00:00Z', { fps: 28, work: 30, verdict: 'ok' }))!;
+    expect(v.render).toEqual({});
+    expect(v.phases[0].avgFps).toBe(28);
+    expect(v.work?.idle?.p50Ms).toBe(30);
+    expect(v.ratchetVerdict).toBe('ok');
+    expect(v.throttled).toBeUndefined();
+    expect(v.location).toEqual(holtburg);
+  });
+
+  it('medianRun takes the median of work and of the frame-time median', () => {
+    const m = medianRun([nightly('c', undefined, { work: work(5), phases: [phase(100, 10)] }),
+      nightly('b', undefined, { work: work(3), phases: [phase(120, 8)] }), nightly('a', undefined, { work: work(4), phases: [phase(110, 9)] })]);
+    expect(m.work?.idle).toMatchObject({ p50Ms: 4 });
+    expect(m.phases[0].p50Ms).toBe(9);
+  });
+
+  it('runs with dynamic resolution on never compare with fixed-buffer runs (absent = off)', () => {
+    const hist = [legacy('2026-11-14T09:00:00Z'), nightly('2026-11-15T09:00:00Z', undefined, { dynamicResolution: true })];
+    expect(findBaseline(hist, nightly('2026-11-16T09:00:00Z'))?.utc).toBe('2026-11-14T09:00:00Z');
+    expect(findBaseline(hist, nightly('2026-11-16T09:00:00Z', undefined, { dynamicResolution: true }))?.utc).toBe('2026-11-15T09:00:00Z');
+    expect(findBaseline(hist, nightly('2026-11-16T09:00:00Z', undefined, { dynamicResolution: false }))?.utc).toBe('2026-11-14T09:00:00Z');
+  });
+
+  it('summarizeWork: p50 / p95 / mean of the frames, the mean per frameStep phase, null when nothing sampled', () => {
+    const works = Array.from({ length: 100 }, (_, i) => i + 1); // 1..100 ms
+    const s = summarizeWork(works, [2525, 2525], ['render', 'anim'])!;
+    expect(s).toMatchObject({ frames: 100, p50Ms: 51, p95Ms: 96, meanMs: 50.5 });
+    expect(s.phaseMs).toEqual({ render: 25.25, anim: 25.25 });
+    expect(summarizeWork([], null, [])).toBeNull();
+    expect(summarizeWork([4, Number.NaN, -1], null, ['render'])).toMatchObject({ frames: 1, p50Ms: 4 });
+    expect(summarizeWork([4], [1, 2, 3], ['render'])!.phaseMs).toBeUndefined(); // names don't line up: no breakdown
+  });
+
+  it('--throttle must be a number above 1 and at most 20', () => {
+    expect(parseThrottle('4')).toBe(4);
+    expect(parseThrottle('2.5')).toBe(2.5);
+    for (const bad of [undefined, '', '1', '0', '-4', 'x', '21']) expect(() => parseThrottle(bad)).toThrow(/--throttle/);
   });
 });
