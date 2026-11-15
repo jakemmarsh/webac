@@ -127,8 +127,26 @@
  * plus serverReachTolerance: 0.1 m outdoors, 0 indoors since BUG.portal-rim-brush-indoor-reach), a silent walk-in ends as `portal_rim_brush` (every field kept, plus
  * `sentClosest` / `sentReached`). A silent walk-in whose sent path DID come inside stays `portal_use_failed`.
  * Era-neutral: ACE, GDLE and the AC1999 server all learn our position only from these two messages.
+ *
+ * OBS.portal-use-server-walk-run (2026-11-15): did our client run the server's walk, and why did it stop?
+ * Prod (DreamWeave ACE, end of retail, wcid 1003604, dungeon cells 0x25610030 → 0x25610028): a use with
+ * serverWalk true, serverMoves 1, playerMoved false, movesSent 0, closest = dist = endDist 3.54 (the body never
+ * moved in 5.5 s), one UseDone(0) 503 ms after the send, no WeenieError. ACE walks a portal use with
+ * MoveToPosition(portal.Location) and polls WithinUseRadius every 0.1 s (Player_Move.cs CreateMoveToChain /
+ * MoveToChain; FastTick servers Player_Move2.cs CreateMoveToChain2); its callback(false) → UseDone(0) comes
+ * when the chain counter moved (a MoveToState, a Jump, another Use, a pickup / inventory move, a melee attack,
+ * a give, a trade or swear request: each StopExistingMoveToChains or a new chain number), the landblock or
+ * the target went, or the chain timed out. The event could not say whether our MoveToManager ran the move.
+ * Each server movement in a watch now records its type (`moveTypes`) and how our MoveToManager ended it
+ * (`moveEnds`: MOVE_TO_ENDS); the last MoveTo's distance to its target at the start and the end
+ * (`moveDist` / `moveLeft`), how far the body moved (`moveMoved`), how long it ran (`moveMs`) and what the
+ * manager was doing at its last 100 ms sample (`movePhase`: MoveToManager.phase()). The client actions sent
+ * after the first Use that stop ACE's chain besides a MoveToState (`movesSent`) and a re-use of this portal
+ * (`attempts`) are `chainBreaks` / `chainBreakTypes` (CHAIN_BREAK_ACTIONS). Telemetry only: nothing moves
+ * differently.
  */
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
+import type { MoveToPhase } from '../controllers/MoveToManager.js';
 
 export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_cancelled', 'portal_rim_brush', 'portal_used'] as const;
 export type PortalOutcome = typeof PORTAL_OUTCOMES[number];
@@ -212,6 +230,44 @@ export function walkInActs(physicsState: number): boolean {
   const ps = Number.isFinite(physicsState) ? physicsState >>> 0 : 0;
   return (ps & PS_REPORT_COLLISIONS) !== 0 && (ps & (PS_IGNORE_COLLISIONS | PS_REPORT_COLLISIONS_AS_ENVIRONMENT)) === 0;
 }
+
+/**
+ * OBS.portal-use-server-walk-run — how our MoveToManager ended a server movement:
+ * - `arrived`: it completed (CleanUpAndCallWeenie(0): every node done, or none needed: already in range);
+ * - `superseded`: a later server movement replaced it (every MoveTo / TurnTo begins with CancelMoveTo);
+ * - `input`: the player's movement key took control back (CommandInterpreter TakeControlFromServer);
+ * - `teleport` / `death` / `teardown`: the teleport, a death, the world ending cancelled it;
+ * - `target_gone`: its object vanished (0x37 ObjectGone / 0x38 NoObject); `too_far`: past its fail
+ *   distance (0x3D YouChargedTooFar); `cancelled`: ActionCancelled from no named caller; `failed`: any other code;
+ * - `running`: still moving at the verdict; `not_started`: the movement carried no MoveTo / TurnTo data.
+ */
+export const MOVE_TO_ENDS = [
+  'arrived', 'superseded', 'input', 'teleport', 'death', 'teardown', 'target_gone', 'too_far', 'cancelled', 'failed',
+  'running', 'not_started',
+] as const;
+export type MoveToEnd = typeof MOVE_TO_ENDS[number];
+/** The callers that stop the player's MoveTo on purpose (main.ts), named in `moveEnds`. */
+export type MoveToStopReason = 'superseded' | 'input' | 'teleport' | 'death' | 'teardown';
+/** Server movement records kept per event (types / ends), and chain-break action codes. */
+export const MAX_MOVE_RECORDS = 4;
+
+/**
+ * GameActionTypes whose ACE handler stops the player's move-to chain (StopExistingMoveToChains, or a new
+ * CreateMoveToChain number, which fails the running chain's next poll: Player_Move.cs MoveToChain):
+ * TargetedMeleeAttack (Player_Melee.cs), PutItemInContainer / GetAndWieldItem / StackableSplitToContainer /
+ * StackableSplitToWield / StackableMerge / GiveObjectRequest (their landblock-item paths), DropItem /
+ * StackableSplitTo3D (StartPickupChain), SwearAllegiance, UseWithTarget, Use, OpenTradeNegotiations, Jump
+ * (GameActionJump.cs). MoveToState (0xF61C) is counted in `movesSent`. An upper bound: an inventory move of
+ * an item already held makes no chain.
+ */
+export const CHAIN_BREAK_ACTIONS: ReadonlySet<number> = new Set([
+  0x0008, 0x0019, 0x001a, 0x001b, 0x001d, 0x0035, 0x0036, 0x0054, 0x0055, 0x0056, 0x00cd, 0x019b, 0x01f6, 0xf61b,
+]);
+/** GameActionType.Use. */
+const ACTION_USE = 0x0036;
+
+/** A point in the MoveToManager's frame (AC world axes: landblock-global east, north, up, m). */
+export interface MovePoint { x: number; y: number; z: number }
 
 /** The least body displacement (m) between two portal checks that counts as the body moving (float noise below). */
 export const OWN_MOVE_MIN_M = 0.01;
@@ -524,6 +580,32 @@ export interface PortalUseFailedEvent extends Ids {
    * portal's cell (0.1 m on a landcell, 0 in an EnvCell). `reach` stays the portal's part-array radius.
    */
   sentReach: number | null;
+  /**
+   * OBS.portal-use-server-walk-run — each server movement of the player in the watch, in order (at most
+   * MAX_MOVE_RECORDS): its MovementType (6 MoveToObject, 7 MoveToPosition, 8 TurnToObject, 9 TurnToHeading)
+   * and how our MoveToManager ended it (MOVE_TO_ENDS). Empty = no server movement.
+   */
+  moveTypes: number[];
+  moveEnds: MoveToEnd[];
+  /**
+   * The last MoveTo (6 / 7) of the watch: the body's distance to its target point (body origin to the target's
+   * origin, 3-D, m 0.01) when our client started it and when it ended (at the verdict while running); how far
+   * the body moved from where it started (m 0.01); the ms it ran; and what the MoveToManager was doing at its
+   * last 100 ms sample while running (MoveToManager.phase(); null = never sampled: it ended at once).
+   * All null = no MoveTo in the watch.
+   */
+  moveDist: number | null;
+  moveLeft: number | null;
+  moveMoved: number | null;
+  moveMs: number | null;
+  movePhase: MoveToPhase | null;
+  /**
+   * Client actions sent after the first Use that stop ACE's move-to chain (CHAIN_BREAK_ACTIONS: a Jump, a Use of
+   * another object, a pickup / inventory move, a melee attack…), and their GameActionType codes in order (at most
+   * MAX_MOVE_RECORDS). MoveToStates are `movesSent`; a re-use of this portal is `attempts`.
+   */
+  chainBreaks: number;
+  chainBreakTypes: number[];
 }
 
 export const PORTAL_RIM_BRUSH = 'portal_rim_brush' as const;
@@ -586,6 +668,28 @@ interface Watch {
   refusalLeadMs: number | null;
   sentClosest: number | null;
   sentReached: boolean;
+  /** OBS.portal-use-server-walk-run — the server movements (types / ends index-aligned), the running one, the last MoveTo. */
+  moveTypes: number[];
+  moveEnds: (MoveToEnd | null)[];
+  move: MoveRecord | null;
+  lastMoveTo: MoveRecord | null;
+  chainBreaks: number;
+  chainBreakTypes: number[];
+}
+
+/** One server movement our MoveToManager took (OBS.portal-use-server-walk-run). */
+interface MoveRecord {
+  type: number;
+  /** Its slot in moveEnds; -1 past MAX_MOVE_RECORDS. */
+  slot: number;
+  startedAt: number;
+  endedAt: number | null;
+  end: MoveToEnd | null;
+  start: MovePoint | null;
+  target: MovePoint | null;
+  /** The body at the last sample or at the end. */
+  last: MovePoint | null;
+  phase: MoveToPhase | null;
 }
 
 /** A portal refusal heard while no watch ran (BUG.portal-refusal-before-watch). */
@@ -605,6 +709,19 @@ const r2 = (v: number): number => Math.round(v * 100) / 100;
 const cellHex = (c: number | null): string | null => (c === null || !Number.isFinite(c) || c === 0 ? null : (c >>> 0).toString(16).padStart(8, '0'));
 const horiz = (rel: PortalSnapshot['rel']): number | null => (rel ? r1(Math.hypot(rel.dx, rel.dy)) : null);
 const u32 = (v: number): number => (Number.isFinite(v) ? v >>> 0 : 0);
+const finitePoint = (p: MovePoint | null | undefined): MovePoint | null =>
+  (p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z) ? { x: p.x, y: p.y, z: p.z } : null);
+const dist3 = (a: MovePoint | null, b: MovePoint | null): number | null => (a && b ? r2(Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)) : null);
+/** A MoveToManager completion status (CleanUpAndCallWeenie) with no named caller, as a MOVE_TO_ENDS token. */
+function endOfStatus(status: number): MoveToEnd {
+  switch (u32(status)) {
+    case 0: return 'arrived';
+    case 0x36: return 'cancelled';
+    case 0x37: case 0x38: return 'target_gone';
+    case 0x3d: return 'too_far';
+    default: return 'failed';
+  }
+}
 
 export class PortalUseReporter {
   private readonly now: () => number;
@@ -732,13 +849,66 @@ export class PortalUseReporter {
     if (r.reached) w.sentReached = true;
   }
 
-  /** The server moved the player (a MoveTo / MoveToPosition, our own movement event). */
-  serverMovement(): void {
+  /**
+   * The server moved the player (a MoveTo / MoveToPosition, our own movement event). main.ts calls it just before
+   * performServerMovement with the MovementType and what our MoveToManager is about to take
+   * (OBS.portal-use-server-walk-run): `started` = it carries the data a move needs (serverMovementStarts), `at` =
+   * the body, `target` = where a MoveTo heads (serverMovementTarget; null for a turn). Without a type only the
+   * counts move.
+   */
+  serverMovement(type?: number, start?: { started: boolean; at: MovePoint | null; target: MovePoint | null }): void {
     const w = this.watch;
     if (!w) return;
+    const at = this.now();
     w.serverWalk = true;
     w.serverMoves++;
-    w.progressAt = this.now();
+    w.progressAt = at;
+    if (type === undefined || !Number.isFinite(type)) return;
+    // A running move main.ts did not end first: the new one replaces it all the same.
+    if (w.move && w.move.end === null) this.endMove(w, w.move, 'superseded', null, at);
+    const slot = w.moveTypes.length < MAX_MOVE_RECORDS ? w.moveTypes.length : -1;
+    if (slot >= 0) { w.moveTypes.push(u32(type)); w.moveEnds.push(null); }
+    const rec: MoveRecord = {
+      type: u32(type), slot, startedAt: at, endedAt: null, end: null,
+      start: finitePoint(start?.at), target: finitePoint(start?.target), last: finitePoint(start?.at), phase: null,
+    };
+    w.move = rec;
+    if (rec.type === 6 || rec.type === 7) w.lastMoveTo = rec;
+    if (start && !start.started) this.endMove(w, rec, 'not_started', rec.start, at);
+  }
+
+  /**
+   * Our MoveToManager ended the player's move (its onComplete: CleanUpAndCallWeenie's status). `reason` names a
+   * caller that stopped it on purpose (main.ts); else the status says (endOfStatus). `at` = the body then.
+   * A move the watch never saw start (it began before the watch) is ignored.
+   */
+  moveToEnded(status: number, reason: MoveToStopReason | null, at: MovePoint | null): void {
+    const w = this.watch;
+    const rec = w?.move;
+    if (!w || !rec || rec.end !== null) return;
+    this.endMove(w, rec, reason ?? endOfStatus(status), finitePoint(at), this.now());
+  }
+
+  private endMove(w: Watch, rec: MoveRecord, end: MoveToEnd, at: MovePoint | null, now: number): void {
+    rec.end = end;
+    rec.endedAt = now;
+    if (at) rec.last = at;
+    if (rec.slot >= 0) w.moveEnds[rec.slot] = end;
+  }
+
+  /**
+   * A GameAction went out (main.ts serializeTrackedGameAction; `useTarget` = a Use's object). One in
+   * CHAIN_BREAK_ACTIONS after the watch's first Use stops ACE's move-to chain (OBS.portal-use-server-walk-run);
+   * a Use of the watched portal is an attempt, counted there.
+   */
+  actionSent(actionType: number, useTarget?: number): void {
+    const w = this.watch;
+    if (!w || w.firstSendAt === null) return;
+    const t = u32(actionType);
+    if (!CHAIN_BREAK_ACTIONS.has(t)) return;
+    if (t === ACTION_USE && useTarget !== undefined && u32(useTarget) === w.guid) return;
+    w.chainBreaks++;
+    if (w.chainBreakTypes.length < MAX_MOVE_RECORDS) w.chainBreakTypes.push(t);
   }
 
   /** UseDone came back (0 = done). */
@@ -812,13 +982,22 @@ export class PortalUseReporter {
    * player is dead (the watch is dropped: the try ended with the life).
    * A bare boolean is the old `moving` (server walk or keys), kept for callers that cannot tell them apart.
    */
-  tick(state: boolean | { serverWalking: boolean; playerMoving: boolean; dead?: boolean }): void {
+  tick(state: boolean | {
+    serverWalking: boolean; playerMoving: boolean; dead?: boolean;
+    /** OBS.portal-use-server-walk-run — the body and MoveToManager.phase() while the player's MoveTo runs. */
+    moveTo?: { at: MovePoint; phase: MoveToPhase | null } | null;
+  }): void {
     this.outbox.retry();
     const w = this.watch;
     if (!w) return;
-    const st = typeof state === 'boolean' ? { serverWalking: state, playerMoving: false, dead: false } : state;
+    const st = typeof state === 'boolean' ? { serverWalking: state, playerMoving: false, dead: false, moveTo: null } : state;
     if (st.dead) { this.watch = null; return; }
     const at = this.now();
+    if (st.moveTo && w.move && w.move.end === null) {
+      const p = finitePoint(st.moveTo.at);
+      if (p) w.move.last = p;
+      w.move.phase = st.moveTo.phase ?? null;
+    }
     if (st.playerMoving) w.playerMoved = true;
     if (st.serverWalking && w.serverWalk) w.progressAt = at;
     if (at - w.progressAt < PORTAL_REPLY_MS && at - w.startedAt < PORTAL_MAX_WAIT_MS) return;
@@ -829,6 +1008,7 @@ export class PortalUseReporter {
     this.failedSent++;
     const end = safe(() => this.opts.snapshot(w.guid), null);
     const s = w.snap;
+    const mv = w.lastMoveTo;
     const outcome = this.refused(w) ? PORTAL_REFUSED
       : w.trigger === 'use' && w.movesSent > 0 ? PORTAL_CANCELLED
       // BUG.portal-rim-brush-telemetry — the server was never sent a move that reaches the portal.
@@ -872,6 +1052,15 @@ export class PortalUseReporter {
       sentClosest: w.sentClosest === null ? null : r2(w.sentClosest),
       sentReached: w.sentClosest === null ? null : w.sentReached,
       sentReach: s.portalAt ? r2(sentReachOf(s)) : null,
+      moveTypes: [...w.moveTypes],
+      moveEnds: w.moveEnds.map((e) => e ?? 'running'),
+      moveDist: mv ? dist3(mv.start, mv.target) : null,
+      moveLeft: mv ? dist3(mv.last, mv.target) : null,
+      moveMoved: mv ? dist3(mv.last, mv.start) : null,
+      moveMs: mv ? Math.max(0, Math.round((mv.endedAt ?? at) - mv.startedAt)) : null,
+      movePhase: mv ? mv.phase : null,
+      chainBreaks: w.chainBreaks,
+      chainBreakTypes: [...w.chainBreakTypes],
     });
   }
 
@@ -905,6 +1094,7 @@ export class PortalUseReporter {
       sends: 0, busyHeld: 0, serverMoves: 0, keysAtSend: null, movesSent: 0, useDones: 0,
       firstSendAt: null, firstUseDoneMs: null, useOutstanding: false, refusalLeadMs: null,
       sentClosest: null, sentReached: false,
+      moveTypes: [], moveEnds: [], move: null, lastMoveTo: null, chainBreaks: 0, chainBreakTypes: [],
     };
     // The server's latest swept move (into the last position sent) is part of this walk-in's path.
     if (this.prevSent && this.lastSent) this.sentSegment(this.prevSent, this.lastSent);

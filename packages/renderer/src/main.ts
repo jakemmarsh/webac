@@ -258,7 +258,7 @@ import { WORLD_SELECT_EVENT, isWorldSelectPress, releaseChatFocus, selectionAfte
 import { escapeAction } from './controllers/EscapeAction.js';
 import { maybeStopCompletely as maybeStopCompletelyImpl, stopCompletely as stopCompletelyImpl, type StopCompletelyDeps } from './controllers/StopCompletely.js';
 import { GameLoop } from './GameLoop.js';
-import { MoveToManager, MoveType, performServerMovement, approachAnimInput, PLAYER_TURN_OMEGA, type MoveToHost } from './controllers/MoveToManager.js';
+import { MoveToManager, MoveType, performServerMovement, serverMovementStarts, serverMovementTarget, approachAnimInput, PLAYER_TURN_OMEGA, type MoveToHost } from './controllers/MoveToManager.js';
 import { adjustMotion, applyInterpretedMotion, removeInterpretedMotion, readyMotion, HoldKey, sequenceRootVelocity } from './world/RemoteMotion.js';
 import { localSequenceStep } from './player/LocalSequenceStep.js';
 import { headingForYaw, yawForHeading } from './world/Heading.js';
@@ -455,7 +455,7 @@ import { RefusalReporter, scrubNames } from './telemetry/RefusalReporter.js';
 import { knownObjectNames, pendingRequestDetail, castRefusalDetail, selectionRefusalDetail, CastPressTracker, type RefusalDetail, type PlacedObject } from './telemetry/RefusalTemplates.js';
 import { ObjsendReporter, countReleasedInView, summarizeObjects, type ObjsendSnapshot } from './telemetry/ObjsendReporter.js';
 import { MoveLimiterReporter } from './telemetry/MoveLimiterReporter.js';
-import { PortalUseReporter, bodyTouchesPortal, isPortalObject, overlapsPortal, ownMovementTouch, serverFramePoint, type PortalSnapshot, type PortalUseHeld } from './telemetry/PortalUseReporter.js';
+import { PortalUseReporter, bodyTouchesPortal, isPortalObject, overlapsPortal, ownMovementTouch, serverFramePoint, type PortalSnapshot, type PortalUseHeld, type MoveToStopReason } from './telemetry/PortalUseReporter.js';
 import { accountTag, browserId, realLocalStorage } from './telemetry/LoginTags.js';
 import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, serverIdFromUrl, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
@@ -906,6 +906,9 @@ function refusalForAction<T>(action: number, f: () => T): T { return refusalRepo
  */
 function serializeTrackedGameAction(sequence: number, actionType: GameActionType, payload?: Uint8Array): Uint8Array {
   refusalReporter?.noteActionSent(actionType);
+  // OBS.portal-use-server-walk-run — an action that stops ACE's move-to chain during a portal use (a Use's object: its first u32).
+  portalUseReporter?.actionSent(actionType, actionType === GameActionType.Use && payload && payload.byteLength >= 4
+    ? new DataView(payload.buffer, payload.byteOffset, 4).getUint32(0, true) : undefined);
   return serializeGameAction(sequence, actionType, payload);
 }
 /** Run `f` with `detail` (TELEMETRY.refusal-context) as the context of a refusal it raises. */
@@ -3650,6 +3653,18 @@ async function main() {
   // loop turns into movement and the controller's input.
   const playerMoveToMotion = readyMotion();
   let playerMoveTo: MoveToManager | null = null;
+  /**
+   * OBS.portal-use-server-walk-run — the caller cancelling the player's MoveTo on purpose, read by its onComplete
+   * for the portal telemetry (moveEnds). Set only for the cancelMoveTo call itself.
+   */
+  let playerMoveToStopReason: MoveToStopReason | null = null;
+  const stopPlayerMoveTo = (reason: MoveToStopReason): void => {
+    if (!playerMoveTo) return;
+    playerMoveToStopReason = reason;
+    try { playerMoveTo.cancelMoveTo(); } finally { playerMoveToStopReason = null; }
+  };
+  /** The body in the MoveToManager's frame (its host's position()). */
+  const playerMovePoint = () => ({ x: playerWorldX, y: playerWorldZ, z: playerFeetY });
   // The locomotion the MoveTo drives this frame (null = the player's own input).
   let playerMoveToDrive: { forward: boolean; running: boolean; turn: 'left' | 'right' | null } | null = null;
   // ── Dungeon state ──
@@ -3815,6 +3830,7 @@ async function main() {
       serverWalking: playerMoveTo?.isMovingTo() ?? false,
       playerMoving: cameraController.isMoving,
       dead: playerState.isDead,
+      moveTo: playerMoveTo?.isMovingTo() ? { at: playerMovePoint(), phase: playerMoveTo.phase() } : null,
     });
     if (!gameStarted || !serverObjectManager || gameUI.worldHiddenByPortalSpace || teleportBusy.value || playerState.isDead) {
       portalCheckBody = null;
@@ -5704,7 +5720,7 @@ async function main() {
         // Stop auto-attack
         combatController.autoAttack = false;
         meleeApproachTarget = resetMeleeChain();
-        playerMoveTo?.cancelMoveTo(); // death ends a server MoveTo
+        stopPlayerMoveTo('death'); // death ends a server MoveTo
         gameUI.hudState.target = null;
         currentTargetGuid = null;
         // BUG.death-doesnt-clear-pending-casts — ACE's Player_Death.cs Die()
@@ -6533,7 +6549,7 @@ async function main() {
     // the next one (the automatic reconnect resumes in this page): drop it, or every inventory verb
     // and use of the resumed session reads "You can only move or use one item at a time".
     inventoryRequests.clear();
-    playerMoveTo?.cancelMoveTo(); // world teardown ends a server MoveTo
+    stopPlayerMoveTo('teardown'); // world teardown ends a server MoveTo
     pendingTeleport = false;
     lastTeleportArrivalAt = null;
     activeCorrection = null;
@@ -7244,7 +7260,7 @@ async function main() {
   // LoseControlToServer's FinishJump drops a jump charge.
   cameraController.onAbortAutomaticAttack = () => attackRequest?.abortAutomaticAttack();
   cameraController.onTakeControlFromServer = () => {
-    playerMoveTo?.cancelMoveTo();
+    stopPlayerMoveTo('input');
     animController?.stopCompletely(cameraController);
   };
   cameraController.onFinishJump = () => animController?.cancelJumpCharge();
@@ -9620,6 +9636,7 @@ async function main() {
         // Arrived: report where we stopped at once, so the server's
         // WithinUseRadius poll (Player_Move.cs MoveToChain) sees it.
         onComplete: (status) => {
+          portalUseReporter?.moveToEnded(status, playerMoveToStopReason, playerMovePoint());
           if (status !== 0 || !movementSync) return;
           movementSync.sendAutonomousPositionNow({
             worldX: playerWorldX, worldZ: playerWorldZ, groundY: playerFeetY, playerYaw: cameraController.playerYaw,
@@ -9642,8 +9659,14 @@ async function main() {
       if (animController && animController.stanceId !== stanceId) animController.setStance(stanceId);
     };
     serverObjectManager.onLocalPlayerMovement = (type, move) => {
-      portalUseReporter?.serverMovement();
-      performServerMovement(playerMoveToManager(), type, move, (id) => !!serverObjectManager?.targetInfo(id));
+      const mgr = playerMoveToManager();
+      const targetOf = (id: number) => serverObjectManager?.targetInfo(id) ?? null;
+      const starts = serverMovementStarts(type, move);
+      // OBS.portal-use-server-walk-run — the CancelMoveTo every MoveTo / TurnTo begins with, done here first
+      // (the same call, so the one inside finds nothing running) to name it for the portal telemetry.
+      if (starts && mgr.isMovingTo()) stopPlayerMoveTo('superseded');
+      portalUseReporter?.serverMovement(type, { started: starts, at: playerMovePoint(), target: serverMovementTarget(type, move, targetOf) });
+      performServerMovement(mgr, type, move, (id) => !!targetOf(id));
     };
     // CPhysicsObj::InitDefaults @ 005139d0 — every object's Setup
     // DefaultScript (server objects, held copies, our own character).
@@ -10731,7 +10754,7 @@ async function main() {
           selectionLighting,
           hudState: gameUI.hudState,
           clearAutoAttackChain: () => { meleeApproachTarget = clearAutoAttackChain(combatController); },
-          cancelMoveTo: () => playerMoveTo?.cancelMoveTo(),
+          cancelMoveTo: () => stopPlayerMoveTo('teleport'),
         });
         console.log('[AC] PlayerTeleport received — awaiting new position');
         // DECOMP.login-complete-timing — NO LoginComplete here. Retail's

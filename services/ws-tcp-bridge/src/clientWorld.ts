@@ -245,10 +245,23 @@ function perfFields(b: Record<string, unknown>): Partial<ClientFirstMinuteEvent>
  * brushed the rim between positions; the server collides on the sent path only); every failure carries
  * `sentClosest` (m) / `sentReached`. BUG.portal-rim-brush-indoor-reach: `sentReach` (m) is the collision reach the
  * sent path was judged against (the largest radius sum + the tolerance: 0.1 m for a landcell portal, 0 indoors).
+ * OBS.portal-use-server-walk-run: each server movement in the watch (`moveTypes`, MovementType 6-9) and how the
+ * page's MoveToManager ended it (`moveEnds`, PORTAL_MOVE_ENDS); the last MoveTo's distance to its target at the
+ * start / end (`moveDist` / `moveLeft`, m), how far the body moved (`moveMoved`, m), how long it ran (`moveMs`),
+ * its last sampled phase (`movePhase`, PORTAL_MOVE_PHASES); and the actions sent after the Use that stop ACE's
+ * move-to chain besides a MoveToState (`chainBreaks`, `chainBreakTypes`: GameActionType codes).
  */
 export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_cancelled', 'portal_rim_brush', 'portal_used'] as const;
 export const PORTAL_TRIGGERS = ['use', 'walk_in'] as const;
 export const PORTAL_USE_HELD = ['stale', 'busy', 'decided'] as const;
+/** The renderer's MOVE_TO_ENDS (telemetry/PortalUseReporter.ts) and MOVE_TO_PHASES (controllers/MoveToManager.ts). */
+export const PORTAL_MOVE_ENDS = [
+  'arrived', 'superseded', 'input', 'teleport', 'death', 'teardown', 'target_gone', 'too_far', 'cancelled', 'failed',
+  'running', 'not_started',
+] as const;
+export const PORTAL_MOVE_PHASES = ['move', 'turn', 'turn_wait', 'no_progress', 'no_contact', 'target_wait'] as const;
+/** Server movement records / chain-break codes a page keeps (renderer MAX_MOVE_RECORDS). */
+const PORTAL_MOVE_RECORDS = 4;
 /** A portal watch's longest wait (renderer PORTAL_MAX_WAIT_MS 30 s, with slack for a late tick). */
 const PORTAL_WAIT_MS = 120_000;
 
@@ -299,6 +312,18 @@ export interface ClientPortalUseFailedEvent extends WorldIds {
   sentReached: boolean | null;
   /** The reach the sent path was judged against: the largest body/portal radius sum + the cell's tolerance (m 0.01). */
   sentReach: number | null;
+  /** Each server movement's MovementType (6-9) and how the page's MoveToManager ended it, index-aligned. */
+  moveTypes: number[] | null;
+  moveEnds: (typeof PORTAL_MOVE_ENDS[number] | null)[] | null;
+  /** The last MoveTo: distance to its target at start / end, body displacement (m 0.01), ms run, last sampled phase. */
+  moveDist: number | null;
+  moveLeft: number | null;
+  moveMoved: number | null;
+  moveMs: number | null;
+  movePhase: typeof PORTAL_MOVE_PHASES[number] | null;
+  /** Actions sent after the Use that stop ACE's move-to chain (not MoveToState), and their GameActionType codes. */
+  chainBreaks: number | null;
+  chainBreakTypes: number[] | null;
 }
 
 export interface ClientPortalUsedEvent extends WorldIds {
@@ -380,6 +405,15 @@ function sanitizePortal(outcome: typeof PORTAL_OUTCOMES[number], ids: WorldIds, 
     sentClosest: metres(b.sentClosest, 100_000, 2),
     sentReached: bool(b.sentReached),
     sentReach: metres(b.sentReach, 1000, 2),
+    moveTypes: Array.isArray(b.moveTypes) ? b.moveTypes.slice(0, PORTAL_MOVE_RECORDS).map((c) => uint(c, 255)).filter((c): c is number => c !== null) : null,
+    moveEnds: Array.isArray(b.moveEnds) ? b.moveEnds.slice(0, PORTAL_MOVE_RECORDS).map((e) => pick(e, PORTAL_MOVE_ENDS)) : null,
+    moveDist: metres(b.moveDist, 100_000, 2),
+    moveLeft: metres(b.moveLeft, 100_000, 2),
+    moveMoved: metres(b.moveMoved, 100_000, 2),
+    moveMs: uint(b.moveMs, PORTAL_WAIT_MS),
+    movePhase: pick(b.movePhase, PORTAL_MOVE_PHASES),
+    chainBreaks: uint(b.chainBreaks, 10_000),
+    chainBreakTypes: Array.isArray(b.chainBreakTypes) ? b.chainBreakTypes.slice(0, PORTAL_MOVE_RECORDS).map((c) => uint(c, U32)).filter((c): c is number => c !== null) : null,
   };
 }
 

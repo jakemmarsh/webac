@@ -12,8 +12,16 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import {
   PortalUseReporter, PORTAL_REPLY_MS, PORTAL_MAX_WAIT_MS, PORTAL_RATE_MS, chatTemplate, isPortalObject, overlapsPortal, bodyTouchesPortal,
   walkInActs, ownMovementTouch, OWN_MOVE_MIN_M, WEENIE_ERROR_ACTION_CANCELLED, WEENIE_ERROR_I_TELEPORTED, PORTAL_EARLY_REFUSAL_MS, PORTAL_REFUSAL_CODES,
+  CHAIN_BREAK_ACTIONS, type MoveToStopReason,
   type PortalEvent, type PortalSnapshot, type PortalUseFailedEvent,
 } from '../packages/renderer/src/telemetry/PortalUseReporter';
+import {
+  MoveToManager, MoveType, defaultMovementParams, performServerMovement, serverMovementStarts, serverMovementTarget, type MoveToHost,
+} from '../packages/renderer/src/controllers/MoveToManager';
+import { adjustMotion, applyInterpretedMotion, removeInterpretedMotion, readyMotion, HoldKey } from '../packages/renderer/src/world/RemoteMotion';
+import { MotionCommand } from '../packages/renderer/src/animation/MotionCommands';
+import type { SeqV3 } from '../packages/renderer/src/animation/SequenceFrame';
+import type { ParsedMoveTo, ParsedTurnTo } from '../packages/network/src/MovementDataParser';
 import { sanitizeClientPortal, sanitizeClientWorld } from '../services/ws-tcp-bridge/src/clientWorld';
 import { resolveBridgeConfig, type BridgeConfig } from '../services/ws-tcp-bridge/src/bridgeUtil';
 import { createBridgeServer } from '../services/ws-tcp-bridge/src/server';
@@ -742,5 +750,214 @@ describe('the bridge keeps the portal fields', () => {
     } finally {
       await bridge.shutdown();
     }
+  });
+});
+
+/**
+ * OBS.portal-use-server-walk-run — did our client run the server's walk to the portal, and why did it stop?
+ * Prod (DreamWeave ACE, end of retail, wcid 1003604, 2026-11-15): serverWalk true, serverMoves 1, the body never
+ * moved (closest = dist = endDist 3.54), UseDone(0) at 503 ms, no MoveToState. These drive the real MoveToManager
+ * the way main.ts's onLocalPlayerMovement does (serverMovementStarts → the superseding cancel named →
+ * serverMovement → performServerMovement; its onComplete → moveToEnded) and read the event's move fields.
+ */
+describe('OBS.portal-use-server-walk-run: the server walk our client ran, and why it stopped', () => {
+  const LB = 0x2561;
+  /** Player at cell 0x25610030 local (10, 10, 0); the portal 3.54 m east in 0x25610028 (one dungeon frame). */
+  const START: SeqV3 = { x: ((LB >>> 8) & 0xff) * 192 + 10, y: (LB & 0xff) * 192 + 10, z: 0 };
+  const moveToPortal = (over: Partial<ParsedMoveTo> = {}): { moveTo: ParsedMoveTo } => ({
+    moveTo: {
+      target: 0, cellId: 0x25610028, origin: { x: 13.54, y: 10, z: 0 }, flags: defaultMovementParams().flags,
+      distanceToObject: 0.6, minDistance: 0, failDistance: 3.4028235e38, speed: 1, walkRunThreshold: 15,
+      desiredHeading: 0, runRate: 1, ...over,
+    },
+  });
+
+  function walkRig(opts: { motionsPending?: () => boolean } = {}) {
+    const g = rig();
+    const s = { pos: { ...START }, heading: 0, st: readyMotion(), reason: null as MoveToStopReason | null };
+    const host: MoveToHost = {
+      position: () => s.pos,
+      heading: () => s.heading,
+      setHeading: (h) => { s.heading = h; },
+      radius: () => 0.5,
+      height: () => 1.8,
+      doMotion: (cmd, speed, hk) => { const a = adjustMotion(cmd, speed, hk, HoldKey.None, 1); applyInterpretedMotion(s.st, a.motion, a.speed); return 0; },
+      stopMotion: (cmd, speed, hk) => { removeInterpretedMotion(s.st, adjustMotion(cmd, speed, hk, HoldKey.None, 1).motion); return 0; },
+      stopCompletely: () => { Object.assign(s.st, readyMotion()); },
+      motionsPending: opts.motionsPending ?? (() => false),
+      hasContact: () => true,
+      target: () => null,
+      // main.ts: portalUseReporter.moveToEnded(status, playerMoveToStopReason, playerMovePoint())
+      onComplete: (status) => g.r.moveToEnded(status, s.reason, { ...s.pos }),
+      now: () => g.clock.t / 1000,
+    };
+    const mgr = new MoveToManager(host);
+    /** main.ts stopPlayerMoveTo. */
+    const stop = (reason: MoveToStopReason): void => { s.reason = reason; try { mgr.cancelMoveTo(); } finally { s.reason = null; } };
+    /** main.ts serverObjectManager.onLocalPlayerMovement. */
+    const serverMove = (type: number, move: { moveTo?: ParsedMoveTo; turnTo?: ParsedTurnTo }): void => {
+      const starts = serverMovementStarts(type, move);
+      if (starts && mgr.isMovingTo()) stop('superseded');
+      g.r.serverMovement(type, { started: starts, at: { ...s.pos }, target: serverMovementTarget(type, move, () => null) });
+      performServerMovement(mgr, type, move, () => false);
+    };
+    /** 100 ms portal checks, each over five 20 ms frames of MoveToManager.useTime + the motion's movement. */
+    const run = (ms: number): void => {
+      for (let i = 0; i < ms / 100; i++) {
+        for (let f = 0; f < 5; f++) {
+          if (mgr.isMovingTo()) mgr.useTime();
+          const dt = 0.02;
+          if (s.st.turn) s.heading = (((s.heading + 1.5 * s.st.turnSpeed * dt * (180 / Math.PI)) % 360) + 360) % 360;
+          const v = s.st.forward === MotionCommand.RunForward ? 4 * s.st.forwardSpeed
+            : s.st.forward === MotionCommand.WalkForward ? 3.12 * s.st.forwardSpeed : 0;
+          const h = s.heading * (Math.PI / 180);
+          s.pos = { x: s.pos.x + Math.sin(h) * v * dt, y: s.pos.y + Math.cos(h) * v * dt, z: s.pos.z };
+          g.clock.t += 20;
+        }
+        g.r.tick({
+          serverWalking: mgr.isMovingTo(), playerMoving: false,
+          moveTo: mgr.isMovingTo() ? { at: { ...s.pos }, phase: mgr.phase() } : null,
+        });
+      }
+    };
+    return { ...g, s, mgr, stop, serverMove, run };
+  }
+  const failed = (g: { events: PortalEvent[] }): PortalUseFailedEvent => g.events.find((e) => e.outcome !== 'portal_used') as PortalUseFailedEvent;
+
+  it('a MoveToPosition our client started and never stepped (its turn waiting on motions), the UseDone(0) at 500 ms: running, 0 m', () => {
+    const g = walkRig({ motionsPending: () => true });
+    g.r.useAttempt(PORTAL_GUID, portalObj, true, null, false);
+    g.serverMove(MoveType.MoveToPosition, moveToPortal());
+    expect(g.mgr.isMovingTo()).toBe(true);
+    g.run(500);
+    g.r.useDone(0); // ACE's chain gave up; our client does not stop its MoveTo on a UseDone
+    g.run(PORTAL_MAX_WAIT_MS);
+    const e = failed(g);
+    expect(e).toMatchObject({
+      outcome: 'portal_use_failed', serverWalk: true, serverMoves: 1, useDone: 0, useDones: 1, firstUseDoneMs: 500, movesSent: 0,
+      moveTypes: [7], moveEnds: ['running'], moveDist: 3.54, moveLeft: 3.54, moveMoved: 0, movePhase: 'turn_wait',
+      chainBreaks: 0, chainBreakTypes: [],
+    });
+    expect(e.moveMs).toBeGreaterThanOrEqual(PORTAL_MAX_WAIT_MS - 1000);
+  });
+
+  it('a MoveToPosition our client judged already in range ends at once (arrived, 0 ms, 0 m, never sampled)', () => {
+    const g = walkRig();
+    g.r.useAttempt(PORTAL_GUID, portalObj, true);
+    g.serverMove(MoveType.MoveToPosition, moveToPortal({ origin: { x: 10.3, y: 10, z: 0 } }));
+    expect(g.mgr.isMovingTo()).toBe(false);
+    g.run(200);
+    g.r.useDone(0);
+    g.run(PORTAL_REPLY_MS + 100);
+    expect(failed(g)).toMatchObject({
+      outcome: 'portal_use_failed', moveTypes: [7], moveEnds: ['arrived'], moveDist: 0.3, moveLeft: 0.3, moveMoved: 0, moveMs: 0, movePhase: null,
+    });
+  });
+
+  it('a MoveToPosition our client walked to the end (arrived), with no teleport after it', () => {
+    const g = walkRig();
+    g.r.useAttempt(PORTAL_GUID, portalObj, true);
+    g.serverMove(MoveType.MoveToPosition, moveToPortal());
+    g.run(3000);
+    expect(g.mgr.isMovingTo()).toBe(false);
+    g.run(PORTAL_REPLY_MS + 100);
+    const e = failed(g);
+    expect(e).toMatchObject({ outcome: 'portal_use_failed', moveTypes: [7], moveEnds: ['arrived'], moveDist: 3.54, movePhase: 'move' });
+    // Arrival is judged on the cylinder distance (UseSpheres: less the body's 0.5 m radius); moveLeft is origin to origin.
+    expect(e.moveLeft!).toBeLessThanOrEqual(0.6 + 0.5);
+    expect(e.moveMoved!).toBeGreaterThan(2.3);
+    expect(e.moveMs!).toBeGreaterThan(0);
+    expect(e.moveMs!).toBeLessThan(3000);
+  });
+
+  it("a MoveToPosition the player's movement key took back (input), its MoveToState sent: portal_cancelled", () => {
+    const g = walkRig();
+    g.r.useAttempt(PORTAL_GUID, portalObj, true, null, false);
+    g.serverMove(MoveType.MoveToPosition, moveToPortal());
+    g.run(1300); // the 90° turn east first, then part of the walk
+    g.stop('input'); // CameraController.takeControlFromServer → onTakeControlFromServer
+    g.r.movementSent();
+    g.run(PORTAL_REPLY_MS + 100);
+    const e = failed(g);
+    expect(e).toMatchObject({ outcome: 'portal_cancelled', movesSent: 1, moveTypes: [7], moveEnds: ['input'], moveDist: 3.54 });
+    expect(e.moveMoved!).toBeGreaterThan(0.2);
+    expect(e.moveLeft!).toBeLessThan(3.54);
+    expect(e.moveLeft!).toBeGreaterThan(0.6);
+    expect(e.moveMs).toBe(1300);
+  });
+
+  it('a later server movement supersedes the MoveTo (ACE TurnTo after it); a movement without data never started', () => {
+    const g = walkRig();
+    g.r.useAttempt(PORTAL_GUID, portalObj, true);
+    g.serverMove(MoveType.MoveToPosition, moveToPortal());
+    g.run(300);
+    g.serverMove(MoveType.TurnToHeading, { turnTo: { target: 0, flags: 0, speed: 1, desiredHeading: g.s.heading } });
+    g.serverMove(MoveType.MoveToObject, {}); // no MoveTo data: performServerMovement starts nothing
+    g.run(PORTAL_REPLY_MS + 100);
+    const e = failed(g);
+    expect(e.moveTypes).toEqual([7, 9, 6]);
+    expect(e.moveEnds).toEqual(['superseded', 'arrived', 'not_started']);
+    // The numbers stay on the last MoveTo: the one with no data has none to go by.
+    expect(e).toMatchObject({ moveDist: null, moveLeft: null, moveMoved: 0, moveMs: 0 });
+    expect(e.serverMoves).toBe(3);
+  });
+
+  it('counts the actions after the Use that stop ACE\'s chain (a Jump, a Use of another object), not a re-use or a chat line', () => {
+    const g = walkRig();
+    g.r.actionSent(0xf61b); // before the Use: no watch
+    g.r.useAttempt(PORTAL_GUID, portalObj, true);
+    g.serverMove(MoveType.MoveToPosition, moveToPortal());
+    g.r.actionSent(0xf61b); // Jump (GameActionJump.cs StopExistingMoveToChains)
+    g.r.actionSent(0x0036, PORTAL_GUID); // a Use of this portal: an attempt, counted there
+    g.r.actionSent(0x0036, 0x50000001); // a Use of something else (Player_Use.cs StopExistingMoveToChains)
+    g.r.actionSent(0x0015); // Talk: no chain
+    g.r.actionSent(0xf61c); // MoveToState: movesSent's
+    g.run(PORTAL_REPLY_MS + 3000); // the walk (about 2.5 s) extends the wait
+    expect(failed(g)).toMatchObject({ chainBreaks: 2, chainBreakTypes: [0xf61b, 0x0036] });
+    expect(CHAIN_BREAK_ACTIONS.has(0x0019) && CHAIN_BREAK_ACTIONS.has(0x0008) && !CHAIN_BREAK_ACTIONS.has(0xf61c)).toBe(true);
+  });
+
+  it('a watch with no server movement carries empty move fields; a MoveTo end from before the watch is ignored', () => {
+    const g = walkRig();
+    g.r.moveToEnded(0, null, START); // no watch
+    g.r.useAttempt(PORTAL_GUID, portalObj, true);
+    g.r.moveToEnded(0x36, null, START); // no move recorded in this watch
+    g.run(PORTAL_REPLY_MS + 100);
+    expect(failed(g)).toMatchObject({
+      moveTypes: [], moveEnds: [], moveDist: null, moveLeft: null, moveMoved: null, moveMs: null, movePhase: null, chainBreaks: 0, chainBreakTypes: [],
+    });
+  });
+
+  it('MoveToManager.phase() reads what the move waits on, read-only', () => {
+    const g = walkRig({ motionsPending: () => true });
+    expect(g.mgr.phase()).toBeNull();
+    g.serverMove(MoveType.MoveToPosition, moveToPortal());
+    expect(g.mgr.phase()).toBe('turn_wait');
+    const h = walkRig();
+    h.serverMove(MoveType.MoveToPosition, moveToPortal());
+    expect(h.mgr.phase()).toBe('turn');
+    h.run(1500);
+    expect(h.mgr.phase()).toBe('move');
+    expect(serverMovementStarts(MoveType.TurnToObject, {})).toBe(false);
+    expect(serverMovementTarget(MoveType.MoveToObject, moveToPortal({ target: 0x50000002 }), () => ({ pos: { x: 1, y: 2, z: 3 } }))).toEqual({ x: 1, y: 2, z: 3 });
+    expect(serverMovementTarget(MoveType.TurnToHeading, moveToPortal(), () => null)).toBeNull();
+  });
+
+  it('the bridge keeps every move field, and drops junk in them', () => {
+    const g = walkRig();
+    g.r.useAttempt(PORTAL_GUID, portalObj, true);
+    g.serverMove(MoveType.MoveToPosition, moveToPortal());
+    g.run(500);
+    g.r.actionSent(0xf61b);
+    g.stop('input');
+    g.run(PORTAL_REPLY_MS + 100);
+    const sent = failed(g);
+    expect(sent.moveEnds).toEqual(['input']);
+    expect(sanitizeClientPortal(sent)).toEqual(sent);
+    const junk = sanitizeClientPortal({
+      ...sent, moveTypes: [7, 'x', -1, 9, 6, 8, 7], moveEnds: ['arrived', 'teleported_home'], moveDist: 'far', movePhase: 'dancing',
+      chainBreaks: -2, chainBreakTypes: [0xf61b, 2 ** 33],
+    }) as unknown as Record<string, unknown>;
+    expect(junk).toMatchObject({ moveTypes: [7, 9], moveEnds: ['arrived', null], moveDist: null, movePhase: null, chainBreaks: null, chainBreakTypes: [0xf61b] });
   });
 });

@@ -594,7 +594,30 @@ export class MoveToManager {
   hitGround(): void {
     if (this.movementType !== MoveType.Invalid) this.beginNextNode();
   }
+
+  /**
+   * OBS.portal-use-server-walk-run — what the move is doing now, read-only (telemetry): null = no move.
+   * `no_contact`: UseTime waits for the ground; `target_wait`: a MoveToObject / TurnToObject whose target
+   * has not been reported yet; `no_progress`: CheckProgressMade failed on the last step; `turn_wait`: the
+   * head turn waits on motions_pending (BeginTurnToHeading @ 00529b90); `turn`; `move`.
+   */
+  phase(): MoveToPhase | null {
+    if (this.movementType === MoveType.Invalid) return null;
+    if (!this.host.hasContact()) return 'no_contact';
+    if (this.topLevelObjectId !== 0 && !this.initialized) return 'target_wait';
+    const head = this.pending[0];
+    if (!head) return 'target_wait';
+    if (this.failProgressCount > 0) return 'no_progress';
+    if (head.type === MoveType.TurnToHeading) {
+      return this.currentCommand === MotionCommand.TurnLeft || this.currentCommand === MotionCommand.TurnRight ? 'turn' : 'turn_wait';
+    }
+    return 'move';
+  }
 }
+
+/** MoveToManager.phase()'s tokens (OBS.portal-use-server-walk-run). */
+export const MOVE_TO_PHASES = ['move', 'turn', 'turn_wait', 'no_progress', 'no_contact', 'target_wait'] as const;
+export type MoveToPhase = typeof MOVE_TO_PHASES[number];
 
 /** The MovementParameters a parsed MoveTo / TurnTo carries (`UnPackNet @ 0052ac50` over the constructor's defaults). */
 export function movementParamsFromWire(w: {
@@ -645,6 +668,29 @@ export function performServerMovement(
     else mgr.turnToHeading(params);
   }
   return null;
+}
+
+/**
+ * performServerMovement starts a move / turn for this movement (it carries the MoveTo / TurnTo data its
+ * type needs). Every one it starts begins with CancelMoveTo of the running move (OBS.portal-use-server-walk-run).
+ */
+export function serverMovementStarts(type: number, move: { moveTo?: ParsedMoveTo; turnTo?: ParsedTurnTo }): boolean {
+  if (type === MoveType.MoveToObject || type === MoveType.MoveToPosition) return !!move.moveTo;
+  if (type === MoveType.TurnToObject || type === MoveType.TurnToHeading) return !!move.turnTo;
+  return false;
+}
+
+/**
+ * Where a MoveTo performServerMovement starts heads (AC world axes), as it will choose: a known
+ * MoveToObject target's position, else the sent origin. null for a turn or a movement with no data.
+ */
+export function serverMovementTarget(
+  type: number, move: { moveTo?: ParsedMoveTo }, target: (id: number) => { pos: SeqV3 } | null,
+): SeqV3 | null {
+  if ((type !== MoveType.MoveToObject && type !== MoveType.MoveToPosition) || !move.moveTo) return null;
+  const m = move.moveTo;
+  const t = type === MoveType.MoveToObject && m.target ? target(m.target) : null;
+  return t ? { ...t.pos } : moveToDestination(m);
 }
 
 /**
