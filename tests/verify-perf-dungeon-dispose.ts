@@ -3,8 +3,12 @@
  * §performance flagged the cell-unload path as leaking materials). Pins the
  * ownership-aware disposal model:
  *   - geometry: always per-mesh → always disposed
- *   - cell-geometry materials (userData.cellGeometry): per-cell CLONES from
- *     EnvCellRenderer.buildCellGeometry (.clone() at EnvCellRenderer.ts) → disposed
+ *   - cell-geometry materials (userData.cellGeometry): an OWNED copy is
+ *     disposed (EnvCellRenderer gives a cell its own copy only when the factory
+ *     material was built across a streamed-DAT miss; since
+ *     PERF.shared-cell-materials the usual copy is shared per surface and
+ *     registered shared, so it is spared like the static-object material —
+ *     tests/verify-perf-shared-cell-materials.ts)
  *   - static-object materials: SHARED MaterialFactory-cached instances → must
  *     NOT be disposed when one cell unloads (other live meshes use them)
  * Also pins the previously-leaking paths: initStream() over a prior dungeon
@@ -165,5 +169,38 @@ describe('DungeonRenderer streamed-cell disposal', () => {
     expect(dr.streamCellCount).toBe(2);
     expect(trackers.cellGeomDisposed.size).toBe(0);
     expect(trackers.cellMatDisposed.size).toBe(0);
+  });
+
+  // PERF.dungeon-stream-lookup — the unload pass finds each loaded cell's
+  // origin by id (a Map) instead of a linear find per cell per frame. Same
+  // loads and unloads, step for step, as the radius rule computed here.
+  it('streams the same cells as the radius rule over a long walk, and re-indexes on a new dungeon', () => {
+    const cells: CellSpec[] = [];
+    for (let i = 0; i < 24; i++) for (let j = 0; j < 24; j++) cells.push({ cellId: (0x01010100 + i * 24 + j) >>> 0, x: i * 20, y: j * 20 });
+    const { dr } = makeStreamedDungeon(cells);
+    dr.initStream(0x0101FFFF);
+    const loaded = new Set<number>();
+    const LOAD = DungeonRenderer.LOAD_RADIUS, UNLOAD = DungeonRenderer.UNLOAD_RADIUS;
+    for (let step = 0; step <= 60; step++) {
+      const px = step * 8, py = 230 + 120 * Math.sin(step / 6);
+      for (const c of cells) {
+        const d2 = (c.x - px) ** 2 + (c.y - py) ** 2;
+        if (d2 <= LOAD * LOAD) loaded.add(c.cellId);
+        else if (d2 > UNLOAD * UNLOAD) loaded.delete(c.cellId);
+      }
+      dr.updateStream(px, py);
+      expect(dr.streamCellCount).toBe(loaded.size);
+    }
+    expect(loaded.size).toBeGreaterThan(20);
+    // A new stream over a different layout of the same ids: the old origins must not answer.
+    const moved = cells.map((c) => ({ ...c, x: c.x + 5000 }));
+    cells.splice(0, cells.length, ...moved);
+    dr.initStream(0x0101FFFF);
+    dr.updateStream(5000, 0);
+    const near = moved.filter((c) => (c.x - 5000) ** 2 + c.y ** 2 <= LOAD * LOAD).length;
+    expect(dr.streamCellCount).toBe(near);
+    // Walking away unloads them by their new origins.
+    dr.updateStream(9000, 0);
+    expect(dr.streamCellCount).toBe(0);
   });
 });

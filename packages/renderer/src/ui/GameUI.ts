@@ -3611,6 +3611,9 @@ export class GameUI {
   private lastHealthText = '';
   private lastStaminaText = '';
   private lastManaText = '';
+  /** PERF.hud-vitals-per-frame — each vital fill's last clip, each vital text's last values (updateVitalBarDAT). */
+  private readonly vitalClipMemo = new WeakMap<HTMLElement, string>();
+  private readonly vitalTextMemo = new WeakMap<HTMLElement, { cur: number; max: number; text: string }>();
   private lastCoordText = '';
   private lastTargetKey = '';
   private lastTargetId = 0;
@@ -14235,14 +14238,23 @@ export class GameUI {
     // the full-width depleted layer 0x100000e7. UIElement_Meter::DrawChildren
     // @ 0046fbd0 (direction 1) clips it to x0 .. x0 + fraction·width, so the
     // dark layer shows only on the unfilled right.
+    // PERF.hud-vitals-per-frame (2026-11-15) — updateHUD runs every frame:
+    // the clip and the text are written / formatted only when they change
+    // (three toLocaleString pairs and three style writes a frame were ~2 % of
+    // a 10x-throttled academy frame).
     if (fillEl) {
       const rightClip = ((1 - state.fraction) * 100).toFixed(1);
-      fillEl.style.clipPath = `inset(0 ${rightClip}% 0 0)`;
+      if (this.vitalClipMemo.get(fillEl) !== rightClip) {
+        this.vitalClipMemo.set(fillEl, rightClip);
+        fillEl.style.clipPath = `inset(0 ${rightClip}% 0 0)`;
+      }
     }
     // Render text overlay
-    const cur = Math.floor(state.current).toLocaleString();
-    const max = Math.floor(state.max).toLocaleString();
-    const text = `${cur}/${max}`;
+    const curN = Math.floor(state.current), maxN = Math.floor(state.max);
+    const memo = textEl ? this.vitalTextMemo.get(textEl) : undefined;
+    if (memo && memo.cur === curN && memo.max === maxN && memo.text === lastText) return lastText;
+    const text = `${curN.toLocaleString()}/${maxN.toLocaleString()}`;
+    if (textEl) this.vitalTextMemo.set(textEl, { cur: curN, max: maxN, text });
     if (textEl && text !== lastText && this.vitalsHandle) {
       // CORE.17.k.b.b.c.a — the vitals value texts (0x2100003f:0x10000376
       // base) draw their desc's own p27 (white); no caller colour.

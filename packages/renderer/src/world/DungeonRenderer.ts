@@ -30,6 +30,13 @@ export class DungeonRenderer {
 
   /** All cell origins for the active dungeon (for proximity lookup). */
   private cellInfos: CellInfo[] = [];
+  /**
+   * PERF.dungeon-stream-lookup — the same entries by cell id (the first one
+   * scanned per id, as cellInfos.find returned). The unload pass looked each
+   * loaded cell up with a linear find every frame: ~200 loaded × ~570 indexed
+   * cells in the Holtburg academy, 1-2 % of a 6x-throttled frame.
+   */
+  private cellInfoById = new Map<number, CellInfo>();
   /** Which cells are currently loaded as meshes. */
   private loadedCellMeshes = new Map<number, THREE.Group>();
   /** The parent group for the active streamed dungeon. */
@@ -141,6 +148,7 @@ export class DungeonRenderer {
 
     // Pre-scan all cell origins (fast — just parses position, doesn't build geometry)
     this.cellInfos = [];
+    this.cellInfoById.clear();
     this.unscannedCellIds = [];
     this.incompleteCells.clear();
     this.scanCells(cellIds);
@@ -195,7 +203,7 @@ export class DungeonRenderer {
 
     // Unload distant cells
     for (const [cellId, mesh] of this.loadedCellMeshes) {
-      const info = this.cellInfos.find(c => c.cellId === cellId);
+      const info = this.cellInfoById.get(cellId);
       if (!info) continue;
       const dx = info.x - playerLocalX;
       const dy = info.y - playerLocalY;
@@ -230,12 +238,14 @@ export class DungeonRenderer {
     for (const cellId of cellIds) {
       const envCell = this.envCellRenderer.loadEnvCell(cellId);
       if (envCell) {
-        this.cellInfos.push({
+        const info: CellInfo = {
           cellId,
           x: envCell.position.origin.x,
           y: envCell.position.origin.y,
           z: envCell.position.origin.z,
-        });
+        };
+        this.cellInfos.push(info);
+        if (!this.cellInfoById.has(cellId)) this.cellInfoById.set(cellId, info);
       } else if (this.cellDb.hasFile(cellId)) {
         this.unscannedCellIds.push(cellId);
       }
@@ -351,6 +361,7 @@ export class DungeonRenderer {
   clear(): void {
     this.loadedDungeons.clear();
     this.cellInfos = [];
+    this.cellInfoById.clear();
     // ASSESS: dispose streamed cells on teardown (was a silent drop)
     for (const mesh of this.loadedCellMeshes.values()) {
       this.disposeCellMesh(mesh);

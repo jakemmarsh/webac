@@ -17,7 +17,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import * as THREE from 'three';
 import { DungeonCollision } from '../packages/renderer/src/world/DungeonCollision.js';
-import { rayMayHit } from '../packages/renderer/src/world/RaycastBroadPhase.js';
+import { rayMayHit, rayCandidates, StaticRayGrid } from '../packages/renderer/src/world/RaycastBroadPhase.js';
+import { freezeStaticTransform, refreeze } from '../packages/renderer/src/utils/freezeStatic.js';
 
 function rng(seed: number): () => number {
   let s = seed >>> 0;
@@ -142,5 +143,88 @@ describe('RaycastBroadPhase — DungeonCollision casts', () => {
     (bare as unknown as { material: undefined }).material = undefined;
     expect(rayMayHit(bare, raycaster)).toBe(false);
     expect(bare.geometry.boundingSphere).toBeNull();
+  });
+
+  // PERF.ray-grid (2026-11-15) — StaticRayGrid: frozen meshes are found through an x / z grid; the survivors
+  // are rayCandidates' own, in the same order, so the casts' hits cannot change.
+  it("StaticRayGrid keeps rayCandidates' plain-mesh survivors in order, and the same hits, for frozen and moving meshes", () => {
+    const r = rng(77);
+    const town = buildTown(r);
+    // A cell's furniture pool: a small InstancedMesh (identity) under a frozen cell group.
+    for (let c = 0; c < 40; c++) {
+      const cell = new THREE.Group();
+      cell.position.set(r() * 600, r() * 4, r() * 600);
+      const pool = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial(), 4);
+      const m = new THREE.Matrix4();
+      for (let k = 0; k < 4; k++) pool.setMatrixAt(k, m.makeTranslation(r() * 8 - 4, 0, r() * 8 - 4));
+      cell.add(pool);
+      town.objects.push(cell);
+    }
+    // Most buildings are placed once and frozen (as the game's cells and shells are); some stay live.
+    town.objects.forEach((o, i) => { if (i % 4 !== 0) freezeStaticTransform(o); else o.updateMatrixWorld(true); });
+    const all: THREE.Mesh[] = [];
+    for (const o of town.objects) o.traverse((c) => { if ((c as THREE.Mesh).isMesh || (c as THREE.InstancedMesh).isInstancedMesh) all.push(c as THREE.Mesh); });
+    const grid = new StaticRayGrid<THREE.Mesh>();
+    grid.build(all);
+    const raycaster = new THREE.Raycaster();
+    const a: THREE.Mesh[] = [], b: THREE.Mesh[] = [];
+    const plain = (m: THREE.Mesh) => !(m as unknown as THREE.InstancedMesh).isInstancedMesh;
+    const hits = (list: THREE.Mesh[]) => raycaster.intersectObjects(list, false).map(key);
+    let kept = 0, hitCount = 0;
+    for (let i = 0; i < 4000; i++) {
+      // A live (unfrozen) building moves between casts: it must be found wherever it is.
+      if (i % 50 === 0) { const live = town.objects[((i / 50) % 75) * 4]; live.position.x += 30; live.updateMatrixWorld(true); }
+      raycaster.set(new THREE.Vector3(r() * 600, r() * 8, r() * 600), new THREE.Vector3(r() - 0.5, (r() - 0.5) * 0.6, r() - 0.5).normalize());
+      raycaster.near = i % 13 === 0 ? 0.5 : 0;
+      raycaster.far = i % 7 === 0 ? 1000 : i % 11 === 0 ? Infinity : 3 + r() * 30;
+      grid.candidates(raycaster, b); rayCandidates(all, raycaster, a);
+      expect(b.filter(plain).map((m) => m.uuid)).toEqual(a.filter(plain).map((m) => m.uuid));
+      const h = hits(a);
+      expect(hits(b)).toEqual(h);
+      kept += a.length; hitCount += h.length;
+    }
+    expect(kept).toBeGreaterThan(4000);
+    expect(hitCount).toBeGreaterThan(300);
+    expect(grid.gridCasts).toBeGreaterThan(3000);
+    expect(grid.linearCasts).toBeGreaterThan(0); // the infinite / very long casts
+  });
+
+  it('a frozen mesh re-placed by refreeze is found again by the periodic rebuild', () => {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), new THREE.MeshLambertMaterial());
+    mesh.position.set(100, 0, 100);
+    freezeStaticTransform(mesh);
+    const grid = new StaticRayGrid<THREE.Mesh>();
+    grid.build([mesh]);
+    const raycaster = new THREE.Raycaster(new THREE.Vector3(300, 0, 290), new THREE.Vector3(0, 0, 1), 0, 20);
+    const out: THREE.Mesh[] = [];
+    expect(grid.candidates(raycaster, out).length).toBe(0);
+    mesh.position.set(300, 0, 300);
+    refreeze(mesh);
+    let found = false;
+    for (let i = 0; i <= StaticRayGrid.REBUILD_EVERY && !found; i++) found = grid.candidates(raycaster, out).length === 1;
+    expect(found).toBe(true);
+  });
+
+  it("DungeonCollision casts through the grid with the old path's hits (frozen town)", () => {
+    const r = rng(9);
+    const town = buildTown(r);
+    for (const o of town.objects) freezeStaticTransform(o);
+    const dc = new DungeonCollision();
+    dc.setMeshes(town.objects);
+    const meshes = (dc as unknown as { renderMeshes: THREE.Mesh[] }).renderMeshes;
+    const raycaster = (dc as unknown as { raycaster: THREE.Raycaster }).raycaster;
+    const grid = (dc as unknown as { rayGrid: StaticRayGrid<THREE.Mesh> }).rayGrid;
+    const cast = () => (dc as unknown as { intersectRenderMeshes(): THREE.Intersection[] }).intersectRenderMeshes();
+    let hits = 0;
+    for (let i = 0; i < 2000; i++) {
+      raycaster.set(new THREE.Vector3(r() * 600, r() * 8, r() * 600), new THREE.Vector3(r() - 0.5, (r() - 0.5) * 0.6, r() - 0.5).normalize());
+      raycaster.near = 0;
+      raycaster.far = i % 5 === 0 ? 400 : 3 + r() * 20;
+      const before = oldCast(meshes, raycaster).map(key);
+      expect(cast().map(key)).toEqual(before);
+      hits += before.length;
+    }
+    expect(hits).toBeGreaterThan(100);
+    expect(grid.gridCasts).toBeGreaterThan(1500);
   });
 });

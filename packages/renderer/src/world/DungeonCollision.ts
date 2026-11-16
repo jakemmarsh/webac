@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { rayCandidates } from './RaycastBroadPhase.js';
+import { StaticRayGrid } from './RaycastBroadPhase.js';
 import type { CellStruct } from '@ac/dat-parser/file-types/Environment.js';
 import type { Frame } from '@ac/dat-parser/file-types/Frame.js';
 import type { GfxObj } from '@ac/dat-parser/file-types/GfxObj.js';
@@ -674,6 +674,8 @@ export class DungeonCollision {
   // Legacy raycaster for outdoor/camera collision
   private raycaster = new THREE.Raycaster();
   private renderMeshes: THREE.Mesh[] = [];
+  /** PERF.ray-grid — renderMeshes' frozen meshes by x / z cell (RaycastBroadPhase.StaticRayGrid), rebuilt with the list. */
+  private readonly rayGrid = new StaticRayGrid<THREE.Mesh>();
 
   /**
    * BUG.collision-radius-step-up-hardcoded-human — resolve the local
@@ -1335,6 +1337,7 @@ export class DungeonCollision {
         if (o.userData.envCellId !== undefined) { this.meshCells.set(child, o.userData.envCellId >>> 0); break; }
       }
     });
+    this.rayGrid.build(this.renderMeshes);
   }
 
   /**
@@ -1356,6 +1359,7 @@ export class DungeonCollision {
         else this.meshCells.set(child, obj.userData.envCellId >>> 0);
       });
     }
+    this.rayGrid.build(this.renderMeshes);
   }
 
   /** BUG.bunker-camera-in-head — the render meshes of land-cell objects (building shells), not of any env cell. */
@@ -1373,7 +1377,9 @@ export class DungeonCollision {
     // PERF.integrated-gpu-cpu-bound — only the meshes three's own bounding-
     // sphere early-out would not reject are flipped and cast (RaycastBroadPhase:
     // the same test, so the same hits in the same order).
-    const meshes = rayCandidates(this.renderMeshes, this.raycaster, this.rayCandidateScratch);
+    // PERF.ray-grid — and only the meshes under the ray's segment are looked at (StaticRayGrid: the same
+    // survivors in the same order).
+    const meshes = this.rayGrid.candidates(this.raycaster, this.rayCandidateScratch);
     const restore: Array<[THREE.Material, THREE.Side]> = [];
     for (const mesh of meshes) {
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
