@@ -148,6 +148,19 @@ export function probeWebGl2(makeCanvas: () => ProbeCanvas): WebGl2Probe {
   return { renderer: null, webgl2: false, failure: { cause, status: cleanWebGlStatus(status) } };
 }
 
+/**
+ * BUG.webgl-crash-block-wait — one quiet WebGL 2 attempt, for the wait after a graphics crash
+ * (boot/Capability.ts runCapabilityGate): true when a context could be created. The context is
+ * released at once through WEBGL_lose_context, a loss the page asks for, which Chromium does not
+ * count against the site (only a loss the GPU process reports does).
+ */
+export function canCreateWebGl2(makeCanvas: () => ProbeCanvas): boolean {
+  const { ctx } = tryContext(makeCanvas, 'webgl2');
+  if (!ctx) return false;
+  releaseGl(ctx);
+  return true;
+}
+
 // ── Platform ──────────────────────────────────────────────────────────
 
 export type HelpOs = 'windows' | 'mac' | 'linux' | 'linux_arm' | 'chromeos' | 'other';
@@ -209,6 +222,20 @@ function driverStep(os: HelpOs, browser: HelpBrowser): string {
 const FIREFOX_SUPPORT = 'about:support (the Graphics section) shows why Firefox turned WebGL off. '
   + 'Setting webgl.force-enabled to true in about:config can override it, at your own risk: it may be unstable on this graphics driver.';
 
+/**
+ * BUG.webgl-crash-block-wait — Chromium blocks 3D for a site that lost two or more contexts to a GPU
+ * crash, and each recorded loss expires after kBlockedDomainExpirationPeriod = base::Minutes(2)
+ * (content/browser/gpu/gpu_data_manager_impl_private.cc, Are3DAPIsBlockedAtTime): no restart is
+ * needed, and the page waits it out by itself (Capability.ts). The status string that names this
+ * cause is Chromium's alone, so only a Chromium browser reaches it.
+ */
+function crashBlockText(browser: HelpBrowser): string {
+  const name = browser === 'edge' ? 'Edge' : browser === 'chrome' ? 'Chrome' : 'the browser';
+  return `After a graphics crash, ${name} turns graphics off for this site for up to two minutes. `
+    + 'The game will continue by itself when they come back. If it doesn\'t, press Reload. '
+    + 'If it keeps happening, update your graphics driver.';
+}
+
 const RESTART = 'If the game worked before in this browser, quit the browser completely and start it again: after a '
   + 'graphics crash the browser turns graphics off for the site until it restarts';
 
@@ -222,7 +249,7 @@ export function webgl2HelpText(failure: WebGlFailure | null, platform: HelpPlatf
   const cause = failure?.cause ?? 'unknown';
   switch (cause) {
     case 'context_lost_after_crash':
-      parts.push(`${RESTART}${chromium ? ` (${gpuPage} shows it)` : ''}.`, 'If it keeps happening, update your graphics driver.');
+      parts.push(crashBlockText(browser));
       break;
     case 'blocklisted':
       if (chromium) {

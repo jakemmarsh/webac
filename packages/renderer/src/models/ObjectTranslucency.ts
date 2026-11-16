@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { ownMeshMaterials, ownedCopyOf } from './MaterialOwnership.js';
+import { ownMeshMaterials, ownedCopyOf, releaseRestoredCopies } from './MaterialOwnership.js';
 import { inheritRetailLighting } from './RetailLighting.js';
 
 /**
@@ -44,6 +44,8 @@ export const PART_UNDRAWN_KEY = 'acPartUndrawn';
  * streamed GfxObj not resident) still carries it to its rebuilt successor.
  */
 const PART_HIDDEN_KEY = 'acPartHidden';
+/** PartMaterialState.PART_SCRIPT_MATERIAL_KEY (that module imports this one): a part's PhysicsScript luminous / diffuse record. */
+const PART_SCRIPT_MATERIAL_KEY = 'acScriptPartMaterial';
 
 /**
  * userData key on an object root: its CPhysicsObj::state (PhysicsState),
@@ -152,6 +154,9 @@ export function setPartTranslucency(part: THREE.Object3D, value: number): void {
   }
   if (cur === t) return;
   part.userData[PART_TRANSLUCENCY_KEY] = t;
+  // CurSettingsAreDefault @ 0050d9e0 also needs the part's diffuse and luminosity at their defaults:
+  // a part a PhysicsScript wrote them on (PartMaterialState's record) keeps its copies.
+  const scriptValues = part.userData[PART_SCRIPT_MATERIAL_KEY] !== undefined;
   for (const mesh of meshes) {
     if (t === DEFAULT_TRANSLUCENCY) {
       // RestoreMaterial: the authored look.
@@ -159,6 +164,9 @@ export function setPartTranslucency(part: THREE.Object3D, value: number): void {
         const a = m.userData[AUTHORED_KEY] as AuthoredAlpha | undefined;
         if (a) restoreAuthored(m, a);
       }
+      // PERF.restored-copy-release — RestoreMaterial @ 0050df70 then drops the part's copy:
+      // the mesh draws the shared material again (MaterialOwnership.releaseRestoredCopies).
+      if (!scriptValues) releaseRestoredCopies(mesh);
       continue;
     }
     applyFadeToMeshes([mesh], t);

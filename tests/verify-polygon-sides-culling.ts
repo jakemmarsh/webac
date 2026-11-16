@@ -21,7 +21,7 @@ import { MaterialFactory } from '@ac/renderer/models/MaterialFactory.js';
 import { Surface } from '@ac/dat-parser/file-types/Surface.js';
 import { DungeonCollision } from '../packages/renderer/src/world/DungeonCollision.js';
 import { doubleSidedCopies } from '../packages/renderer/src/effects/PortalSpaceRenderer.js';
-import { EnvCellRenderer } from '../packages/renderer/src/world/EnvCellRenderer.js';
+import { EnvCellRenderer, cellSurfaceBatches } from '../packages/renderer/src/world/EnvCellRenderer.js';
 import { applyRetailLighting } from '../packages/renderer/src/models/RetailLighting.js';
 import { DAT_PATHS, openDat } from './_harness/dat.js';
 
@@ -88,13 +88,13 @@ describe('per-polygon sidedness', () => {
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const group = renderer.buildCellGeometry(cellStruct as any, [0x08000001]);
-    const sides = group.children.map((m) => ((m as THREE.Mesh).material as THREE.Material).side).sort();
+    const sides = cellSurfaceBatches(group).map((b) => b.material.side).sort();
     expect(sides).toEqual([THREE.FrontSide, THREE.DoubleSide].sort());
     expect(shared.side).toBe(THREE.DoubleSide); // the shared material is untouched
     // camera collision over the cell keeps the culled side on the material
     const dc = new DungeonCollision();
     dc.setDungeonGroup(group);
-    expect(group.children.map((m) => ((m as THREE.Mesh).material as THREE.Material).side).sort()).toEqual(sides);
+    expect(cellSurfaceBatches(group).map((b) => b.material.side).sort()).toEqual(sides);
   });
 
   it('portal space: the tunnel (camera inside, outward SidesType 0 faces) draws from double-sided copies; the shared materials stay culled', () => {

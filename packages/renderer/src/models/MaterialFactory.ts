@@ -283,10 +283,67 @@ export function prepareSurfaceMesh(mesh: THREE.Mesh, renderOrderBase = 0): void 
   else if (renderOrderBase !== 0) mesh.renderOrder = renderOrderBase;
 }
 
+/**
+ * The renderOrder prepareSurfaceMesh gives a mesh drawing only `material`
+ * (base 0): the clip band for a clip-list batch, else 0. A builder merging
+ * batches into one mesh keeps the batches of one band together
+ * (EnvCellRenderer, PERF.cell-surface-merge).
+ */
+export function surfaceRenderOrder(material: THREE.Material): number {
+  return material.userData?.[CLIP_LIST_KEY] ? CLIP_LIST_RENDER_ORDER : 0;
+}
+
+/** userData tag: the magenta stand-in for a surface that is not in the DAT (never cached by content). */
+const MISSING_SURFACE_KEY = 'acMissingSurface';
+/** Probe-only (__acUniqueOverrideMaterials): an object's own material → the shared one it would draw now. */
+const uniqueToShared = new WeakMap<THREE.Material, THREE.Material>();
+/** A composite palette's hash, per array (one array serves every part of an object). */
+const paletteHashes = new WeakMap<number[], string>();
+
+function paletteHash(colors: number[]): string {
+  let h = paletteHashes.get(colors);
+  if (h === undefined) {
+    // Two independent 32-bit FNV-1a style mixes + the length; samePalette confirms a hit.
+    let a = 0x811c9dc5, b = 0x01000193 ^ colors.length;
+    for (let i = 0; i < colors.length; i++) {
+      const c = colors[i] >>> 0;
+      a = Math.imul(a ^ c, 0x01000193);
+      b = Math.imul(b ^ (c + i), 0x5bd1e995);
+      b ^= b >>> 13;
+    }
+    h = `${colors.length}:${(a >>> 0).toString(36)}:${(b >>> 0).toString(36)}`;
+    paletteHashes.set(colors, h);
+  }
+  return h;
+}
+
+function samePalette(a: number[] | undefined, b: number[] | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/** PERF.override-material-share — the content key of an override material (MaterialFactory.getMaterial). */
+export function overrideCacheKey(
+  surfaceId: number, paletteOverride: number | undefined, textureOverrides: Map<number, number> | undefined,
+  paletteColors: number[] | undefined, frontSide: boolean, clampUV: boolean,
+): string {
+  let tex = '';
+  if (textureOverrides && textureOverrides.size > 0) {
+    tex = [...textureOverrides].sort((x, y) => x[0] - y[0]).map(([k, v]) => `${k.toString(36)}>${v.toString(36)}`).join(',');
+  }
+  return `o:${surfaceId}:${paletteOverride ?? 0}${frontSide ? ':f' : ''}${clampUV ? ':c' : ''}|t:${tex}|p:${paletteColors ? paletteHash(paletteColors) : '-'}`;
+}
+
 export class MaterialFactory {
   private portalDb: DatDatabase;
   private textureManager: TextureManager;
   private materialCache = new Map<string, THREE.Material>();
+  /** PERF.override-material-share — open object builds (innermost last). */
+  private readonly buildScopes: Array<{ calls: Array<{ key: string; palette: number[] | undefined; mat: THREE.Material }>; epoch: number }> = [];
+  /** PERF.override-material-share — each build sequence's materials, shared by the objects that repeat it. */
+  private readonly objectSets = new Map<string, { mats: THREE.Material[]; palettes: Array<number[] | undefined> }>();
 
   constructor(portalDb: DatDatabase, textureManager: TextureManager) {
     this.portalDb = portalDb;
@@ -315,12 +372,26 @@ export class MaterialFactory {
     // palette texture decode + GPU upload — is now content-hash cached in
     // TextureManager.getTextureWithPalette, so this fresh Material object is
     // just a cheap JS wrapper around a cached texture.
+    //
+    // PERF.override-material-share (2026-11-16) — every per-object write
+    // now copies a shared material first (MaterialOwnership.ownMeshMaterials:
+    // translucency, script luminous / diffuse, texture scroll; SelectionLighting
+    // and ViewerFade clone), so identical OBJECTS may share: inside a
+    // ServerObjectManager build (beginObjectBuild / endObjectBuild) each call
+    // is recorded, and an object whose whole sequence of calls matches an
+    // earlier one's draws that object's materials, part for part. One
+    // object's parts never share a material with each other (one per call,
+    // as before), so three.js still draws an object's parts in their build
+    // order (its opaque sort is material.id first): sharing a material
+    // between two parts of one body reordered coplanar layers (5-9 px in a
+    // same-frame A/B on the player's own model). Outside a build scope
+    // (degrade levels built later, previews) it is one fresh material per
+    // call, the old behaviour.
     if (textureOverrides || paletteColors) {
-      const surface = this.loadSurface(surfaceId);
-      if (!surface) {
-        return applyRetailLighting(new THREE.MeshLambertMaterial({ color: 0xff00ff }), 'object');
-      }
-      return this.createMaterialFromSurface(surface, paletteOverride, textureOverrides, paletteColors, frontSide, clampUV);
+      const mat = this.buildOverrideMaterial(surfaceId, paletteOverride, textureOverrides, paletteColors, frontSide, clampUV);
+      const scope = this.buildScopes[this.buildScopes.length - 1];
+      if (scope) scope.calls.push({ key: overrideCacheKey(surfaceId, paletteOverride, textureOverrides, paletteColors, frontSide, clampUV), palette: paletteColors, mat });
+      return mat;
     }
 
     const cacheKey = `${surfaceId}:${paletteOverride ?? 0}${frontSide ? ':f' : ''}${clampUV ? ':c' : ''}`;
@@ -339,6 +410,89 @@ export class MaterialFactory {
     return mat;
   }
 
+  private buildOverrideMaterial(
+    surfaceId: number, paletteOverride: number | undefined, textureOverrides: Map<number, number> | undefined,
+    paletteColors: number[] | undefined, frontSide: boolean, clampUV: boolean,
+  ): THREE.Material {
+    const surface = this.loadSurface(surfaceId);
+    if (!surface) {
+      const m = applyRetailLighting(new THREE.MeshLambertMaterial({ color: 0xff00ff }), 'object');
+      m.userData[MISSING_SURFACE_KEY] = true;
+      return m;
+    }
+    return this.createMaterialFromSurface(surface, paletteOverride, textureOverrides, paletteColors, frontSide, clampUV);
+  }
+
+  /**
+   * PERF.override-material-share — open an object build: the override
+   * materials made until the matching endObjectBuild are recorded. Builds
+   * nest (a held item built inside its holder's build records into its own).
+   */
+  beginObjectBuild(): void {
+    this.buildScopes.push({ calls: [], epoch: datMissEpoch() });
+  }
+
+  /**
+   * Close the build opened last. When an earlier object made exactly the
+   * same sequence of override materials (same content keys in the same
+   * order, the palettes compared colour by colour), `root`'s meshes switch
+   * to that object's materials, index for index, and the fresh ones are
+   * disposed; otherwise this object's materials become the set later
+   * identical objects share (marked shared: per-object writes copy them).
+   * A build that met a DAT miss is left alone (its rebuild comes later).
+   */
+  endObjectBuild(root: THREE.Object3D | null): void {
+    const scope = this.buildScopes.pop();
+    if (!scope || scope.calls.length === 0 || !root) return;
+    if (!noDatMissSince(scope.epoch) || scope.calls.some(c => c.mat.userData[MISSING_SURFACE_KEY] === true)) return;
+    const signature = scope.calls.map(c => c.key).join('\n');
+    const set = this.objectSets.get(signature);
+    const probe = (globalThis as { __acUniqueOverrideMaterials?: boolean }).__acUniqueOverrideMaterials === true;
+    if (set && set.mats.length === scope.calls.length && scope.calls.every((c, i) => samePalette(set.palettes[i], c.palette))) {
+      const swap = new Map<THREE.Material, THREE.Material>();
+      scope.calls.forEach((c, i) => swap.set(c.mat, set.mats[i]));
+      if (probe) { for (const [own, shared] of swap) uniqueToShared.set(own, shared); return; }
+      const replaced = new Set<THREE.Material>();
+      root.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!mesh.isMesh || !mesh.material) return;
+        if (Array.isArray(mesh.material)) {
+          if (mesh.material.some(m => swap.has(m))) mesh.material = mesh.material.map(m => { const t = swap.get(m); if (t) replaced.add(m); return t ?? m; });
+        } else {
+          const t = swap.get(mesh.material);
+          if (t) { replaced.add(mesh.material); mesh.material = t; }
+        }
+      });
+      for (const m of replaced) m.dispose();
+      return;
+    }
+    if (set) return; // a palette-hash collision: this object keeps its own (the old behaviour)
+    const entry = { mats: scope.calls.map(c => c.mat), palettes: scope.calls.map(c => c.palette) };
+    this.objectSets.set(signature, entry);
+    for (const m of entry.mats) {
+      markSharedMaterial(m);
+      const evict = (): void => {
+        m.removeEventListener('dispose', evict);
+        if (this.objectSets.get(signature) === entry) this.objectSets.delete(signature);
+      };
+      m.addEventListener('dispose', evict);
+    }
+  }
+
+  /**
+   * tools/probe-override-share-ab.ts — with `__acUniqueOverrideMaterials` set,
+   * endObjectBuild leaves every object on its own materials (the old
+   * behaviour) and remembers here the shared one each would draw now.
+   */
+  sharedOverrideFor(unique: THREE.Material): THREE.Material | null {
+    return uniqueToShared.get(unique) ?? null;
+  }
+
+  /** The object material sets held (tests / probes). */
+  get objectSetCount(): number {
+    return this.objectSets.size;
+  }
+
   /**
    * PERF.browser-memory-crash — drop and dispose cached materials no live
    * mesh uses (models/ResourceSweep.ts); their textures then become
@@ -346,6 +500,12 @@ export class MaterialFactory {
    */
   sweep(live: ReadonlySet<THREE.Material>): number {
     let released = 0;
+    // PERF.override-material-share — an object set goes once none of its materials is drawn.
+    for (const [signature, set] of [...this.objectSets]) {
+      if (set.mats.some(m => live.has(m))) continue;
+      this.objectSets.delete(signature);
+      for (const m of set.mats) { m.dispose(); released++; }
+    }
     for (const [key, mat] of [...this.materialCache]) {
       if (live.has(mat)) continue;
       this.materialCache.delete(key);

@@ -310,6 +310,7 @@ export class Connection1999 implements NetConnection {
       txSeq: this.sequence,
       txUnacked: this.resendCache.size,
       txPaced: this.sendPacer.deferred,
+      ...(this.sendPacer.deferred > 0 ? { txPacedStats: this.sendPacer.pacedStats() } : {}),
       txAckedBySrv: d.srvAck,
       srvNakAgoMs: msAgo(now, d.srvNakAt),
       srvNaks: d.srvNaks,
@@ -865,6 +866,8 @@ export class Connection1999 implements NetConnection {
     const out = this.adapter.outbound(messageBytes);
     if (!out) return;
     if (opcode === GameMessageOpcode.CharacterCreate) this.awaitingCreate = true;
+    // What a held send was, in the same words every era uses (the page's own message, not the 1999 rewrite).
+    const pacedLabel = messageLabel(messageBytes);
     for (const { message, group } of out) {
       const frags = fragmentMessage1999(message, this.fragmentSequence++, group);
       // One fragment per packet keeps every packet under the 484-byte datagram.
@@ -873,7 +876,7 @@ export class Connection1999 implements NetConnection {
         if (f.length > MAX_DATA_BODY) throw new Error('1999 fragment over the datagram limit');
         // BUG.movetostate-burst-abuse-close: a burst past the bridge's message rate waits its turn (SendPacer.ts);
         // the sequence and key are taken when the packet goes, so order holds.
-        this.sendPacer.submit(() => this.sendData(f, i === 0 ? label : 'cont'));
+        this.sendPacer.submit(() => this.sendData(f, i === 0 ? label : 'cont'), pacedLabel);
       });
     }
   }

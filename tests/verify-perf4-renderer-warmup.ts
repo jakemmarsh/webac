@@ -14,7 +14,7 @@
  * These tests drive the REAL RendererWarmup against a recording fake
  * renderer and a real three.js scene/camera.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, vi } from 'vitest';
 import * as THREE from 'three';
 import {
   RendererWarmup, type WarmupRenderer,
@@ -623,7 +623,7 @@ describe('PERF.4 DatLightBudget fixedLightCount — the point-light total three.
     expect(fillers).toBe(TOTAL);
   });
 
-  it('external point lights (viewer light, a portal burst added between gathers) are absorbed every update', () => {
+  it('external point lights (the viewer light, a registered burst added between gathers) are absorbed every update', () => {
     const scene = new THREE.Scene();
     const cell = new THREE.Group();
     scene.add(cell);
@@ -634,8 +634,11 @@ describe('PERF.4 DatLightBudget fixedLightCount — the point-light total three.
     const viewer = new THREE.PointLight(0xffffff, 2.25, 15, 1);
     scene.add(viewer);
     const burst = new THREE.Group();
-    burst.add(new THREE.PointLight(0xff00ff, 4, 20), new THREE.PointLight(0xff00ff, 2.5, 15));
+    const flashes = [new THREE.PointLight(0xff00ff, 4, 20), new THREE.PointLight(0xff00ff, 2.5, 15)];
+    burst.add(...flashes);
     scene.add(burst);
+    // PERF.external-light-registry — non-DAT point lights are registered, not found by a per-frame walk.
+    for (const l of [viewer, ...flashes]) budget.registerExternalLight(l);
     budget.update(new THREE.Vector3(), 16); // well inside REFRESH_MS: no re-gather
     expect(budget.externalCount).toBe(3);
     expect(threePointLights(scene)).toBe(TOTAL);
@@ -643,6 +646,36 @@ describe('PERF.4 DatLightBudget fixedLightCount — the point-light total three.
     scene.remove(burst); // burst expired
     budget.update(new THREE.Vector3(), 32);
     expect(threePointLights(scene)).toBe(TOTAL);
+  });
+
+  it('PERF.external-light-registry: the count is the old visible-chain walk; an unregistered light joins at the next gather', () => {
+    const scene = new THREE.Scene();
+    const budget = new DatLightBudget(scene, { fixedLightCount: true });
+    const walk = () => { let n = 0; scene.traverseVisible((o) => { if ((o as THREE.PointLight).isPointLight && !o.userData.datLight) n++; }); return n; };
+    const viewer = new THREE.PointLight(0xffffff, 2.25, 15, 1);
+    const holder = new THREE.Group();
+    holder.add(viewer);
+    scene.add(holder);
+    budget.registerExternalLight(viewer);
+    const states: Array<() => void> = [
+      () => {}, () => { viewer.visible = false; }, () => { viewer.visible = true; holder.visible = false; },
+      () => { holder.visible = true; scene.remove(holder); }, () => { scene.add(holder); },
+    ];
+    let t = 0;
+    for (const set of states) { set(); budget.update(new THREE.Vector3(), (t += 16)); expect(budget.externalCount).toBe(walk()); }
+    // A light nobody registered: counted from the next 2 s gather on (and a warning names it).
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const stray = new THREE.PointLight(0xff0000, 1, 10);
+    stray.name = 'stray';
+    scene.add(stray);
+    budget.update(new THREE.Vector3(), (t += 16));
+    expect(budget.externalCount).toBe(1);
+    budget.update(new THREE.Vector3(), (t += DatLightBudget.REFRESH_MS));
+    expect(budget.externalCount).toBe(2);
+    expect(budget.externalCount).toBe(walk());
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(threePointLights(scene)).toBe(TOTAL);
+    warn.mockRestore();
   });
 
   it('a DAT-light subtree unloaded between gathers does not shrink the total', () => {

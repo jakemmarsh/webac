@@ -18,7 +18,7 @@ import {
 } from '../packages/renderer/src/models/RetailLighting.js';
 import { applyLightingLevels, LIGHT_HIGH, LIGHT_LOW, setObjectLighting } from '../packages/renderer/src/world/SelectionLighting.js';
 import { PhysicsScriptPlayer } from '../packages/renderer/src/effects/PhysicsScriptPlayer.js';
-import { EnvCellRenderer } from '../packages/renderer/src/world/EnvCellRenderer.js';
+import { EnvCellRenderer, cellSurfaceBatches } from '../packages/renderer/src/world/EnvCellRenderer.js';
 import { AnimationHookType } from '@ac/dat-parser/file-types/AnimationHook.js';
 import { DAT_PATHS, openDat } from './_harness/dat.js';
 
@@ -117,11 +117,10 @@ describe('VISUAL.lifestone-crystal-glow — surface luminosity is the lit materi
       polygons: new Map([[0, { stippling: 0, sidesType: 0, posSurface: 0, negSurface: 0, vertexIndices: [0, 1, 2], posUVIndices: [0, 0, 0], negUVIndices: [] }]]),
     };
     const group = r.buildCellGeometry(cellStruct as never, [0x080011de]);
-    const meshes: THREE.Mesh[] = [];
-    group.traverse((o) => { if (o instanceof THREE.Mesh) meshes.push(o); });
-    expect(meshes.length).toBeGreaterThan(0);
-    for (const mesh of meshes) {
-      const mat = mesh.material as THREE.MeshLambertMaterial;
+    const batches = cellSurfaceBatches(group);
+    expect(batches.length).toBeGreaterThan(0);
+    for (const batch of batches) {
+      const mat = batch.material as THREE.MeshLambertMaterial;
       expect(mat.emissive.r).toBe(0);
       expect(surfaceLuminosityOf(mat)).toBe(0);
     }

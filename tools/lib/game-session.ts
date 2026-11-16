@@ -70,6 +70,8 @@ export interface SessionOptions {
   consoleFilter?: RegExp;
   /** A production build talking to a local ws:// bridge: ignore its CSP (connect-src wss: only) and Chrome's Local Network Access checks. */
   bypassCSP?: boolean;
+  /** Page script run before the game's own on every load (e.g. a probe's switch the build reads at startup). */
+  initScript?: string;
 }
 
 export interface UrlOptions {
@@ -144,6 +146,7 @@ export async function openSession(opts: SessionOptions = {}): Promise<{ browser:
     browser = await launchBrowser(opts);
     page = await browser.newPage({ viewport: opts.viewport ?? DEFAULT_VIEWPORT, ...(opts.bypassCSP ? { bypassCSP: true } : {}) });
   }
+  if (opts.initScript) await page.addInitScript(opts.initScript);
   page.setDefaultTimeout(opts.timeoutMs ?? 120_000);
   page.on('dialog', (d) => void d.dismiss());
   attachCrashAlarms(page);

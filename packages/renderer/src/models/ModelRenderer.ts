@@ -23,6 +23,11 @@ export class ModelRenderer {
   // KB each) far exceeds the distinct GfxObjs a session touches.
   private geometryCache = new LruMap<number, GfxObjGeometry>(4096);
 
+  /** The MaterialFactory this renderer builds with (SetupModelRenderer opens object builds on it). */
+  get factory(): MaterialFactory {
+    return this.materialFactory;
+  }
+
   constructor(portalDb: DatDatabase, materialFactory: MaterialFactory) {
     this.portalDb = portalDb;
     this.materialFactory = materialFactory;

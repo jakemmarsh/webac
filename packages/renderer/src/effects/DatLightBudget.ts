@@ -228,6 +228,10 @@ export class DatLightBudget {
    */
   private readonly tracked = new Map<THREE.Object3D, LightEntry>();
   private lastRefresh = -Infinity;
+  /** PERF.external-light-registry — the non-DAT point lights (registerExternalLight + gather). */
+  private readonly externals = new Set<THREE.Object3D>();
+  private readonly registeredExternals = new WeakSet<THREE.Object3D>();
+  private warnedUnregistered = false;
   private readonly statics: LightEntry[] = [];
   private readonly dynamics: LightEntry[] = [];
   private readonly fillers: THREE.PointLight[] = [];
@@ -282,6 +286,17 @@ export class DatLightBudget {
   forEachLight(visit: (light: THREE.Object3D) => void): void {
     for (const e of this.entries) visit(e.light);
     for (const light of this.tracked.keys()) visit(light);
+  }
+
+  /**
+   * PERF.external-light-registry — a point light that is not a DAT light
+   * (the viewer light): counted in the fixed total's external headroom while
+   * it and its ancestors are visible under the root. gather() also adopts any
+   * it finds, so an unregistered one is counted from the next gather.
+   */
+  registerExternalLight(light: THREE.Object3D): void {
+    this.externals.add(light);
+    this.registeredExternals.add(light);
   }
 
   /** Register an object light (ObjectLightSink) — pooled from the next update(). */
@@ -401,11 +416,16 @@ export class DatLightBudget {
       // appears between gathers (a portal burst, a projectile glow) would
       // otherwise push the total past the constant for up to REFRESH_MS and
       // recompile every visible material (measured: a 133 ms idle hitch).
-      // traverseVisible mirrors three.js's own light collection.
+      // PERF.external-light-registry (2026-11-16) — the enabled non-budget
+      // point lights, counted the way three.js collects lights (a visible
+      // chain up to the root), from the registry instead of a whole-scene
+      // traverseVisible every frame (~4 % of a 10x-throttled academy
+      // frame). The registry is every such light: the viewer light
+      // registers itself (main.ts), and gather() adds any other it meets,
+      // so the count is the old walk's while the scene's only external
+      // light is the viewer light (every other PointLight is a DAT light).
       let external = 0;
-      this.root.traverseVisible((o) => {
-        if ((o as THREE.PointLight).isPointLight && !o.userData.datLight) external++;
-      });
+      for (const light of this.externals) if (visibleUnder(light, this.root)) external++;
       this._external = external;
       this.setFillers(Math.max(0, total - (dynN + staN) - external));
     } else {
@@ -428,7 +448,17 @@ export class DatLightBudget {
         if (carrier) carrier.parent?.remove(carrier);
       }
     }
+    // A found (not registered) light that left the scene is dropped; a registered one stays (it may come back).
+    for (const light of this.externals) if (!this.registeredExternals.has(light) && !isAttached(light, this.root)) this.externals.delete(light);
     this.root.traverse((o) => {
+      if ((o as THREE.PointLight).isPointLight && !o.userData?.datLight && !this.externals.has(o)) {
+        // Counted from here on; until this gather it pushed the total past the constant (a recompile).
+        if (!this.warnedUnregistered) {
+          this.warnedUnregistered = true;
+          console.warn(`[DatLightBudget] point light "${o.name}" is neither a DAT light nor registered (registerExternalLight): counted from the 2 s gather only`);
+        }
+        this.externals.add(o);
+      }
       const carrier = objectLightCarrierOf(o);
       if (carrier && carrier.parent !== this.root && !(o instanceof ObjectLightCarrier)) {
         this.root.add(carrier);
@@ -486,6 +516,16 @@ export function attachedAndVisible(o: THREE.Object3D, root: THREE.Object3D): boo
 }
 
 /** True when `o` is still somewhere under `root` (visibility ignored). */
+/** `o` is under `root` with it and every ancestor below `root` visible (Object3D.traverseVisible from `root` would visit it). */
+export function visibleUnder(o: THREE.Object3D, root: THREE.Object3D): boolean {
+  if (o === root) return root.visible;
+  for (let n: THREE.Object3D | null = o; n; n = n.parent) {
+    if (!n.visible) return false;
+    if (n.parent === root) return root.visible;
+  }
+  return false;
+}
+
 export function isAttached(o: THREE.Object3D, root: THREE.Object3D): boolean {
   for (let p = o.parent; p; p = p.parent) if (p === root) return true;
   return false;

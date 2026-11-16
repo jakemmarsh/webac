@@ -6,7 +6,7 @@ import { PortalFileType } from '@ac/dat-parser/DatFileType.js';
 import { EnvCell } from '@ac/dat-parser/file-types/EnvCell.js';
 import { Environment, type CellStruct } from '@ac/dat-parser/file-types/Environment.js';
 import type { Frame } from '@ac/dat-parser/file-types/Frame.js';
-import { prepareSurfaceMesh, type MaterialFactory } from '../models/MaterialFactory.js';
+import { prepareSurfaceMesh, surfaceRenderOrder, type MaterialFactory } from '../models/MaterialFactory.js';
 import { applyRetailLighting, cellObjectVariantOf, eraLightColor, retailLightRange, retailStaticLightDecay, setCellLighting, SURFACE_LUMINOSITY_KEY } from '../models/RetailLighting.js';
 import type { SetupModelRenderer } from '../models/SetupModelRenderer.js';
 import { surfaceIsTextured, type ModelRenderer } from '../models/ModelRenderer.js';
@@ -17,6 +17,33 @@ import type { DegradeLod } from '../models/DegradeLod.js';
 import { tagStaticScriptAnchor } from './StaticScriptDriver.js';
 import { tagStaticDefaultAnimation } from './StaticAnimationDriver.js';
 import { landblockX, landblockY } from '@ac/shared';
+
+/** One surface batch of a cell's geometry: the merged mesh, its group's material and index range. */
+export interface CellSurfaceBatch {
+  mesh: THREE.Mesh;
+  material: THREE.Material;
+  start: number;
+  count: number;
+}
+
+/**
+ * PERF.cell-surface-merge — the surface batches a cell group draws, in draw
+ * order within each mesh (buildCellGeometry: one mesh per renderOrder band,
+ * one geometry group per batch).
+ */
+export function cellSurfaceBatches(cell: THREE.Object3D): CellSurfaceBatch[] {
+  const out: CellSurfaceBatch[] = [];
+  for (const child of cell.children) {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh || !mesh.userData.cellGeometry) continue;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    const groups = mesh.geometry.groups.length > 0
+      ? mesh.geometry.groups
+      : [{ start: 0, count: mesh.geometry.index?.count ?? 0, materialIndex: 0 }];
+    for (const g of groups) out.push({ mesh, material: mats[g.materialIndex ?? 0], start: g.start, count: g.count });
+  }
+  return out;
+}
 
 /** CORE.17.h.g.c.c.a — one live cell's furniture pool (cell-local matrices). */
 interface CellFurniture {
@@ -349,18 +376,24 @@ export class EnvCellRenderer {
       }
     }
 
-    // Create a mesh per surface
+    // PERF.cell-surface-merge (2026-11-16) — one Mesh per cell (per renderOrder
+    // band) whose geometry carries one group per surface batch, instead of a
+    // Mesh + BufferGeometry per batch each wrapping the cell's vertex arrays in
+    // its own BufferAttributes (uploaded once per batch). Every batch keeps its
+    // own material object, created in the same order as before, so three.js's
+    // opaque sort (material.id first) draws exactly the same sequence; the
+    // groups sit in that same order, the bounding sphere is the same (three
+    // computes it from the whole position array, as it did for each batch), so
+    // the transparent sort (renderOrder, z, then the push order of one
+    // object's groups) is the same too. What goes: ~2.3 objects per cell for
+    // three's cull / list build / matrix walk, a geometry (VAO) bind per batch
+    // and the duplicate vertex buffers. tools/probe-cell-merge-ab.ts: 0 px.
+    const bands = new Map<number, { indices: number[]; groups: Array<{ start: number; count: number }>; materials: THREE.Material[] }>();
     for (const [groupKey, indices] of surfaceGroups) {
       if (indices.length === 0) continue;
       const surfaceId = Math.floor(groupKey / 4);
       const bothFaces = groupKey % 2 === 1;
       const clampUV = groupKey % 4 >= 2;
-
-      const bufferGeom = new THREE.BufferGeometry();
-      bufferGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      bufferGeom.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-      bufferGeom.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-      bufferGeom.setIndex(new THREE.BufferAttribute(new Uint16Array(indices), 1));
 
       // CORE.17.e — Material.clone() drops onBeforeCompile, so re-apply the
       // retail shading patch to the per-cell copy. CORE.17.h.g.c.b — cell
@@ -386,7 +419,27 @@ export class EnvCellRenderer {
       // pulled a cell's sloped attic ceiling, seen at a grazing angle from
       // outside, in front of the building's own roof 0.2–0.5 m above it.
       material.side = bothFaces ? THREE.DoubleSide : THREE.FrontSide;
-      const mesh = new THREE.Mesh(bufferGeom, material);
+      // The clip band (prepareSurfaceMesh: a clip-list batch draws at CLIP_LIST_RENDER_ORDER) is per object.
+      const order = surfaceRenderOrder(material);
+      let band = bands.get(order);
+      if (!band) { band = { indices: [], groups: [], materials: [] }; bands.set(order, band); }
+      band.groups.push({ start: band.indices.length, count: indices.length });
+      for (const i of indices) band.indices.push(i);
+      band.materials.push(material);
+    }
+
+    // The vertex attributes are shared by every band of the cell (one upload).
+    const position = new THREE.BufferAttribute(positions, 3);
+    const normal = new THREE.BufferAttribute(normals, 3);
+    const uv = new THREE.BufferAttribute(uvs, 2);
+    for (const band of bands.values()) {
+      const bufferGeom = new THREE.BufferGeometry();
+      bufferGeom.setAttribute('position', position);
+      bufferGeom.setAttribute('normal', normal);
+      bufferGeom.setAttribute('uv', uv);
+      bufferGeom.setIndex(new THREE.BufferAttribute(new Uint16Array(band.indices), 1));
+      band.groups.forEach((g, i) => bufferGeom.addGroup(g.start, g.count, i));
+      const mesh = new THREE.Mesh(bufferGeom, band.materials);
       prepareSurfaceMesh(mesh); // the clip band / alpha-ref sync (MaterialFactory)
       mesh.userData.cellGeometry = true; // tag for collision filtering
       group.add(mesh);

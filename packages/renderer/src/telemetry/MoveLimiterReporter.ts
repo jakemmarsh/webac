@@ -7,11 +7,17 @@
  * that sent them, the inputs the recent movement events came from, the frame rate, and whether a routine ran.
  * Closed vocabularies and counts only: no text, no names (the bridge checks each field: clientWorld.ts
  * sanitizeClientMoveLimiter).
+ *
+ * BUG.pacer-burst-telemetry (2026-11-16) — a pacer engagement on Seedsow (trace 4b166f6470f68817, txPaced=129) carried
+ * an empty movement snapshot: movement was not the burst, and nothing said what was. A pacer event now names what the
+ * pacer held (SendPacer.pacedStats: the most-held message labels, the largest synchronous burst, the drain time, what
+ * still waits) and whether an agent was attached to the tab (Claude on for it, or the ?agent API).
  */
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 import type { MoveLimiterSnapshot } from '../network/MovementSync.js';
 import type { MovementEventSource } from '../scene/CameraController.js';
 import type { RoutineDriver, RoutineKind } from './AutomationReporter.js';
+import type { PacedStats } from '@ac/network';
 
 export const MOVE_LIMITERS = ['budget', 'repeat', 'pacer'] as const;
 export type MoveLimiter = typeof MOVE_LIMITERS[number];
@@ -35,6 +41,25 @@ export interface MoveLimiterEvent extends Ids {
   kind: RoutineKind | null;
   /** Game-message sends the connection's pacer held back so far. */
   txPaced: number | null;
+  /** What the pacer held this session: message labels ("f7b1:<action>" / opcode hex) with counts, most first. */
+  pacedTop: Array<{ op: string; n: number }> | null;
+  /** The most messages submitted in one synchronous run that had a send held. */
+  pacedBurst: number | null;
+  /** The longest a held queue took to empty (ms; one still emptying counts its time so far), and what still waits. */
+  pacedDrainMs: number | null;
+  pacedPending: number | null;
+  /** An agent attached to the tab (Claude on for it, or the ?agent API). */
+  agent: boolean | null;
+}
+
+export interface MoveLimiterContext {
+  sources: readonly MovementEventSource[];
+  fps: number;
+  routine: { driver: RoutineDriver; kind: RoutineKind } | null;
+  txPaced: number | null;
+  /** The connection's SendPacer.pacedStats (absent / null: it held nothing). */
+  paced?: PacedStats | null;
+  agent?: boolean | null;
 }
 
 export interface MoveLimiterReporterOptions {
@@ -44,7 +69,7 @@ export interface MoveLimiterReporterOptions {
   era: () => string;
   server: () => string | null;
   /** What else the event says, read when it fires. */
-  context: () => { sources: readonly MovementEventSource[]; fps: number; routine: { driver: RoutineDriver; kind: RoutineKind } | null; txPaced: number | null };
+  context: () => MoveLimiterContext;
   now?: () => number;
   send?: TelemetrySend;
 }
@@ -75,7 +100,8 @@ export class MoveLimiterReporter {
     this.engaged++;
     if (this.said) return false;
     this.said = true;
-    const c = safe(this.opts.context, { sources: [], fps: 0, routine: null, txPaced: null });
+    const c: MoveLimiterContext = safe(this.opts.context, { sources: [], fps: 0, routine: null, txPaced: null });
+    const p = c.paced ?? null;
     const ev: MoveLimiterEvent = {
       outcome: 'move_limiter',
       era: safe(this.opts.era, 'unknown'), server: safe(this.opts.server, null), trace: this.opts.trace, build: this.opts.build,
@@ -88,6 +114,11 @@ export class MoveLimiterReporter {
       driver: c.routine?.driver ?? null,
       kind: c.routine?.kind ?? null,
       txPaced: c.txPaced,
+      pacedTop: p ? p.top.map(({ op, n }) => ({ op, n })) : null,
+      pacedBurst: p?.burstMax ?? null,
+      pacedDrainMs: p?.drainMaxMs ?? null,
+      pacedPending: p?.pending ?? null,
+      agent: c.agent ?? null,
     };
     if (!this.opts.endpoint) return true;
     this.outbox.retry();

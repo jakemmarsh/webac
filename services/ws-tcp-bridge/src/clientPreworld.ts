@@ -24,7 +24,7 @@ export const PREWORLD_OUTCOMES = [
   'chargen_sent', 'chargen_blocked',
   'enter_refused', 'enter_ok', 'dropped', 'page_hidden', 'page_left', 'page_reload', 'boot_slow', 'boot_failed',
   'enter_retry', 'left_for_launcher', 'resume_ended', 'login_retry', 'handover', 'boot_done', 'enter_held',
-  'login_held', 'resume_held',
+  'login_held', 'resume_held', 'webgl_wait',
 ] as const;
 export type PreworldOutcome = typeof PREWORLD_OUTCOMES[number];
 
@@ -173,7 +173,7 @@ export interface ClientPreworldEvent {
   path?: typeof HANDOVER_PATHS[number];
   /** 'handover' only: a running macro held this long (ms) for the move (the page's DrainHandover.noteYield). */
   yieldedMs?: number;
-  /** BUG.sleep-darkwake-resume-loop — 'resume_held' only: how long the hidden tab held a resume after the machine slept (token 'released'). */
+  /** BUG.sleep-darkwake-resume-loop — 'resume_held' only: how long the hidden tab held a resume after the machine slept (token 'released'). 'webgl_wait' (BUG.webgl-crash-block-wait): how long the boot waited out a graphics-crash block. */
   heldMs?: number;
   /** 'login_retry' only: why the page retried (LOGIN_RETRY_KINDS). */
   retry?: typeof LOGIN_RETRY_KINDS[number];
@@ -320,7 +320,7 @@ export function sanitizeClientPreworld(body: unknown): ClientPreworldEvent | nul
     ...(NET_DIAG_OUTCOMES.has(outcome) ? netDiagField(b.net) : {}),
     ...(outcome === 'handover' ? handoverFields(b) : {}),
     ...(outcome === 'login_retry' ? loginRetryField(b.retry) : {}),
-    ...(outcome === 'resume_held' ? heldMsField(b.heldMs) : {}),
+    ...(outcome === 'resume_held' || outcome === 'webgl_wait' ? heldMsField(b.heldMs) : {}),
     ...(outcome === 'login_refused' || outcome === 'login_retry' ? heldByTabField(b.heldByTab) : {}),
     ...(outcome === 'login_refused' || outcome === 'login_retry' ? holderQueryFields(b) : {}),
     ...(IDENTITY_OUTCOMES.has(outcome) ? identityFields(b) : {}),

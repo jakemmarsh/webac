@@ -525,6 +525,12 @@ const MOVE_LIMITER_DRIVERS = ['player', 'agent'] as const;
 const MOVE_LIMITER_KINDS = ['macro', 'meta', 'rules'] as const;
 /** List lengths kept (renderer: 15 fields, 6 recent sends, 8 recent events). */
 const MOVE_LIST_MAX = 16;
+/**
+ * BUG.pacer-burst-telemetry — the pacer's held-message labels (network NetDiagnostics messageLabel: "f7b1:<action>"
+ * or an opcode, lowercase hex; SendPacer's "other" / "unknown" / "short"), at most SendPacer.TOP_LABELS of them.
+ */
+const PACED_LABEL = /^(?:[0-9a-f]{1,8}(?::[0-9a-f]{1,8})?|other|unknown|short)$/;
+const PACED_TOP_MAX = 8;
 
 export interface ClientMoveLimiterEvent extends WorldIds {
   outcome: typeof MOVE_LIMITER_OUTCOMES[number];
@@ -537,6 +543,24 @@ export interface ClientMoveLimiterEvent extends WorldIds {
   driver: typeof MOVE_LIMITER_DRIVERS[number] | null;
   kind: typeof MOVE_LIMITER_KINDS[number] | null;
   txPaced: number | null;
+  pacedTop: Array<{ op: string; n: number }> | null;
+  pacedBurst: number | null;
+  pacedDrainMs: number | null;
+  pacedPending: number | null;
+  agent: boolean | null;
+}
+
+/** The pacer's held-label histogram: well-formed entries only (others dropped); null when not an array. */
+function pacedTop(v: unknown): Array<{ op: string; n: number }> | null {
+  if (!Array.isArray(v)) return null;
+  const out: Array<{ op: string; n: number }> = [];
+  for (const e of v.slice(0, PACED_TOP_MAX)) {
+    if (!e || typeof e !== 'object') continue;
+    const { op, n } = e as { op?: unknown; n?: unknown };
+    const count = uint(n, U32);
+    if (typeof op === 'string' && PACED_LABEL.test(op) && count !== null) out.push({ op, n: count });
+  }
+  return out;
 }
 
 export function isMoveLimiterOutcome(v: unknown): boolean {
@@ -566,6 +590,11 @@ export function sanitizeClientMoveLimiter(body: unknown): ClientMoveLimiterEvent
     driver: pick(b.driver, MOVE_LIMITER_DRIVERS),
     kind: pick(b.kind, MOVE_LIMITER_KINDS),
     txPaced: uint(b.txPaced, U32),
+    pacedTop: pacedTop(b.pacedTop),
+    pacedBurst: uint(b.pacedBurst, U32),
+    pacedDrainMs: uint(b.pacedDrainMs, 7 * 24 * 3600_000),
+    pacedPending: uint(b.pacedPending, U32),
+    agent: bool(b.agent),
   };
 }
 

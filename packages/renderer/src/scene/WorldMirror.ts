@@ -86,9 +86,17 @@ export function installMirrorAwareCulling(renderer: MirrorCullingRenderer): void
   // the mirrored world's FRONT faces: after a GPU reset the chargen figure
   // and the world drew inside out (the backs of the far polygons, flat and
   // dark). Patch whichever state object is current before each draw.
+  //
+  // PERF.mirror-wrapper-lean (2026-11-16) — this runs on every draw (~300-600
+  // a frame indoors), so it does only what it must: a state-identity compare
+  // instead of a WeakSet lookup, and no bind / try-finally. `mirrored` needs
+  // no reset after the draw: three calls state.setMaterial only from
+  // renderBufferDirect (WebGLRenderer, three r186), which sets it first.
   const patched = new WeakSet<object>();
+  let current: object | null = null;
   const patchState = (): void => {
     const state = renderer.state;
+    current = state ?? null;
     if (!state || patched.has(state)) return;
     patched.add(state);
     const setMaterial = state.setMaterial.bind(state);
@@ -97,14 +105,10 @@ export function installMirrorAwareCulling(renderer: MirrorCullingRenderer): void
     };
   };
   patchState();
-  const renderBufferDirect = renderer.renderBufferDirect.bind(renderer);
-  renderer.renderBufferDirect = (camera, scene, geometry, material, object, group) => {
-    patchState();
-    mirrored = isMirroredCamera(camera);
-    try {
-      renderBufferDirect(camera, scene, geometry, material, object, group);
-    } finally {
-      mirrored = false;
-    }
+  const renderBufferDirect = renderer.renderBufferDirect;
+  renderer.renderBufferDirect = function (camera, scene, geometry, material, object, group) {
+    if (renderer.state !== current) patchState();
+    mirrored = camera.userData?.[AC_MIRROR_X_KEY] === true;
+    renderBufferDirect.call(renderer, camera, scene, geometry, material, object, group);
   };
 }

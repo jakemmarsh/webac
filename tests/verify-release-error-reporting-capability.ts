@@ -76,8 +76,8 @@ describe('RELEASE.capability-check — Capability', () => {
 
   it('no WebGL 2 or WebSocket is blocking; low memory and touch-only are warnings', () => {
     expect(capabilityProblems({ ...ok, webgl2: false }).map(p => [p.id, p.hard])).toEqual([['webgl2', true]]);
-    // A browser that ran the game before but turned WebGL off after a graphics crash (live 2026-10-13):
-    // the text says to restart the browser, where chrome://gpu shows it, and to update the driver.
+    // No cause known (live 2026-10-13): the general advice, which includes the restart, where
+    // chrome://gpu shows it, and the driver. (The diagnosed crash block has its own text: verify-webgl2-diagnosis.ts.)
     const text = capabilityProblems({ ...ok, webgl2: false })[0].text;
     expect(text).toMatch(/worked before in this browser, quit the browser completely and start it again/);
     expect(text).toContain('chrome://gpu');

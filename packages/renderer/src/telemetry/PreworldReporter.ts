@@ -42,7 +42,7 @@ export type PreworldOutcome =
   | 'chargen_sent' | 'chargen_blocked'
   | 'enter_refused' | 'enter_ok' | 'dropped' | 'page_hidden' | 'page_left' | 'page_reload' | 'boot_slow' | 'boot_failed'
   | 'enter_retry' | 'left_for_launcher' | 'resume_ended' | 'login_retry' | 'handover' | 'boot_done' | 'enter_held' | 'login_held'
-  | 'resume_held';
+  | 'resume_held' | 'webgl_wait';
 
 /**
  * A draining bridge's session moving to the new deployment (session/DrainHandover.ts): why
@@ -364,7 +364,7 @@ export interface PreworldEvent {
   path?: HandoverPath;
   /** 'handover' only: a running macro held this long for the move (DrainHandover.noteYield); absent: none held. */
   yieldedMs?: number;
-  /** BUG.sleep-darkwake-resume-loop — 'resume_held' with token 'released' only: how long the hidden tab held the resume. */
+  /** BUG.sleep-darkwake-resume-loop — 'resume_held' with token 'released' only: how long the hidden tab held the resume. BUG.webgl-crash-block-wait — 'webgl_wait': how long the boot waited out a graphics-crash block. */
   heldMs?: number;
   /**
    * UX.gdle-first-login-retry — 'login_retry' only: why the page retried
@@ -916,6 +916,15 @@ export class PreworldReporter {
   }
 
   /**
+   * BUG.webgl-crash-block-wait — the boot's quiet wait for WebGL 2 after a graphics-crash block
+   * (boot/Capability.ts runCapabilityGate) ended: token 'recovered' (the boot went on) or 'gave_up'
+   * (the screen stayed), with `heldMs` = how long it waited.
+   */
+  webglWait(result: 'recovered' | 'gave_up', waitedMs: number): void {
+    this.report('webgl_wait', { token: result, heldMs: Math.max(0, Math.round(waitedMs)) });
+  }
+
+  /**
    * A planned handover finished (session/DrainHandover.ts): 'handover' with its time, why and
    * how; `token` names a failed attempt's step and reason (absent when it worked).
    */
@@ -1254,7 +1263,7 @@ export class PreworldReporter {
       ...(f.heritage !== undefined ? { heritage: f.heritage } : {}),
       ...(outcome === 'handover' ? { handoverMs: f.handoverMs, reason: f.reason, path: f.path, ...(f.yieldedMs !== undefined ? { yieldedMs: f.yieldedMs } : {}) } : {}),
       ...(outcome === 'login_retry' && f.retry ? { retry: f.retry } : {}),
-      ...(outcome === 'resume_held' && f.heldMs !== undefined ? { heldMs: f.heldMs } : {}),
+      ...((outcome === 'resume_held' || outcome === 'webgl_wait') && f.heldMs !== undefined ? { heldMs: f.heldMs } : {}),
       ...((outcome === 'login_refused' || outcome === 'login_retry') && f.heldByTab === true ? { heldByTab: true as const } : {}),
       ...((outcome === 'login_refused' || outcome === 'login_retry') && f.holderQuery ? {
         holderQuery: f.holderQuery,

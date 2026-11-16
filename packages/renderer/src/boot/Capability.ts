@@ -10,7 +10,7 @@
  * dialog's look reproduced in CSS from its DAT values.
  */
 import { classifyGpu } from '../telemetry/WorldReporter.js';
-import { probeWebGl2, detectHelpPlatform, webgl2HelpText, type WebGlFailure, type HelpPlatform } from './WebGlDiagnosis.js';
+import { probeWebGl2, canCreateWebGl2, detectHelpPlatform, webgl2HelpText, type WebGlFailure, type HelpPlatform } from './WebGlDiagnosis.js';
 import { renderAdaptConfigFor, type RenderAdaptConfig } from '../scene/RenderScale.js';
 import { showBootNotice } from './BootNotice.js';
 
@@ -119,18 +119,26 @@ export function probeCapabilities(win: Window & typeof globalThis): CapabilityEn
  * Resolves when the player chooses to continue (soft problems only); never
  * resolves when a problem is hard — that plate's only button reloads the page,
  * for after the player has fixed the cause (hardware acceleration, a newer
- * browser) the text names.
+ * browser) the text names. The one exception: `recovered` resolving true (the
+ * crash-block wait, runCapabilityGate) closes a hard screen and resolves.
  */
-export function showCapabilityScreen(doc: Document, problems: CapabilityProblem[], reload: () => void = () => doc.defaultView?.location.reload()): Promise<void> {
+export function showCapabilityScreen(
+  doc: Document, problems: CapabilityProblem[], reload: () => void = () => doc.defaultView?.location.reload(),
+  recovered?: Promise<boolean>,
+): Promise<void> {
   const hard = problems.some(p => p.hard);
   const paragraphs = problems.map(p => ({ text: p.text, className: `capability-problem capability-${p.id}` }));
   const title = hard ? 'This browser can\'t run the game' : 'Before you continue';
   if (hard) {
-    showBootNotice(doc, {
+    const notice = showBootNotice(doc, {
       id: 'capability-screen', title, paragraphs,
       buttons: [{ label: 'Reload', className: 'capability-reload', onClick: reload }],
     });
-    return new Promise(() => {});
+    // BUG.webgl-crash-block-wait — a hard screen resolves only when its problem went away by itself
+    // (runCapabilityGate's quiet WebGL 2 wait); otherwise it stays until Reload.
+    return new Promise((resolve) => {
+      void recovered?.then((ok) => { if (ok) { notice.close(); resolve(); } }, () => { /* stays up */ });
+    });
   }
   return new Promise((resolve) => {
     const notice = showBootNotice(doc, {
@@ -138,4 +146,99 @@ export function showCapabilityScreen(doc: Document, problems: CapabilityProblem[
       buttons: [{ label: 'Continue anyway', className: 'capability-continue', onClick: () => { notice.close(); resolve(); } }],
     });
   });
+}
+
+// ── BUG.webgl-crash-block-wait ────────────────────────────────────────
+//
+// Prod 2026-11-16: a GPU reset took both of a player's webAC tabs' contexts at once, and every reload
+// for ~75 s stopped on this screen ("Web page caused context loss and was blocked") until one worked.
+// Chromium blocks 3D for a site with two or more recorded context losses, and each loss expires after
+// kBlockedDomainExpirationPeriod = base::Minutes(2) (content/browser/gpu/gpu_data_manager_impl_private.cc,
+// Are3DAPIsBlockedAtTime, checked when a context is created). So for that cause alone the screen stays
+// up while the page quietly tries a WebGL 2 context every WEBGL_CRASH_BLOCK_PROBE_MS for
+// WEBGL_CRASH_BLOCK_WAIT_MS (the 2 minutes plus margin), and the boot carries on when one works.
+// A browser-UX exception (CLAUDE.md): retail had no such screen.
+
+/** How often the page tries WebGL 2 again while a crash block holds. */
+export const WEBGL_CRASH_BLOCK_PROBE_MS = 10_000;
+/** How long it keeps trying: Chromium's 2-minute block plus margin. Then the screen stays as it is. */
+export const WEBGL_CRASH_BLOCK_WAIT_MS = 150_000;
+
+export interface WaitTimers {
+  setTimeout(fn: () => void, ms: number): unknown;
+  now(): number;
+}
+
+export interface WebGlWaitResult { recovered: boolean; waitedMs: number }
+
+/** Whether the page waits this failure out: the crash block, with no other hard problem. */
+export function crashBlockWaitable(env: CapabilityEnv, problems: readonly CapabilityProblem[]): boolean {
+  return !env.webgl2 && env.webgl2Failure?.cause === 'context_lost_after_crash'
+    && problems.every(p => !p.hard || p.id === 'webgl2');
+}
+
+/**
+ * Try `probe` every `probeMs` until it works (recovered) or the next try would pass `maxMs` since the
+ * start (gave up). Resolves once, with the time waited.
+ */
+export function waitForWebGl2(probe: () => boolean, timers: WaitTimers,
+  probeMs = WEBGL_CRASH_BLOCK_PROBE_MS, maxMs = WEBGL_CRASH_BLOCK_WAIT_MS): Promise<WebGlWaitResult> {
+  const start = timers.now();
+  return new Promise((resolve) => {
+    const tick = (): void => {
+      let ok = false;
+      try { ok = probe(); } catch { ok = false; }
+      const waitedMs = Math.max(0, timers.now() - start);
+      if (ok) { resolve({ recovered: true, waitedMs }); return; }
+      if (waitedMs + probeMs > maxMs) { resolve({ recovered: false, waitedMs }); return; }
+      timers.setTimeout(tick, probeMs);
+    };
+    timers.setTimeout(tick, probeMs);
+  });
+}
+
+export interface CapabilityGateDeps {
+  /** Probe the browser (probeCapabilities). */
+  probe(): CapabilityEnv;
+  /** Every probe's result: render adaptation and the reporter's capability list. */
+  probed(env: CapabilityEnv, problems: CapabilityProblem[]): void;
+  /** Problems are about to be shown (console line, boot error report, boot stage). */
+  showing(env: CapabilityEnv, problems: CapabilityProblem[]): void;
+  /** showCapabilityScreen, with the wait's verdict when there is one. */
+  show(problems: CapabilityProblem[], recovered?: Promise<boolean>): Promise<void>;
+  /** One quiet WebGL 2 attempt (browserCanCreateWebGl2). */
+  canCreateWebGl2(): boolean;
+  timers: WaitTimers;
+  /** The wait ended, recovered or not (telemetry). */
+  waited(result: WebGlWaitResult): void;
+}
+
+/**
+ * The boot's capability step: probe, and show the screen when something is wrong. Resolves with the
+ * env the boot goes on with: at once when nothing is wrong, on Continue for soft problems, and after a
+ * crash block lifted (probing again from the top, so a soft problem still asks; one wait per page).
+ * Never resolves for any other hard problem: that screen's Reload is the way on.
+ */
+export async function runCapabilityGate(deps: CapabilityGateDeps): Promise<CapabilityEnv> {
+  let waited = false;
+  for (;;) {
+    const env = deps.probe();
+    const problems = capabilityProblems(env);
+    deps.probed(env, problems);
+    if (problems.length === 0) return env;
+    deps.showing(env, problems);
+    const wait = !waited && crashBlockWaitable(env, problems)
+      ? waitForWebGl2(() => deps.canCreateWebGl2(), deps.timers) : null;
+    if (wait) {
+      waited = true;
+      void wait.then((r) => { try { deps.waited(r); } catch { /* reporting must never throw */ } });
+    }
+    await deps.show(problems, wait?.then(r => r.recovered));
+    if (!wait) return env;
+  }
+}
+
+/** The real page's quiet WebGL 2 attempt. */
+export function browserCanCreateWebGl2(doc: Document): boolean {
+  return canCreateWebGl2(() => doc.createElement('canvas'));
 }

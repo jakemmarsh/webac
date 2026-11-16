@@ -97,6 +97,29 @@ export class SetupModelRenderer {
     /** A LandBlockInfo building's parts (ModelRenderer.createMesh `buildingPass`). */
     buildingPass = false,
   ): THREE.Group | null {
+    // PERF.override-material-share — one object build: an object identical to
+    // an earlier one (same override materials in the same order) draws that
+    // object's materials, part for part (MaterialFactory.endObjectBuild).
+    const factory = (this.modelRenderer as Partial<ModelRenderer>).factory;
+    if ((!perPartTextureOverrides && !paletteColors) || !factory) return this.buildSetupMesh(setupId, placementKey, partChanges, perPartTextureOverrides, paletteColors, buildingPass);
+    factory.beginObjectBuild();
+    let group: THREE.Group | null = null;
+    try {
+      group = this.buildSetupMesh(setupId, placementKey, partChanges, perPartTextureOverrides, paletteColors, buildingPass);
+    } finally {
+      factory.endObjectBuild(group);
+    }
+    return group;
+  }
+
+  private buildSetupMesh(
+    setupId: number,
+    placementKey: number,
+    partChanges: Map<number, number> | undefined,
+    perPartTextureOverrides: Map<number, Map<number, number>> | undefined,
+    paletteColors: number[] | undefined,
+    buildingPass: boolean,
+  ): THREE.Group | null {
     const setup = this.loadSetupModel(setupId);
     if (!setup || setup.parts.length === 0) return null;
 

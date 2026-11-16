@@ -746,6 +746,7 @@ export class ClientConnection {
       txSeq: this.packetSequence,
       txUnacked: this.sentPacketCache.size,
       txPaced: this.sendPacer.deferred,
+      ...(this.sendPacer.deferred > 0 ? { txPacedStats: this.sendPacer.pacedStats() } : {}),
       txAckedBySrv: this.diagSrvAck,
       srvNakAgoMs: msAgo(now, this.diagSrvNakAt),
       srvNaks: this.diagSrvNaks,
@@ -1524,7 +1525,7 @@ export class ClientConnection {
     const fragments = fragmentMessage(messageBytes, fragId, queue, fragId);
     // The packet's sequence and ISAAC key are taken when it goes (sendFragmentPacket), so a paced
     // send stays in order with everything after it.
-    this.sendPacer.submit(() => this.sendFragmentPacket(fragments));
+    this.sendPacer.submit(() => this.sendFragmentPacket(fragments), messageLabel(messageBytes));
   }
 
   // ─── Internal Packet Handling ──────────────────────

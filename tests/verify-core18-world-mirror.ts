@@ -195,6 +195,33 @@ describe('CORE.18 — front faces survive the mirror (culling hook + mesh windin
   });
 });
 
+describe('PERF.mirror-wrapper-lean — the per-draw hook stays exact', () => {
+  it('a replaced renderer state (context restore) is patched; a throwing draw leaves the next draw its own face', () => {
+    const seen: boolean[] = [];
+    let boom = false;
+    const mkState = () => ({ setMaterial: (_m: THREE.Material, cw: boolean) => { seen.push(cw); if (boom) throw new Error('lost context'); } });
+    const fake: MirrorCullingRenderer = {
+      state: mkState(),
+      renderBufferDirect(_c, _s, _g, material, object) {
+        this.state.setMaterial(material, object.matrixWorld.determinant() < 0);
+      },
+    };
+    installMirrorAwareCulling(fake);
+    const plain = new THREE.PerspectiveCamera();
+    const mirrored = mirrorCameraX(new THREE.PerspectiveCamera());
+    const mesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial());
+    const m = mesh.material as THREE.Material;
+    boom = true;
+    expect(() => fake.renderBufferDirect(mirrored, null, mesh.geometry, m, mesh, null)).toThrow();
+    boom = false;
+    fake.renderBufferDirect(plain, null, mesh.geometry, m, mesh, null);
+    fake.state = mkState(); // WebGLRenderer.initGLContext after a restore
+    fake.renderBufferDirect(mirrored, null, mesh.geometry, m, mesh, null);
+    fake.renderBufferDirect(plain, null, mesh.geometry, m, mesh, null);
+    expect(seen).toEqual([true, false, true, false]);
+  });
+});
+
 describe('CORE.18 — controls match the true-handed screen', () => {
   it('turn left (A) from north swings the heading WEST; turn right (D) swings it EAST', () => {
     const { cc } = northFacingWorldCamera();

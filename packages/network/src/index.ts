@@ -190,6 +190,7 @@ export { SocketHandover, handoverUrl, HANDOVER_TICKET_REQUEST, HANDOVER_RELEASE,
 export type { HandoverResult, HandoverSocket, HandoverStage, SocketHandoverOptions } from './SocketHandover.js';
 export { WS_OPEN_TIMEOUT_MS, WS_CONNECTING, armOpenTimeout, type OpeningSocket } from './WsOpenTimeout.js';
 export { createConnection } from './createConnection.js';
+export type { PacedStats } from './SendPacer.js';
 export { hex32, msAgo, boundNetDiagnostics, NET_DIAG_END_CAUSES, NET_DIAG_MAX_MS, NET_DIAG_MAX_COUNT, NET_DIAG_TX_RING, NET_DIAG_WHAT_RE, TxRing, messageLabel, joinLabels } from './NetDiagnostics.js';
 export type { NetDiagnostics, NetTxRecord, BoundTxRecord } from './NetDiagnostics.js';
 export { ThreadStallClock, silenceIsOwnStall, THREAD_STALL_MIN_MS, STALE_RECEIVE_GRACE_MS, type ThreadStall, type LinkSample } from './ThreadStall.js';

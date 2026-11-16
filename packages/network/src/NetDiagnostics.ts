@@ -1,3 +1,5 @@
+import type { PacedStats } from './SendPacer.js';
+
 /**
  * OBS.dm-stall-diagnostics — a compact snapshot of a session connection's
  * sequencing state, for the session that went silent.
@@ -45,6 +47,8 @@ export interface NetDiagnostics {
   txUnacked: number;
   /** Game-message sends the outgoing pacer held back for a burst (SendPacer, BUG.movetostate-burst-abuse-close); absent: none kept. */
   txPaced?: number;
+  /** BUG.pacer-burst-telemetry — what the pacer held: labels, largest burst, drain time (SendPacer.pacedStats); only once it held one. */
+  txPacedStats?: PacedStats;
   txAckedBySrv: number;
   /** Since the server last asked us to resend, and the sequences it asked for in total. */
   srvNakAgoMs: number | null;

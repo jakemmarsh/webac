@@ -122,13 +122,54 @@ export function ownMeshMaterials(mesh: THREE.Mesh): THREE.Material[] {
  * lighting's CopyMaterial, a re-equip), the copies stay as that mesh's owned
  * material and its teardown frees them.
  */
-export function releaseOwnedCopies(mesh: THREE.Mesh): void {
+export function releaseOwnedCopies(mesh: THREE.Mesh): boolean {
   const rec = ownedCopies.get(mesh);
-  if (!rec) return;
+  if (!rec) return false;
   ownedCopies.delete(mesh);
-  if (mesh.material !== rec.copies) return;
+  if (mesh.material !== rec.copies) return false;
   const orig = Array.isArray(rec.originals) ? rec.originals : [rec.originals];
   const cur = Array.isArray(rec.copies) ? rec.copies : [rec.copies];
-  for (const m of cur) if (!orig.includes(m)) m.dispose();
+  // disposeOwnedMaterials: an owned `cellobject` copy also frees the owned base it was cloned from.
+  for (const m of cur) if (!orig.includes(m)) disposeOwnedMaterials(m);
   mesh.material = rec.originals;
+  return true;
+}
+
+/** The shared materials a mesh drew before ownMeshMaterials and the copies it draws now (null when it holds none). */
+export function ownedCopyState(mesh: THREE.Mesh): { originals: THREE.Material | THREE.Material[]; copies: THREE.Material | THREE.Material[] } | null {
+  const rec = ownedCopies.get(mesh);
+  return rec && mesh.material === rec.copies ? rec : null;
+}
+
+/** userData key on a material: a PhysicsScript's luminous / diffuse value (RetailLighting SCRIPT_MATERIAL_KEY; a string here to keep this module's imports one-way). */
+const SCRIPT_MATERIAL_KEY = 'acScriptMaterial';
+
+/**
+ * PERF.restored-copy-release — `CPhysicsPart::RestoreMaterial @ 0050df70`:
+ * once a part's translucency, diffuse and luminosity are all back at the
+ * GfxObj material's own (CurSettingsAreDefault @ 0050d9e0), retail RELEASES
+ * the part's CopyMaterial copy and the part draws the GfxObj's shared
+ * material again. The caller has restored the copies' authored state; this
+ * drops them, but only when nothing else still lives on them: a
+ * PhysicsScript luminous / diffuse value (SCRIPT_MATERIAL_KEY) or a texture
+ * scroll's own map (`acUvOwned`) keeps the copy, as does a mesh whose
+ * material was swapped since it was owned (releaseOwnedCopies).
+ *
+ * Before this, a creature that faded in (every spawn and respawn: the
+ * academy's Sparring Golems) kept one private copy per part forever, so ten
+ * identical golems drew 240 distinct materials and three.js re-ran its
+ * per-material uniform refresh on every one of those draws.
+ */
+export function releaseRestoredCopies(mesh: THREE.Mesh): boolean {
+  // tools/probe-restored-copy-ab.ts keeps the copies (the pre-fix behaviour) so it can swap both ways in one frame.
+  if ((globalThis as { __acKeepRestoredCopies?: boolean }).__acKeepRestoredCopies) return false;
+  const rec = ownedCopies.get(mesh);
+  if (!rec || mesh.material !== rec.copies) return false;
+  const cur = Array.isArray(rec.copies) ? rec.copies : [rec.copies];
+  for (const m of cur) {
+    if (m.userData?.[SCRIPT_MATERIAL_KEY]) return false;
+    const map = (m as THREE.MeshBasicMaterial).map;
+    if (map?.userData?.acUvOwned) return false;
+  }
+  return releaseOwnedCopies(mesh);
 }

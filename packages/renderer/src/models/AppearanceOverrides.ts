@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { CELL_LIGHTING_KEY, setCellLighting } from './RetailLighting.js';
+import { disposeObjectTree } from './MaterialOwnership.js';
 
 /**
  * Shared appearance-override plumbing for ObjDesc-driven model updates.
@@ -140,14 +141,15 @@ export function buildAppearanceOverrides(
 
 const PART_NAME_RE = /^part_\d+$/;
 
+/**
+ * The replaced parts' GPU resources, by the ownership rule (MaterialOwnership.
+ * disposeObjectTree): geometry and owned material copies go, a shared
+ * MaterialFactory material stays — every other object drawing that surface
+ * still uses it (PERF.override-material-share made palette-swapped materials
+ * shared; this disposed them, and cached plain ones, outright).
+ */
 function disposeSubtree(root: THREE.Object3D): void {
-  root.traverse((child) => {
-    if (child instanceof THREE.Mesh) {
-      child.geometry?.dispose();
-      if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
-      else child.material?.dispose();
-    }
-  });
+  disposeObjectTree(root);
 }
 
 /** A held item (or the debug attach) hung on a part, not the part's own geometry. */

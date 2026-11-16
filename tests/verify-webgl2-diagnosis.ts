@@ -262,12 +262,22 @@ describe('BOOT.webgl2-diagnosis — the advice per cause and platform', () => {
     expect(text).not.toMatch(/hardware acceleration|Settings > General/);
   });
 
-  it('after a crash: today\'s restart wording, chrome://gpu in Chrome, no IT line', () => {
+  it('after a crash: the two-minute block that lifts by itself (BUG.webgl-crash-block-wait), no restart, no IT line', () => {
     const t = at('context_lost_after_crash', CHROME_WIN);
-    expect(t).toMatch(/quit the browser completely and start it again/);
-    expect(t).toContain('chrome://gpu');
+    expect(t).toContain('After a graphics crash, Chrome turns graphics off for this site for up to two minutes.');
+    expect(t).toContain('The game will continue by itself when they come back.');
     expect(t).toMatch(/update your graphics driver/);
-    expect(t).not.toMatch(/work computer|flags/);
+    expect(t).not.toMatch(/quit the browser|restart|work computer|flags/);
+    expect(at('context_lost_after_crash', EDGE_WIN)).toContain('After a graphics crash, Edge turns graphics off');
+    // Only Chromium sends "Web page caused context loss and was blocked"; a non-Chrome / non-Edge
+    // name (or a misdetected browser) gets a sentence that stays true without naming one.
+    for (const nav of [FIREFOX_WIN, SAFARI_MAC]) {
+      const o = at('context_lost_after_crash', nav);
+      expect(o).toContain('After a graphics crash, the browser turns graphics off for this site for up to two minutes.');
+      expect(o).not.toMatch(/Chrome|Edge|restart/);
+    }
+    // The other causes keep their wording: the unknown cause still names the restart.
+    expect(at('unknown', CHROME_WIN)).toMatch(/quit the browser completely and start it again/);
   });
 
   it('no GPU process: Linux leads with the flags override, Windows with the acceleration setting', () => {

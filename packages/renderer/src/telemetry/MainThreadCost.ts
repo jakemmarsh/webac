@@ -261,8 +261,11 @@ export class CompileTrace {
     const r = renderer as unknown as { renderBufferDirect: (...args: unknown[]) => unknown };
     const inner = r.renderBufferDirect;
     if ((inner as { compileTraced?: boolean }).compileTraced) return;
+    // PERF.mirror-wrapper-lean — per draw: one reused record, not a new object each call.
+    const rec: { object: unknown; material: unknown } = { object: null, material: null };
     const wrapped = (...args: unknown[]): unknown => {
-      this.draw = { material: args[3], object: args[4] };
+      rec.material = args[3]; rec.object = args[4];
+      this.draw = rec;
       try { return inner.apply(renderer, args); } finally { this.draw = null; }
     };
     (wrapped as { compileTraced?: boolean }).compileTraced = true;

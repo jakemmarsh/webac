@@ -340,7 +340,7 @@ import {
   buildChangeStoragePermissionPayload,
   buildAddFriendPayload,
   buildRemoveFriendPayload} from '@ac/network';
-import type { NetDiagnostics, ConnectionEvent, CharacterListData, CharacterCreateResponseData, CharacterRestoreResponseData, CreateObjectData, GameMessage, SetCharacterOptionsFields, RoutinesGrant, PairingReply, RelayLinkNotice, HandoverResult, DatPatchProgressEvent } from '@ac/network';
+import type { PacedStats, NetDiagnostics, ConnectionEvent, CharacterListData, CharacterCreateResponseData, CharacterRestoreResponseData, CreateObjectData, GameMessage, SetCharacterOptionsFields, RoutinesGrant, PairingReply, RelayLinkNotice, HandoverResult, DatPatchProgressEvent } from '@ac/network';
 import { ServerMessageHandler } from './network/ServerMessageHandler.js';
 import { applySetStackSize } from './network/applySetStackSize.js';
 import { getObjectSplitSize } from './inventory/dragSplit.js';
@@ -459,7 +459,7 @@ import { MoveLimiterReporter } from './telemetry/MoveLimiterReporter.js';
 import { PortalUseReporter, bodyTouchesPortal, isPortalObject, overlapsPortal, ownMovementTouch, serverFramePoint, type PortalSnapshot, type PortalUseHeld, type MoveToStopReason } from './telemetry/PortalUseReporter.js';
 import { accountTag, browserId, realLocalStorage } from './telemetry/LoginTags.js';
 import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, serverIdFromUrl, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
-import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
+import { probeCapabilities, showCapabilityScreen, renderAdaptFor, runCapabilityGate, browserCanCreateWebGl2 } from './boot/Capability.js';
 import { setRenderAdaptConfig, contextAntialias } from './scene/RenderScale.js';
 import { DEV_BUILD_ID, UpdateWatcher, decideUpdateAction, reloadAtBreak, updateNoticeAsDialog, updateNoticeText, type Screen } from './update/UpdateWatcher.js';
 
@@ -895,6 +895,9 @@ let measuredFps = 0;
 /** What the movement-event sources and the connection's pacer count are read from (set once the world's pieces exist). */
 let moveLimiterSources: () => readonly import('./scene/CameraController.js').MovementEventSource[] = () => [];
 let moveLimiterTxPaced: () => number | null = () => null;
+/** BUG.pacer-burst-telemetry — what the connection's pacer held (NetDiagnostics txPacedStats), and whether an agent is attached. */
+let moveLimiterPaced: () => PacedStats | null = () => null;
+let moveLimiterAgent: () => boolean | null = () => null;
 /** TELEMETRY.refusal-events — every refusal the player saw, client- or server-made (telemetry/RefusalReporter.ts). */
 let refusalReporter: RefusalReporter | null = null;
 /** Run `f` with the refusal reporter's client spew tap off (server text shown through the spew, chat-command feedback). */
@@ -1439,7 +1442,7 @@ async function main() {
     trace: preworldReporter.trace,
     era: () => activeEra.id,
     server: () => preworldServer(),
-    context: () => ({ sources: moveLimiterSources(), fps: measuredFps, routine: automationReporter?.runningRoutine ?? null, txPaced: moveLimiterTxPaced() }),
+    context: () => ({ sources: moveLimiterSources(), fps: measuredFps, routine: automationReporter?.runningRoutine ?? null, txPaced: moveLimiterTxPaced(), paced: moveLimiterPaced(), agent: moveLimiterAgent() }),
   });
   moveLimiterReporter.install(window, document);
   { const ml = moveLimiterReporter; worldReporter.onSessionStart(() => ml.sessionStarted()); }
@@ -1461,25 +1464,38 @@ async function main() {
 
   // RELEASE.capability-check — before the patch screen downloads anything.
   // RELEASE.preworld-boot-stage — each await below names its boot stage on the reporter.
+  // BUG.webgl-crash-block-wait — after a graphics crash the screen waits out Chromium's 2-minute
+  // block quietly and the boot goes on by itself (boot/Capability.ts runCapabilityGate).
   preworldReporter.bootStage('capability');
-  const capabilityEnv = probeCapabilities(window);
-  // PERF.render-adapt — dynamic resolution; software WebGL also loses MSAA and starts at ~720p
-  // (scene/RenderScale.ts), decided before any renderer exists. Software rendering is reported
-  // (caps: software_gpu), never shown: some players have no GPU to turn on.
-  setRenderAdaptConfig(renderAdaptFor(capabilityEnv));
-  const capabilityIssues = capabilityProblems(capabilityEnv);
-  preworldReporter.capabilityIssues([...capabilityIssues.map(p => p.id), ...(capabilityEnv.softwareGpu ? ['software_gpu'] : [])]);
-  if (capabilityIssues.length > 0) {
-    console.warn(`[AC] browser capability: ${capabilityIssues.map(p => `${p.id}${p.hard ? ' (blocking)' : ''}`).join(', ')}`);
-    if (capabilityIssues.some(p => p.hard)) {
-      // BOOT.webgl2-diagnosis: the boot report says why WebGL 2 failed (cause + the browser's own reason).
-      const wf = capabilityEnv.webgl2Failure;
-      errorReporter.report('boot', `unsupported browser: ${capabilityIssues.filter(p => p.hard).map(p => p.id).join(', ')}${wf ? ` (${wf.cause})` : ''}`,
-        { webglCause: wf?.cause ?? null, webglStatus: wf?.status ?? null });
-    }
-    preworldReporter.bootStage('capability_prompt');
-    await showCapabilityScreen(document, capabilityIssues);
-  }
+  const capReporter = preworldReporter;
+  const capErrors = errorReporter;
+  await runCapabilityGate({
+    probe: () => probeCapabilities(window),
+    probed: (env, issues) => {
+      // PERF.render-adapt — dynamic resolution; software WebGL also loses MSAA and starts at ~720p
+      // (scene/RenderScale.ts), decided before any renderer exists. Software rendering is reported
+      // (caps: software_gpu), never shown: some players have no GPU to turn on.
+      setRenderAdaptConfig(renderAdaptFor(env));
+      capReporter.capabilityIssues([...issues.map(p => p.id), ...(env.softwareGpu ? ['software_gpu'] : [])]);
+    },
+    showing: (env, issues) => {
+      console.warn(`[AC] browser capability: ${issues.map(p => `${p.id}${p.hard ? ' (blocking)' : ''}`).join(', ')}`);
+      if (issues.some(p => p.hard)) {
+        // BOOT.webgl2-diagnosis: the boot report says why WebGL 2 failed (cause + the browser's own reason).
+        const wf = env.webgl2Failure;
+        capErrors.report('boot', `unsupported browser: ${issues.filter(p => p.hard).map(p => p.id).join(', ')}${wf ? ` (${wf.cause})` : ''}`,
+          { webglCause: wf?.cause ?? null, webglStatus: wf?.status ?? null });
+      }
+      capReporter.bootStage('capability_prompt');
+    },
+    show: (issues, recovered) => showCapabilityScreen(document, issues, undefined, recovered),
+    canCreateWebGl2: () => browserCanCreateWebGl2(document),
+    timers: { setTimeout: (fn, ms) => window.setTimeout(fn, ms), now: () => performance.now() },
+    waited: (r) => {
+      console.warn(`[AC] WebGL 2 after a graphics crash: ${r.recovered ? 'back' : 'still blocked'} after ${Math.round(r.waitedMs / 1000)} s`);
+      capReporter.webglWait(r.recovered ? 'recovered' : 'gave_up', r.waitedMs);
+    },
+  });
   preworldReporter.bootStage('era');
 
   // ── Era: which DAT set this page load uses (era/EraBoot.ts) ──
@@ -9362,6 +9378,7 @@ async function main() {
     movementSync.onLimiter = (kind, snap) => { moveLimiterReporter?.engage(kind, snap); };
     moveLimiterSources = () => cameraController.recentMovementEventSources;
     moveLimiterTxPaced = () => aceConnection.getDiagnostics().txPaced ?? null;
+    moveLimiterPaced = () => aceConnection.getDiagnostics().txPacedStats ?? null;
     // RawMotionState::current_style: the style the player's sequence is in.
     movementSync.stanceProvider = () => playerAnimated?.motionManager.currentStyleId ?? 0;
     // BUG.portal-use-held-keys — a MoveToState while a Use is unanswered cancels ACE's walk (PORTAL_CANCELLED).
@@ -17979,6 +17996,8 @@ async function main() {
     });
     let claudeStillActing: (claudeRoutine: boolean) => boolean = () => false;
     const tabRelay = new TabRelay((t) => aceConnection.sendBridgeText(t), () => relaySurface, claudeControl);
+    // BUG.pacer-burst-telemetry: the move_limiter event says whether an agent was attached (as agentAttached below).
+    moveLimiterAgent = () => agentApiExposed || tabRelay.on;
     // Trusted input only (a script's synthetic events are not the player): a moving / fighting key outside
     // text fields, or a press on the 3D world (isTakeoverInput). Capture phase, so Claude's keys are
     // released before the game sees the player's.
@@ -20561,6 +20580,8 @@ async function main() {
   // BUG.server-object-setup-lights — physics objects' Setup lights
   // (ObjectLights) register here as they are built.
   setObjectLightSink(datLightBudget);
+  // PERF.external-light-registry — the one non-DAT point light, counted from the registry each frame.
+  datLightBudget.registerExternalLight(viewerLight);
   indoorViewLights = (visit) => datLightBudget.forEachLight(visit);
   const datLightViewerPos = new THREE.Vector3();
   // BUG.ac1999-point-light-falloff — the 1999 pool (EraWorldRules.lightPool): 0x43ffd0's caps, each
