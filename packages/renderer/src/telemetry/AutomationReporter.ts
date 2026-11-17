@@ -31,6 +31,11 @@
  *   per reason per run, at most MAX_NAV_IDLE_EVENTS per page
  *   (BUG.vtank-nav-stands-still, 2026-11-07).
  *
+ * - routines_store: the routines store kept another tab's or device's changes
+ *   under this page's save (merged), or couldn't read the stored document
+ *   (unreadable), and whether it was the bridge's store or this browser's.
+ *   At most MAX_STORE_EVENTS per page (BUG.routine-settings-reset, 2026-11-17).
+ *
  * Privacy (the pre-world reporter's rules): closed tokens, counts and
  * durations. No profile, rule, route or loot name, no file name, no chat:
  * a profile is reduced here to its kind (VTank macro / meta / plain rules)
@@ -44,7 +49,7 @@
 import { EXAMPLE_HUNT_PROFILE, GOARROW_REPLIES, type GoArrowReply, type RoutineProfile } from '@ac/shared';
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 
-export const AUTOMATION_OUTCOMES = ['automation_offered', 'routine_started', 'routine_stopped', 'routine_error', 'automation_summary', 'nav_idle'] as const;
+export const AUTOMATION_OUTCOMES = ['automation_offered', 'routine_started', 'routine_stopped', 'routine_error', 'automation_summary', 'nav_idle', 'routines_store'] as const;
 export type AutomationOutcome = typeof AUTOMATION_OUTCOMES[number];
 
 /**
@@ -90,6 +95,12 @@ export type ImportKind = typeof IMPORT_KINDS[number];
 /** How the world session ended (WorldReporter's exits). */
 export const AUTOMATION_EXITS = ['closed_tab', 'logout', 'disconnected'] as const;
 export type AutomationExit = typeof AUTOMATION_EXITS[number];
+
+/** What the routines store did (RoutineSync's RoutineStoreEvent), and which store. */
+export const ROUTINE_STORE_WHATS = ['merged', 'unreadable'] as const;
+export const ROUTINE_STORE_MODES = ['bridge', 'local'] as const;
+/** routines_store events a page sends at most. */
+export const MAX_STORE_EVENTS = 4;
 
 /** A page sends at most this many automation events in all. */
 export const MAX_AUTOMATION_EVENTS = 30;
@@ -172,7 +183,13 @@ export interface AutomationSummaryEvent extends Ids {
   goarrow: Record<GoArrowReply, number>;
 }
 
-export type AutomationEvent = AutomationOfferedEvent | RoutineStartedEvent | RoutineStoppedEvent | RoutineErrorEvent | AutomationSummaryEvent | NavIdleEvent;
+export interface RoutinesStoreEvent extends Ids {
+  outcome: 'routines_store';
+  what: typeof ROUTINE_STORE_WHATS[number];
+  mode: typeof ROUTINE_STORE_MODES[number];
+}
+
+export type AutomationEvent = AutomationOfferedEvent | RoutineStartedEvent | RoutineStoppedEvent | RoutineErrorEvent | AutomationSummaryEvent | NavIdleEvent | RoutinesStoreEvent;
 
 export interface AutomationReporterOptions {
   endpoint: string | null;
@@ -215,6 +232,7 @@ export class AutomationReporter {
   private sent = 0;
   private routineSent = 0;
   private navIdleSent = 0;
+  private storeSent = 0;
 
   // ── The page: the bridge's answer ──
   private automation: boolean | null = null;
@@ -403,6 +421,13 @@ export class AutomationReporter {
   }
 
   // ── Sending ──
+
+  /** The routines store merged another copy's changes under a save, or couldn't read the stored document (RoutineSync.onStoreEvent). */
+  routinesStore(what: string, mode: string): void {
+    if (!(ROUTINE_STORE_WHATS as readonly string[]).includes(what) || !(ROUTINE_STORE_MODES as readonly string[]).includes(mode)) return;
+    if (this.storeSent >= MAX_STORE_EVENTS) return;
+    if (this.post({ outcome: 'routines_store', ...this.ids(), what: what as RoutinesStoreEvent['what'], mode: mode as RoutinesStoreEvent['mode'] })) this.storeSent++;
+  }
 
   private ids(): Ids {
     return { era: safe(this.opts.era, 'unknown'), server: safe(this.opts.server, null), trace: this.opts.trace, build: this.opts.build };

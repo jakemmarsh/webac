@@ -6,7 +6,7 @@
  * the account itself: the token decides whose routines these are.
  */
 import type { RoutinesGrant } from '@ac/network';
-import { emptyRoutineDoc, normalizeRoutineDoc, upgradeStoredLootRules, validateRoutineDoc, type RoutineDoc } from '@ac/shared';
+import { emptyRoutineDoc, mergeRoutineDocs, normalizeRoutineDoc, upgradeStoredLootRules, validateRoutineDoc, type RoutineDoc } from '@ac/shared';
 
 /** Browser storage for a bridge that keeps no routines: one document per server + account, in this browser only. */
 export interface RoutineLocalStore { getItem(key: string): string | null; setItem(key: string, value: string): void }
@@ -36,11 +36,22 @@ export type RoutineCheckResult = { ok: true; unchanged: true } | RoutineSyncResu
 
 const GRANT_WAIT_MS = 5000;
 
+/**
+ * What the store did that a player could read as their routines resetting (telemetry; closed tokens only):
+ * `merged` — a save found the stored document changed since this page's copy (another tab or device) and kept
+ * both sides' changes; `unreadable` — the stored document could not be read (bad JSON, not an object), so the
+ * window says why and stores nothing over it.
+ */
+export type RoutineStoreEvent = { what: 'merged' | 'unreadable'; mode: 'bridge' | 'local' };
+
 export class RoutineSync {
   private grant: RoutinesGrant | null = null;
   private waiters: Array<(g: { grant: RoutinesGrant | null; reason: string | null }) => void> = [];
   /** Told of every document this page stores (the VirindiTank window, Claude through the connector). */
   private storedListeners: Array<(doc: RoutineDoc) => void> = [];
+  /** Told when a save merged another copy's changes, or the stored document couldn't be read (RoutineStoreEvent). */
+  onStoreEvent: ((e: RoutineStoreEvent) => void) | null = null;
+  private storeEvent(e: RoutineStoreEvent): void { try { this.onStoreEvent?.(e); } catch { /* telemetry's fault stays its own */ } }
 
   constructor(
     private readonly connection: () => RoutineSyncConnection | null,
@@ -57,7 +68,13 @@ export class RoutineSync {
     try {
       if (method === 'GET') {
         const raw = store.getItem(key);
-        const doc = raw ? JSON.parse(raw) as RoutineDoc : emptyRoutineDoc(grant.server, grant.account);
+        let doc: RoutineDoc;
+        try { doc = raw ? JSON.parse(raw) as RoutineDoc : emptyRoutineDoc(grant.server, grant.account); } catch { doc = null as unknown as RoutineDoc; }
+        // Never an empty document in place of one that is there but unreadable: the next save would replace it.
+        if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+          this.storeEvent({ what: 'unreadable', mode: 'local' });
+          return { ok: false, message: 'your stored routines could not be read in this browser, so nothing is saved over them' };
+        }
         if (since !== undefined && raw && doc.updatedAt === since) return { ok: true, unchanged: true };
         return { ok: true, doc, ...who };
       }
@@ -126,6 +143,10 @@ export class RoutineSync {
       if (res.status === 401 && attempt === 0) { this.grant = null; continue; } // expired: ask again once
       const json = await res.json().catch(() => null) as { error?: string; unchanged?: boolean; updatedAt?: string; issues?: Array<{ path: string; message: string }> } | null;
       if (res.ok && since !== undefined && json?.unchanged === true) return { ok: true, unchanged: true };
+      if (res.ok && (!json || typeof json !== 'object' || Array.isArray(json))) {
+        if (method === 'GET') this.storeEvent({ what: 'unreadable', mode: 'bridge' });
+        return { ok: false, message: 'the bridge sent routines that could not be read' };
+      }
       if (res.ok) return { ok: true, doc: json, account: grant.account, server: grant.server };
       if (res.status === 422 && json?.issues) return { ok: false, message: 'not saved: the routine has problems', issues: json.issues };
       return { ok: false, message: json?.error ?? `bridge answered ${res.status}` };
@@ -155,8 +176,24 @@ export class RoutineSync {
     return r;
   }
 
-  /** Validate and store the account's routine document on the bridge. Listeners hear of what was stored. */
-  async save(doc: unknown): Promise<RoutineSyncResult> {
+  /**
+   * Validate and store the account's routine document. Listeners hear of what was stored, and the result's
+   * doc is what was stored. `base`: the stored document this page's edits started from (its updatedAt is the
+   * store's stamp). When the store has changed since (another tab or device saved), what changed there is kept
+   * and this page's changes go on top (mergeRoutineDocs) instead of the whole document replacing it
+   * (BUG.routine-settings-reset). Without a base the document replaces what is stored (`ac_routines set`).
+   */
+  async save(doc: unknown, base?: RoutineDoc | null): Promise<RoutineSyncResult> {
+    if (base && typeof base.updatedAt === 'string' && doc && typeof doc === 'object') {
+      const now = await this.check(base.updatedAt);
+      if (now.ok && !('unchanged' in now) && now.doc && typeof now.doc === 'object' && Array.isArray((now.doc as RoutineDoc).profiles)) {
+        const merged = mergeRoutineDocs(base, doc as RoutineDoc, now.doc as RoutineDoc);
+        if (!validateRoutineDoc(merged).length) {
+          doc = merged;
+          this.storeEvent({ what: 'merged', mode: this.grant?.local ? 'local' : 'bridge' });
+        }
+      }
+    }
     const r = await this.call('PUT', doc) as RoutineSyncResult;
     if (r.ok && r.doc && typeof r.doc === 'object') for (const f of [...this.storedListeners]) { try { f(r.doc as RoutineDoc); } catch { /* a listener's fault stays its own */ } }
     return r;

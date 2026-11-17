@@ -533,7 +533,8 @@ describe.skipIf(!existsSync(PORTAL))('VirindiTank\'s macro over the real spell t
       { guid: 0x50000a01, name: 'Acid Grievver Essence (50)', where: 'main pack', uiEffects: 0x100 },
       { guid: 0x50000a02, name: 'Fire Grievver Essence (50)', where: 'main pack', uiEffects: 0x20 },
     ] as never;
-    for (const g of [0x50000a01, 0x50000a02]) host.appraisalDatas.set(g, { int: { 266: 49052 }, float: {}, string: {}, bool: {}, did: {}, spells: [] });
+    // As ACE examines an essence: Summoning to use it (366), no PetClass (266: not an [AssessmentProperty]).
+    for (const g of [0x50000a01, 0x50000a02]) host.appraisalDatas.set(g, { int: { 91: 50, 92: 50, 280: 213, 366: 54 }, float: { 167: 45 }, string: {}, bool: {}, did: {}, spells: [] });
     // Summoning trained (VTank summons only then: MOSS SummonPetRule.IsSummoningTrained).
     const skills = (host as unknown as { skillList: () => unknown[] }).skillList();
     (host as unknown as { skillList: () => unknown[] }).skillList = () => [...skills, { id: 54, name: 'Summoning', training: 'trained', base: 100, buffed: 100 }];
@@ -946,11 +947,19 @@ describe.skipIf(!existsSync(PORTAL))('VirindiTank\'s macro over the real spell t
       const ESSENCE = 0x50000a02;
       const withSummoning = () => {
         const skills = (host as unknown as { skillList: () => unknown[] }).skillList();
-        (host as unknown as { skillList: () => unknown[] }).skillList = () => [...skills, { id: 54, name: 'Summoning', training: 'trained', base: 100, buffed: 100 }];
+        (host as unknown as { skillList: () => unknown[] }).skillList = () => [...skills, { id: 54, name: 'Summoning', training: 'trained', base: 300, buffed: 320 }];
+        host.me.level = 60;
       };
+      /**
+       * The examination ACE sends for Fire Grievver Essence (50), wcid 49380 (ACE-World-16PY-Patches): AppraiseInfo keeps
+       * only [AssessmentProperty] ints, so PetClass (266) and SummoningMastery (362) never reach the client. Structure 92
+       * and MaxStructure 91, SharedCooldown 280, UseRequiresSkill 366 (Summoning 54), UseRequiresSkillLevel 367,
+       * UseRequiresLevel 369, CooldownDuration 167 do. Before 2026-11-17 the fixture carried 266, which no ACE world sends.
+       */
+      const ACE_ESSENCE_INTS = { 5: 50, 19: 4000, 33: 0, 91: 50, 92: 50, 114: 0, 280: 213, 366: 54, 367: 310, 369: 40 };
       const essence = (ints: Record<number, number> = {}, floats: Record<number, number> = {}) => {
-        host.inv = [{ guid: ESSENCE, name: 'Fire Grievver Essence (50)', where: 'main pack', uiEffects: 0x20 }] as never;
-        host.appraisalDatas.set(ESSENCE, { int: { 266: 49052, 280: 213, ...ints }, float: { 167: 45, ...floats }, string: {}, bool: {}, did: {}, spells: [] });
+        host.inv = [{ guid: ESSENCE, name: 'Fire Grievver Essence (50)', where: 'main pack', uiEffects: 0x20, structure: ints[92] ?? 50 }] as never;
+        host.appraisalDatas.set(ESSENCE, { int: { ...ACE_ESSENCE_INTS, ...ints }, float: { 167: 45, ...floats }, string: {}, bool: {}, did: {}, spells: [] });
         const data = emptyVtankData();
         data.items = [{ name: 'Fire Grievver Essence (50)' }];
         data.monsters[0].damage = 6;
@@ -1026,6 +1035,111 @@ describe.skipIf(!existsSync(PORTAL))('VirindiTank\'s macro over the real spell t
         api.routine.start(vt({ vtank: data, settings }));
         await step(25_000);
         expect(host.sent.filter((x) => x === `use ${ESSENCE.toString(16)}`)).toHaveLength(1);
+      });
+
+      // "summoning doesnt work well" (a mage on an end-of-retail ACE world, 2026-11-17).
+      const GOLEM = 0x50000a03;
+      const withGolem = (data: ReturnType<typeof essence>) => {
+        // Mud Golem Essence, wcid 48886: no SummoningMastery on the server either (any mastery may use it), 50 Summoning.
+        host.inv = [...host.inv, { guid: GOLEM, name: 'Mud Golem Essence', where: 'main pack', uiEffects: 0x1, structure: 50 }] as never;
+        host.appraisalDatas.set(GOLEM, { int: { 5: 50, 19: 5, 33: 1, 91: 50, 92: 50, 114: 0, 280: 213, 366: 54, 367: 50 }, float: { 167: 45 }, string: {}, bool: {}, did: {}, spells: [] });
+        data.items = [...data.items, { name: 'Mud Golem Essence' }];
+        return data;
+      };
+      /** The server's answer to a Use of an essence: a refusal line (ACE PetDevice / WorldObject.CheckUseRequirements), else none. */
+      const serverRefuses = (refusal: (g: number) => string | null) => {
+        host.use = (g: number) => { host.sent.push(`use ${g.toString(16)}`); const r = refusal(g); if (r) api.pushChat(r, 0); return true; };
+      };
+
+      it('an essence as ACE examines it (no PetClass 266 in the appraisal) is summoned', async () => {
+        skulker();
+        withSummoning();
+        api.routine.start(vt({ vtank: essence(), settings }));
+        await step(3000);
+        expect(host.sent).toContain(`use ${ESSENCE.toString(16)}`);
+      });
+
+      it('a summon that works has no reply line: the fight goes on at once (no 10 s wait for one)', async () => {
+        skulker();
+        withSummoning();
+        api.routine.start(vt({ vtank: essence(), settings }));
+        await step(4000);
+        const sent = host.sent.join('\n');
+        expect(sent).toContain(`use ${ESSENCE.toString(16)}`);
+        expect(host.sent.slice(host.sent.indexOf(`use ${ESSENCE.toString(16)}`)).some((x) => x.startsWith('cast ') && x.endsWith('80005001'))).toBe(true);
+      });
+
+      it('an essence refused for its Summoning Mastery is not used again (the server never sends its 362); the next listed one is', async () => {
+        skulker();
+        withSummoning();
+        const data = withGolem(essence());
+        serverRefuses((g) => (g === ESSENCE ? 'You must be a Naturalist to use the Fire Grievver Essence (50)' : null));
+        api.routine.start(vt({ vtank: data, settings }));
+        await step(90_000);
+        expect(host.sent.filter((x) => x === `use ${ESSENCE.toString(16)}`)).toHaveLength(1);
+        expect(host.sent).toContain(`use ${GOLEM.toString(16)}`);
+        expect(api.routine.history().join('\n')).toMatch(/Fire Grievver Essence \(50\).*Naturalist/);
+      });
+
+      it('another refusal ("is already active", "used this item too recently") waits REFUSED_RETRY_MS, and starts no summoning clock', async () => {
+        skulker();
+        withSummoning();
+        let refuse = true;
+        serverRefuses(() => (refuse ? "Claude Test's Fire Grievver is already active" : null));
+        api.routine.start(vt({ vtank: essence(), settings }));
+        await step(25_000);
+        expect(host.sent.filter((x) => x === `use ${ESSENCE.toString(16)}`)).toHaveLength(1);
+        refuse = false;
+        // (A fresh monster: the fake server answers no bolt, so the first one is blacklisted by now.)
+        host.add({ guid: 0x80005009, name: 'Drudge Slinker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 35 });
+        // Not the essence's 45 s: the pet out has gone by then, and the next summon goes at REFUSED_RETRY_MS.
+        await step(8_000);
+        expect(host.sent.filter((x) => x === `use ${ESSENCE.toString(16)}`), api.routine.history().join('\n')).toHaveLength(2);
+      });
+
+      it('the charges are the live Structure (PublicUpdatePropertyInt), not the examination\'s: 0 left is not used, 1 left is refilled', async () => {
+        skulker();
+        withSummoning();
+        const data = essence();
+        // The examination said 50; the server's updates since say 0.
+        (host.inv[0] as { structure?: number }).structure = 0;
+        api.routine.start(vt({ vtank: data, settings }));
+        await step(5000);
+        expect(host.sent).not.toContain(`use ${ESSENCE.toString(16)}`);
+        api.routine.stop();
+        (host.inv[0] as { structure?: number }).structure = 1;
+        host.inv = [...host.inv, { guid: 0x50000b01, name: 'Encapsulated Spirit', where: 'main pack', stack: 5 }] as never;
+        host.me.combatMode = 'peace';
+        api.routine.start(vt({ vtank: data, settings }));
+        await step(3000);
+        expect(host.sent).toContain(`usewith 50000b01 ${ESSENCE.toString(16)}`);
+      });
+
+      it('no essence on the Items tab: said once in the History, naming the one you carry (VTank summons only listed pets)', async () => {
+        skulker();
+        withSummoning();
+        const data = essence();
+        data.items = [];
+        api.routine.start(vt({ vtank: data, settings }));
+        await step(10_000);
+        const said = api.routine.history().filter((h) => /Summon Pets/.test(h));
+        expect(said).toHaveLength(1);
+        expect(said[0]).toMatch(/no summoning essence on the Items tab/);
+        expect(said[0]).toContain('Fire Grievver Essence (50)');
+        expect(host.sent).not.toContain(`use ${ESSENCE.toString(16)}`);
+      });
+
+      it('listed essences you can\'t use yet: said once why', async () => {
+        skulker();
+        const skills = (host as unknown as { skillList: () => unknown[] }).skillList();
+        (host as unknown as { skillList: () => unknown[] }).skillList = () => [...skills, { id: 54, name: 'Summoning', training: 'trained', base: 100, buffed: 100 }];
+        host.me.level = 60;
+        api.routine.start(vt({ vtank: essence(), settings }));
+        await step(10_000);
+        const said = api.routine.history().filter((h) => /Summon Pets/.test(h));
+        expect(said).toHaveLength(1);
+        expect(said[0]).toContain('Fire Grievver Essence (50) needs 310 Summoning');
+        expect(host.sent).not.toContain(`use ${ESSENCE.toString(16)}`);
       });
     });
   });

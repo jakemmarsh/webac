@@ -9,10 +9,11 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { mountGameUI, type GameUIFixture } from './_harness/gameui.js';
 import {
-  VT_DAMAGE, VT_OPTIONS, emptyRoutineDoc, importVTank, parseMet, parseNav, parseUtl, utlToLoot, validateRoutineDoc, vtCanonicalName, vtFromVTank, vtOption, vtToVTank,
+  VT_DAMAGE, VT_OPTIONS, emptyRoutineDoc, importVTank, parseMet, parseNav, parseUtl, utlToLoot, validateRoutineDoc, vtCanonicalName, vtFromVTank, vtOption, vtParseOption as vtParseOptionFn, vtToVTank,
   type RoutineDoc, type RoutineProfile,
 } from '../packages/shared/src/routines/index.js';
 import type { RoutineStatus } from '../packages/renderer/src/agent/RoutineEngine.js';
+import { RoutineSync, localRoutinesKey } from '../packages/renderer/src/agent/RoutineSync.js';
 import type { MenuItem } from '../packages/renderer/src/ui/automation/AutomationPanel.js';
 import type { VTankDialogs, VTankKit, VTankSource } from '../packages/renderer/src/ui/automation/VTankWindow.js';
 
@@ -1024,5 +1025,421 @@ describe('the window\'s looting controls and commands (docs/vtank-parity-gaps.md
     expect(tested).toEqual(p.lootSets.hunt);
     expect(await t.win.command('/vt propertydump')).toEqual(['Properties of Sword:', '  Int: Value(19)=80']);
     expect((await t.win.command('/vt nosuch'))[0]).toMatch(/testitem, propertydump, log\)$/);
+  });
+});
+
+/**
+ * BUG.vtank-advanced-options-reset (Reddit, 2026-11-17: "I cannot set a mage to fire arcs, and the settings
+ * reset constantly"). UseArcs was a bare box showing 1 with nothing naming 1 / 2 / 3; "true" typed into it
+ * read "1true" in the box while the profile kept 1. Enums now pick VTank's names; every box shows what's stored.
+ */
+describe('VTank option boxes show what is stored (BUG.vtank-advanced-options-reset)', () => {
+  const box = (root: Element, sel: string) => root.querySelector(sel) as HTMLInputElement;
+  /** Types text the way a player does (an input event per keystroke), then leaves the box. */
+  const type = (input: HTMLInputElement, text: string, commit: 'blur' | 'enter' = 'blur') => {
+    for (const ch of text) { input.value = input.value + ch; input.dispatchEvent(new Event('input')); }
+    if (commit === 'enter') input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    else input.dispatchEvent(new Event('blur'));
+  };
+  const openAdvanced = async () => {
+    const t = await open();
+    (t.body.querySelector('[data-vtank="advanced"] [data-check]') as HTMLElement).click();
+    return t;
+  };
+
+  it('vtParseOption: only values of the option are values; names of enum values count', () => {
+    const parse = (n: string, s: string) => vtParseOptionFn(n, s);
+    expect(parse('UseArcs', '3')).toEqual({ ok: true, value: 3 });
+    expect(parse('UseArcs', 'yes')).toEqual({ ok: true, value: 3 });
+    expect(parse('UseArcs', 'At Range')).toEqual({ ok: true, value: 2 });
+    expect(parse('UseArcs', '1true')).toEqual({ ok: false, why: 'is not one of 1 No, 2 At Range, 3 Yes' });
+    expect(parse('UseArcs', '4').ok).toBe(false);
+    expect(parse('MinimumRingTargets', '1true')).toEqual({ ok: false, why: 'is not a number' });
+    expect(parse('MinimumRingTargets', '')).toEqual({ ok: false, why: 'is not a number' });
+    expect(parse('MinimumRingTargets', '5.6')).toEqual({ ok: true, value: 6 });
+    expect(parse('AttackDistance', '-3')).toEqual({ ok: false, why: 'cannot be negative' });
+    expect(parse('AttackDistance', '12.5')).toEqual({ ok: true, value: 12.5 });
+    // VTank's own units (/vt opt set): map units × 240.
+    expect(vtParseOptionFn('AttackDistance', '0.0833333', 'vtank')).toEqual({ ok: true, value: 20 });
+    expect(parse('EnableCombat', 'off')).toEqual({ ok: true, value: false });
+    expect(parse('EnableCombat', 'maybe')).toEqual({ ok: false, why: 'is not True or False' });
+    expect(parse('DoorLockpickDiffExcessThreshold', '-50')).toEqual({ ok: true, value: -50 });
+    expect(parse('SomePluginOption', 'x')).toEqual({ ok: true, value: 'x' });
+    // Every enum the window offers has its value names and a help line.
+    for (const o of VT_OPTIONS.filter((x) => x.engine && x.kind === 'enum')) {
+      expect(Object.keys(o.values ?? {}).length, o.name).toBeGreaterThan(1);
+      expect(o.help, o.name).toBeTruthy();
+    }
+  });
+
+  it('Advanced Options: UseArcs is a choice of No / At Range / Yes that stores VTank\'s number, with its help', async () => {
+    const t = await openAdvanced();
+    const arcs = () => t.body.querySelector('[data-vtank-advanced="UseArcs"] [data-vtank-option="UseArcs"]') as HTMLElement;
+    expect(arcs().dataset.field).toBe('No');
+    expect(texts(t.body.querySelector('[data-vtank-advanced="UseArcs"]')!).join(' ')).toMatch(/arcs instead of bolts/);
+    arcs().click();
+    expect(lastMenu!.items.map((i) => i.label)).toEqual(['No', 'At Range', 'Yes']);
+    pick(arcs(), 'Yes');
+    expect(t.win.profile()!.settings!.UseArcs).toBe(3);
+    expect(arcs().dataset.field).toBe('Yes');
+    await flush();
+    expect(t.saved.at(-1)!.profiles[0].settings!.UseArcs).toBe(3);
+    // Running: the macro gets the number at once.
+    (t.body.querySelector('[data-vtank="advanced-close"]') as HTMLElement).click();
+    (t.body.querySelector('[data-vtank="run-macro"] [data-check]') as HTMLElement).click();
+    (t.body.querySelector('[data-vtank="advanced"] [data-check]') as HTMLElement).click();
+    pick(arcs(), 'At Range');
+    expect(t.calls).toContain('set UseArcs=2');
+    expect(arcs().dataset.field).toBe('At Range');
+    // Every enum in the list is a choice, none a bare box.
+    for (const o of VT_OPTIONS.filter((x) => x.engine && x.kind === 'enum')) {
+      const c = t.body.querySelector(`[data-vtank-advanced="${o.name}"] [data-vtank-option="${o.name}"]`) as HTMLElement;
+      expect(c.tagName, o.name).not.toBe('INPUT');
+      expect(c.dataset.field, o.name).toBe(o.values![Number(t.win.value(o.name))]);
+    }
+  });
+
+  it('a number box: an entry that is not a number is not stored, and the box goes back to the stored value with a line', async () => {
+    const t = await openAdvanced();
+    const ring = box(t.body, '[data-vtank-option="MinimumRingTargets"]');
+    expect(ring.value).toBe('4');
+    type(ring, 'true');
+    expect(t.win.value('MinimumRingTargets')).toBe(4);
+    expect(t.win.message).toBe('MinimumRingTargets: "4true" is not a number; it stays 4.');
+    expect(texts(t.body)).toContain(t.win.message);
+    expect(box(t.body, '[data-vtank-option="MinimumRingTargets"]').value).toBe('4');
+  });
+
+  it('a whole-number box rounds, and shows the rounded value; a range keeps its decimals and refuses a negative', async () => {
+    const t = await openAdvanced();
+    const ring = box(t.body, '[data-vtank-option="MinimumRingTargets"]');
+    ring.value = '';
+    type(ring, '5.6', 'enter');
+    expect(t.win.value('MinimumRingTargets')).toBe(6);
+    expect(ring.value).toBe('6');
+    const arc = box(t.body, '[data-vtank-option="ArcRange"]');
+    arc.value = '';
+    type(arc, '12.5');
+    expect(t.win.value('ArcRange')).toBe(12.5);
+    expect(arc.value).toBe('12.5');
+    arc.value = '';
+    type(arc, '-3');
+    expect(t.win.value('ArcRange')).toBe(12.5);
+    expect(box(t.body, '[data-vtank-option="ArcRange"]').value).toBe('12.5');
+    expect(t.win.message).toBe('ArcRange: "-3" cannot be negative; it stays 12.5.');
+    await flush();
+    expect(t.saved.at(-1)!.profiles[0].settings).toMatchObject({ MinimumRingTargets: 6, ArcRange: 12.5 });
+  });
+
+  it('Options tab ranges (yards = our metres) go through the same box; Approach still sets the corpse range', async () => {
+    const t = await open();
+    for (const name of ['AttackDistance', 'RingDistance', 'ApproachDistance', 'NavCloseStopRange', 'PetCustomRange', 'PetMonsterDensity']) {
+      const b = box(t.body, `[data-vtank-option="${name}"]`);
+      const before = b.value;
+      type(b, 'x');
+      expect(box(t.body, `[data-vtank-option="${name}"]`).value, name).toBe(before);
+      expect(String(t.win.value(name)), name).toBe(before);
+    }
+    const ap = box(t.body, '[data-vtank-option="ApproachDistance"]');
+    ap.value = '';
+    type(ap, '15');
+    expect(t.win.profile()!.settings).toMatchObject({ ApproachDistance: 15, 'CorpseApproachRange-Max': 15 });
+    expect(ap.value).toBe('15');
+    // Monster Range 20 here is 20 / 240 in VTank's /vt opt get.
+    expect(await t.win.command('/vt opt get AttackDistance')).toEqual([`AttackDistance = ${20 / 240}`]);
+  });
+
+  it('/vt opt set refuses a value the option does not take, and takes enum names', async () => {
+    const t = await open();
+    expect(await t.win.command('/vt opt set UseArcs true')).toEqual(['UseArcs: "true" is not one of 1 No, 2 At Range, 3 Yes; it stays 1']);
+    expect(t.win.value('UseArcs')).toBe(1);
+    expect(await t.win.command('/vt opt set UseArcs yes')).toEqual(['UseArcs = 3']);
+    expect(await t.win.command('/vt opt set EnableCombat maybe')).toEqual(['EnableCombat: "maybe" is not True or False; it stays true']);
+    expect(t.win.value('EnableCombat')).toBe(true);
+    expect(await t.win.command('/vt opt set AttackDistance 0.125')).toEqual(['AttackDistance = 0.125']);
+    expect(t.win.value('AttackDistance')).toBe(30);
+  });
+
+  it('Route Pause seconds and Edit Meta Rule values: the box shows what the rule keeps', async () => {
+    const t = await open();
+    (t.body.querySelector('[data-vtank-tab="route"]') as HTMLElement).click();
+    const pause = box(t.body, '[data-vtank="pause-seconds"]');
+    type(pause, 'abc');
+    expect(box(t.body, '[data-vtank="pause-seconds"]').value).toBe('5');
+    expect(t.win.message).toMatch(/^Pause: "5abc" is not a number of seconds/);
+    (t.body.querySelector('[data-vtank-tab="meta"]') as HTMLElement).click();
+    (t.body.querySelector('[data-vtank="create-rule"]') as HTMLElement).click();
+    const dlg = () => t.dialogs[0].body;
+    const rule = () => t.win.profile()!.states.find((s) => s.name === 'Default')!.rules.at(-1)!;
+    // A number value: text that isn't one is not kept (it was the default before), and the line shows in the editor.
+    pick(dlg().querySelector('[data-vtank="rule-condition"]'), 'Seconds in State >=');
+    const secs = () => box(dlg(), '[data-vtank-param="seconds"]');
+    const kept = JSON.stringify(rule().when);
+    const shownBefore = secs().value;
+    secs().value = '';
+    type(secs(), 'ten');
+    expect(JSON.stringify(rule().when)).toBe(kept);
+    expect(secs().value).toBe(shownBefore);
+    expect(texts(dlg())).toContain(t.win.message);
+    // Set VT Option: the value is checked against the option named, and a name of an enum value is its number.
+    pick(dlg().querySelector('[data-vtank="rule-action"]'), 'Set VT Option');
+    const name = box(dlg(), '[data-vtank-param="name"]');
+    name.value = '';
+    type(name, 'UseArcs');
+    const val = box(dlg(), '[data-vtank-param="value"]');
+    val.value = '';
+    type(val, 'Yes');
+    expect(rule().do).toEqual([{ kind: 'set-setting', name: 'UseArcs', value: 3 }]);
+    expect(val.value).toBe('3');
+    val.value = '';
+    type(val, 'often');
+    expect(rule().do).toEqual([{ kind: 'set-setting', name: 'UseArcs', value: 3 }]);
+    expect(box(dlg(), '[data-vtank-param="value"]').value).toBe('3');
+    // State name: another state's name (pasted) is refused and the box goes back.
+    const st = box(dlg(), '[data-vtank="state-name"]');
+    st.value = '';
+    type(st, '');
+    expect(t.win.message).toBe('State name: "" is blank; it stays Default.');
+    expect(box(dlg(), '[data-vtank="state-name"]').value).toBe('Default');
+    const st2 = box(dlg(), '[data-vtank="state-name"]');
+    st2.value = 'dead';
+    st2.dispatchEvent(new Event('input'));
+    st2.dispatchEvent(new Event('blur'));
+    expect(t.win.message).toBe('State name: "dead" is another state\'s name; it stays Default.');
+    expect(t.win.profile()!.states.map((s) => s.name)).toEqual(['Default', 'dead', 'back']);
+    expect(box(dlg(), '[data-vtank="state-name"]').value).toBe('Default');
+  });
+});
+
+describe('BUG.routine-settings-reset: nothing on one browser puts the player\'s settings back', () => {
+  /** One browser's storage (localStorage in prod when the bridge keeps no routines), shared by its tabs. */
+  function browser() {
+    const items = new Map<string, string>();
+    const store = { getItem: (k: string) => items.get(k) ?? null, setItem: (k: string, v: string) => { items.set(k, v); } };
+    return { items, store };
+  }
+  /** A tab: the real RoutineSync in local mode over the browser's storage, under a VTankWindow. */
+  function tab(b: ReturnType<typeof browser>, character = 'Claude') {
+    const grant = { token: '', server: 'coldeve', account: 'Jake', local: true as const };
+    const sync: RoutineSync = new RoutineSync(
+      () => ({ bridgeUrl: 'wss://bridge.example/', requestRoutinesGrant: () => queueMicrotask(() => sync.onGrant(grant)) }),
+      (async () => { throw new Error('no bridge'); }) as unknown as typeof fetch,
+      () => b.store,
+    );
+    const events: string[] = [];
+    sync.onStoreEvent = (e) => events.push(`${e.what}/${e.mode}`);
+    const f = fakeSource(docWith());
+    f.source.load = () => sync.load();
+    f.source.check = (since) => sync.check(since);
+    f.source.save = (d, base) => sync.save(d, base);
+    f.source.character = () => character;
+    let t = 1_700_000_000_000;
+    f.source.now = () => (t += 1000);
+    const win = new W.VTankWindow(fakeKit(), f.source, { open: () => {}, close: () => {} });
+    const body = document.createElement('div');
+    const redraw = () => win.render(body, 794, 189, redraw);
+    return { win, sync, events, body, redraw, stored: () => JSON.parse(b.items.get(localRoutinesKey('coldeve', 'Jake'))!) as RoutineDoc };
+  }
+  const seed = (b: ReturnType<typeof browser>, doc: RoutineDoc) => b.items.set(localRoutinesKey('coldeve', 'Jake'), JSON.stringify({ ...doc, server: 'coldeve', account: 'Jake' }));
+  const two = () => { const d = docWith({ ...meta(), name: 'Hunt' }, { ...meta(), name: 'Mine' }); d.updatedAt = '2026-11-17T10:00:00.000Z'; return d; };
+
+  it('the profile picked in Macro Settings is the one shown at the next login, with its own settings', async () => {
+    const b = browser();
+    seed(b, two());
+    const a = tab(b);
+    await a.win.load(a.redraw);
+    expect(a.win.profile()?.name).toBe('Hunt');
+    a.win.tab = 'profiles';
+    a.redraw();
+    pick(a.body.querySelector('[data-vtank="macro-profile"]'), 'Mine');
+    a.win.setValue('AttackDistance', 33, () => {});
+    await flush();
+    expect(a.stored().profiles.find((p) => p.name === 'Mine')?.settings?.AttackDistance).toBe(33);
+    // Before the fix the next login showed the first profile ("Hunt", AttackDistance 20): the edit looked lost.
+    const next = tab(b);
+    await next.win.load(next.redraw);
+    expect(next.win.profile()?.name).toBe('Mine');
+    expect(next.win.value('AttackDistance')).toBe(33);
+    // The pick is the character's own: another character on the account still starts on the first profile,
+    // and the pick is not Mine only.
+    const alt = tab(b, 'Alt');
+    await alt.win.load(alt.redraw);
+    expect(alt.win.profile()?.name).toBe('Hunt');
+    expect(a.stored().characters).toBeUndefined();
+  });
+
+  it('a pick of a profile that is gone falls back to Mine only, then the first profile', async () => {
+    const b = browser();
+    const d = two();
+    d.characters = { Claude: 'Mine' };
+    d.selected = { Claude: 'Deleted' };
+    seed(b, d);
+    const a = tab(b);
+    await a.win.load(a.redraw);
+    expect(a.win.profile()?.name).toBe('Mine');
+  });
+
+  it('two tabs on one account: a save in one keeps what the other stored meanwhile (no last-writer reset)', async () => {
+    const b = browser();
+    seed(b, two());
+    const one = tab(b);
+    const other = tab(b);
+    await one.win.load(one.redraw);
+    await other.win.load(other.redraw);
+    one.win.setValue('AttackDistance', 31, () => {});
+    await flush();
+    // The other tab never re-checked (a phone tab asleep, or inside the 30 s re-check): it edits another setting.
+    other.win.setValue('EnableCombat', false, () => {});
+    await flush();
+    const hunt = other.stored().profiles.find((p) => p.name === 'Hunt')!;
+    // Before the fix the second save stored its whole stale copy: AttackDistance went back to 20.
+    expect(hunt.settings).toMatchObject({ AttackDistance: 31, EnableCombat: false });
+    // The other tab now shows both, and its next save starts from the merged document.
+    expect(other.win.value('AttackDistance')).toBe(31);
+    expect(other.events).toEqual(['merged/local']);
+    other.win.setValue('EnableNav', false, () => {});
+    await flush();
+    expect(other.stored().profiles.find((p) => p.name === 'Hunt')!.settings).toMatchObject({ AttackDistance: 31, EnableCombat: false, EnableNav: false });
+    // Both changed the same setting: the later save's value stands (the newest action).
+    await one.win.refreshStored();
+    one.win.setValue('EnableCombat', true, () => {});
+    await flush();
+    expect(one.stored().profiles.find((p) => p.name === 'Hunt')!.settings?.EnableCombat).toBe(true);
+  });
+
+  it('a profile the other tab added or deleted stays added or deleted (nothing stale comes back)', async () => {
+    const b = browser();
+    seed(b, two());
+    const one = tab(b);
+    const other = tab(b);
+    await one.win.load(one.redraw);
+    await other.win.load(other.redraw);
+    // One tab saves a new profile and deletes "Mine".
+    await one.win.command('/vt settings save Third');
+    const now = one.stored();
+    now.profiles = now.profiles.filter((p) => p.name !== 'Mine');
+    b.items.set(localRoutinesKey('coldeve', 'Jake'), JSON.stringify(now));
+    // The other, stale, edits the shown profile.
+    other.win.setValue('AttackDistance', 12, () => {});
+    await flush();
+    expect(other.stored().profiles.map((p) => p.name)).toEqual(['Hunt', 'Third']);
+    expect(other.stored().profiles[0].settings?.AttackDistance).toBe(12);
+  });
+
+  it('stored routines this browser cannot read are never replaced by an empty document (and the page says so)', async () => {
+    const b = browser();
+    b.items.set(localRoutinesKey('coldeve', 'Jake'), '{"profiles": [trunc');
+    const a = tab(b);
+    await a.win.load(a.redraw);
+    expect(a.win.document).toBeNull();
+    expect(a.win.message).toMatch(/could not be read/);
+    expect(await a.win.saveNow(() => {})).toBe(false);
+    expect(b.items.get(localRoutinesKey('coldeve', 'Jake'))).toBe('{"profiles": [trunc');
+    expect(a.events).toEqual(['unreadable/local']);
+    // Valid JSON that isn't a document (null) is the same.
+    b.items.set(localRoutinesKey('coldeve', 'Jake'), 'null');
+    const c = tab(b);
+    await c.win.load(c.redraw);
+    expect(c.win.document).toBeNull();
+    expect(b.items.get(localRoutinesKey('coldeve', 'Jake'))).toBe('null');
+  });
+
+  it('a reload or a closed tab inside the 400 ms save debounce still stores the last edit (pagehide flush)', async () => {
+    const b = browser();
+    seed(b, two());
+    const a = tab(b);
+    await a.win.load(a.redraw);
+    a.win.setValue('AttackDistance', 44, () => {});
+    // main.ts's pagehide: GameUI.flushAutomationSave → VTankWindow.flushPendingSave. The write lands in the
+    // same task's microtasks, before the page goes (no timer runs after pagehide).
+    a.win.flushPendingSave();
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(a.stored().profiles[0].settings?.AttackDistance).toBe(44);
+    a.win.flushPendingSave(); // nothing pending: nothing more
+  });
+
+  it('the account part of the key ignores case: "Jake" and "jake" are one set of routines', () => {
+    expect(localRoutinesKey('Coldeve', 'Jake')).toBe(localRoutinesKey('coldeve', 'jake'));
+  });
+});
+
+/**
+ * Lead live check of BUG.vtank-advanced-options-reset (2026-11-17): the window's message line was drawn over
+ * the tab's bottom row (Enable Meta on Options, the last row of Advanced Options), and a pick in Advanced
+ * Options' combo box scrolled the list back to the top.
+ */
+describe('VTank window: the message line has its own place; lists keep their scroll across a rebuild', () => {
+  const scroller = (root: Element, sel: string) => root.querySelector(sel) as HTMLElement;
+
+  it('the message sits in the tab strip, after the tabs, never in the tab\'s content; a tab change clears it', async () => {
+    const t = await open();
+    (t.body.querySelector('[data-vtank="force-buff"]') as HTMLElement).click();
+    const msg = t.body.querySelector('[data-vtank="message"]') as HTMLElement;
+    expect(msg.textContent).toBe('Turn Run Macro on to buff.');
+    expect(msg.title).toBe('Turn Run Macro on to buff.');
+    // A sibling of the tabs, in their row; nothing in the content area holds it.
+    const strip = msg.parentElement!;
+    expect(strip.querySelector('[data-vtank-tab="options"]')).not.toBeNull();
+    expect(Array.from(strip.children).indexOf(msg)).toBe(strip.children.length - 1);
+    expect(t.body.querySelector('[data-vtank-option="EnableMeta"]')!.contains(msg)).toBe(false);
+    expect(strip.contains(t.body.querySelector('[data-vtank-option="EnableMeta"]'))).toBe(false);
+    // Another tab: gone.
+    (t.body.querySelector('[data-vtank-tab="route"]') as HTMLElement).click();
+    expect(t.body.querySelector('[data-vtank="message"]')).toBeNull();
+    // Opening Advanced Options clears it too, and a refusal there shows in the strip, not over the list.
+    (t.body.querySelector('[data-vtank-tab="options"]') as HTMLElement).click();
+    (t.body.querySelector('[data-vtank="force-buff"]') as HTMLElement).click();
+    (t.body.querySelector('[data-vtank="advanced"] [data-check]') as HTMLElement).click();
+    expect(t.body.querySelector('[data-vtank="message"]')).toBeNull();
+    const ring = t.body.querySelector('[data-vtank-option="MinimumRingTargets"]') as HTMLInputElement;
+    ring.value = '4x';
+    ring.dispatchEvent(new Event('input'));
+    ring.dispatchEvent(new Event('blur'));
+    const m2 = t.body.querySelector('[data-vtank="message"]') as HTMLElement;
+    expect(m2.textContent).toMatch(/^MinimumRingTargets: "4x" is not a number/);
+    expect(scroller(t.body, '[data-vtank="advanced-list"]').contains(m2)).toBe(false);
+    expect(m2.parentElement!.querySelector('[data-vtank-tab]')).not.toBeNull();
+    (t.body.querySelector('[data-vtank="advanced-close"]') as HTMLElement).click();
+    expect(t.body.querySelector('[data-vtank="message"]')).toBeNull();
+  });
+
+  it('Advanced Options keeps its scroll after a combo pick, a check toggle and a refused box', async () => {
+    const t = await open();
+    (t.body.querySelector('[data-vtank="advanced"] [data-check]') as HTMLElement).click();
+    scroller(t.body, '[data-vtank="advanced-list"]').scrollTop = 700;
+    expect(scroller(t.body, '[data-vtank="advanced-list"]').scrollTop).toBe(700);
+    pick(t.body.querySelector('[data-vtank-option="UseArcs"]'), 'Yes');
+    expect(t.win.value('UseArcs')).toBe(3);
+    expect(scroller(t.body, '[data-vtank="advanced-list"]').scrollTop).toBe(700);
+    (t.body.querySelector('[data-vtank-advanced="UseRecklessness"] [data-check]') as HTMLElement).click();
+    expect(t.win.value('UseRecklessness')).toBe(false);
+    expect(scroller(t.body, '[data-vtank="advanced-list"]').scrollTop).toBe(700);
+    const ring = t.body.querySelector('[data-vtank-option="MinimumRingTargets"]') as HTMLInputElement;
+    ring.value = 'x';
+    ring.dispatchEvent(new Event('input'));
+    ring.dispatchEvent(new Event('blur'));
+    expect(t.win.message).toMatch(/^MinimumRingTargets/);
+    expect(scroller(t.body, '[data-vtank="advanced-list"]').scrollTop).toBe(700);
+    // Closing and reopening is a new view: it starts at the top.
+    (t.body.querySelector('[data-vtank="advanced-close"]') as HTMLElement).click();
+    (t.body.querySelector('[data-vtank="advanced"] [data-check]') as HTMLElement).click();
+    expect(scroller(t.body, '[data-vtank="advanced-list"]').scrollTop).toBe(0);
+  });
+
+  it('Monsters, Meta and Route lists keep their scroll across an edit; another tab starts at the top', async () => {
+    const t = await open();
+    (t.body.querySelector('[data-vtank-tab="monsters"]') as HTMLElement).click();
+    scroller(t.body, '[data-vtank-list="monsters"]').scrollTop = 120;
+    t.redraw();
+    expect(scroller(t.body, '[data-vtank-list="monsters"]').scrollTop).toBe(120);
+    (t.body.querySelector('[data-vtank-tab="meta"]') as HTMLElement).click();
+    expect(scroller(t.body, '[data-vtank="meta-list"]').scrollTop).toBe(0);
+    scroller(t.body, '[data-vtank="meta-list"]').scrollTop = 40;
+    t.redraw();
+    expect(scroller(t.body, '[data-vtank="meta-list"]').scrollTop).toBe(40);
+    (t.body.querySelector('[data-vtank-tab="route"]') as HTMLElement).click();
+    scroller(t.body, '[data-vtank="waypoints"]').scrollTop = 30;
+    t.redraw();
+    expect(scroller(t.body, '[data-vtank="waypoints"]').scrollTop).toBe(30);
   });
 });

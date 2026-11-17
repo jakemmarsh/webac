@@ -13,6 +13,9 @@
  *   opened, runs, run time, imports, what GoArrow answered);
  * - nav_idle: a run with navigation on stood still (a closed reason, indoors
  *   or not, the route's point count; BUG.vtank-nav-stands-still).
+ * - routines_store: the routines store merged another tab's or device's
+ *   changes under a save, or couldn't read the stored document, and which
+ *   store (bridge / browser); BUG.routine-settings-reset.
  *
  * Each accepted event becomes one JSON log line, `client_automation`, with
  * the page's `trace`, era and server, so usage counts by world.
@@ -25,7 +28,7 @@
 import { TRACE_PATTERN, lateField } from './clientPreworld.js';
 import { eidField } from './eventIds.js';
 
-export const AUTOMATION_OUTCOMES = ['automation_offered', 'routine_started', 'routine_stopped', 'routine_error', 'automation_summary', 'nav_idle'] as const;
+export const AUTOMATION_OUTCOMES = ['automation_offered', 'routine_started', 'routine_stopped', 'routine_error', 'automation_summary', 'nav_idle', 'routines_store'] as const;
 export type AutomationOutcome = typeof AUTOMATION_OUTCOMES[number];
 /** The plugin windows (renderer AutomationReporter PLUGIN_WINDOWS). */
 export const PLUGIN_WINDOWS = [
@@ -42,6 +45,9 @@ export const IMPORT_KINDS = ['met', 'nav', 'utl', 'usd', 'af', 'other'] as const
 export const AUTOMATION_EXITS = ['closed_tab', 'logout', 'disconnected'] as const;
 /** Why a run's navigation stood still (renderer AutomationReporter NAV_IDLE_REASONS). */
 export const NAV_IDLE_REASONS = ['no_route', 'empty_route', 'route_done', 'module_off', 'far', 'no_path', 'held', 'fighting', 'looting', 'buffing', 'other'] as const;
+/** What the routines store did, and which store (renderer AutomationReporter ROUTINE_STORE_WHATS / _MODES). */
+export const ROUTINE_STORE_WHATS = ['merged', 'unreadable'] as const;
+export const ROUTINE_STORE_MODES = ['bridge', 'local'] as const;
 /** What GoArrow answered the player, counted per session (@ac/shared GOARROW_REPLIES; the test pins them equal). */
 export const GOARROW_REPLIES = [
   'help', 'arrow_on', 'arrow_off', 'no_map', 'to_set', 'to_waited', 'to_unknown', 'route_set', 'reset', 'lock',
@@ -90,7 +96,8 @@ export interface ClientAutomationSummary extends Ids {
   importKinds: Array<typeof IMPORT_KINDS[number]> | null;
   goarrow: Record<typeof GOARROW_REPLIES[number], number> | null;
 }
-export type ClientAutomationEvent = ClientAutomationOffered | ClientRoutineStarted | ClientRoutineStopped | ClientRoutineError | ClientAutomationSummary | ClientNavIdle;
+export interface ClientRoutinesStore extends Ids { outcome: 'routines_store'; what: typeof ROUTINE_STORE_WHATS[number] | null; mode: typeof ROUTINE_STORE_MODES[number] | null }
+export type ClientAutomationEvent = ClientAutomationOffered | ClientRoutineStarted | ClientRoutineStopped | ClientRoutineError | ClientAutomationSummary | ClientNavIdle | ClientRoutinesStore;
 
 function pick<T extends string>(v: unknown, allowed: readonly T[]): T | null {
   return allowed.find(a => a === v) ?? null;
@@ -157,6 +164,8 @@ export function sanitizeClientAutomation(body: unknown): ClientAutomationEvent |
         outcome, ...ids, kind: pick(b.kind, ROUTINE_KINDS), driver: pick(b.driver, ROUTINE_DRIVERS),
         reason: pick(b.reason, NAV_IDLE_REASONS), indoors: bool(b.indoors), points: uint(b.points, 10_000),
       };
+    case 'routines_store':
+      return { outcome, ...ids, what: pick(b.what, ROUTINE_STORE_WHATS), mode: pick(b.mode, ROUTINE_STORE_MODES) };
     case 'automation_summary':
       return {
         outcome, ...ids,

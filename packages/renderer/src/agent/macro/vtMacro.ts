@@ -28,13 +28,13 @@
  * through the UI's own paths. Spell families are built once per spell table,
  * so each era's own table decides what exists.
  */
-import { resolveVtankIds, SPELL_FLAG_SELF_TARGETED, vtItemIs, vtOption, vtStoredValue, type PlanItem, type PlanSkill, type PlanSpell, type RoutineProfile, type Stance, type VtankProfileData } from '@ac/shared';
+import { PropertyInt, resolveVtankIds, SPELL_FLAG_SELF_TARGETED, vtItemIs, vtOption, vtStoredValue, type PlanItem, type PlanSkill, type PlanSpell, type RoutineProfile, type Stance, type VtankProfileData } from '@ac/shared';
 import { AgentApi } from '../AgentApi.ts';
 import { beyondSetting } from '../beyondVtank.ts';
 import type { AgentResult } from '../types.ts';
 import { buffTimeText } from '../format.ts';
 import { buildBuffFamilies, planBuffs, type BuffFamilies } from './buffPlan.ts';
-import { blowPoints, buildCombatFamilies, indexMonsterTable, planCombat, planPet, type CombatFamilies, type CombatInput, type CombatMonster, type MonsterFacts } from './combatPlan.ts';
+import { blowPoints, buildCombatFamilies, indexMonsterTable, petUnusable, planCombat, planPet, type CombatFamilies, type CombatInput, type CombatMonster, type MonsterFacts } from './combatPlan.ts';
 import { FellowManager } from './fellowManager.ts';
 import { buildRechargeFamilies, planRecharge, type RechargeFamilies } from './rechargePlan.ts';
 import { planPeaSplit, type SplitTier } from './peaPlan.ts';
@@ -55,7 +55,7 @@ import type { CombatModeName } from '../AgentApi.ts';
 import { isQuickBuff, itemCooldown, planBuffItem, rebuffThreshold, VT_GEM_FOOD_ITEMS } from './buffItems.ts';
 import type { DrainRow } from './drainPlan.ts';
 import { itemCastLine } from './itemDebuffs.ts';
-import { planPetRefill } from './petRefill.ts';
+import { isSummoningEssence, petRefusal, planPetRefill, SUMMONING_SKILL } from './petRefill.ts';
 import { wieldedWeapon, wornShield } from './wieldedWeapon.ts';
 
 /** A spell that dispels negative Life Magic (by its description in the era's own SpellTable). */
@@ -661,8 +661,12 @@ export class VtMacro {
       if (!d && wantsData && !this.asked.has(i.guid)) { this.asked.add(i.guid); void this.api.appraise(i.guid, { quiet: true }); }
       // The examination's spells by id (a weapon's cast-on-strike, a grenade's; itemDebuffs.ts).
       const spells = d?.spells?.length && ids ? d.spells.flatMap((n) => { const id = ids.get(n.toLowerCase()); return id === undefined ? [] : [id]; }) : [];
+      // Uses left (Structure 92) as the server last updated them (PublicUpdatePropertyInt after each summon, refill or kit
+      // use), over the examination's: an essence examined at 50 charges read 50 forever, so its refill never came and a
+      // spent one was tried again and again (2026-11-17).
+      const ints = d && i.structure !== undefined && d.int[PropertyInt.Structure] !== i.structure ? { ...d.int, [PropertyInt.Structure]: i.structure } : d?.int;
       return {
-        guid: i.guid, name: i.name, ...(i.stack !== undefined ? { stack: i.stack } : {}), ...(d ? { ints: d.int, floats: d.float, dids: d.did } : {}), ...(i.where === 'equipped' ? { equipped: true } : {}),
+        guid: i.guid, name: i.name, ...(i.stack !== undefined ? { stack: i.stack } : {}), ...(d ? { ints, floats: d.float, dids: d.did } : {}), ...(i.where === 'equipped' ? { equipped: true } : {}),
         ...(i.uiEffects ? { uiEffects: i.uiEffects } : {}), ...(i.itemType ? { itemType: i.itemType } : {}), ...(i.fits ? { fits: i.fits } : {}), ...(i.slot ? { slot: i.slot } : {}), ...(i.ammoType ? { ammoType: i.ammoType } : {}),
         ...(spells.length ? { spells } : {}),
       };
@@ -774,12 +778,18 @@ export class VtMacro {
    * VirindiTank's Summon Pets (facts from MOSS SummonPetRule, PetAutomation): with combat on, Summoning
    * (skill 54) trained and at least Pet Min. Monsters within pet range (counted for summoning: PetDmg not
    * None), the best usable essence on the Items tab for the chosen monster (combatPlan planPet: usable,
-   * ranked by element) is used. Held back while:
+   * ranked by element) is used. An essence is one whose examination says Summoning is needed to use it
+   * (petRefill.isSummoningEssence: ACE never sends PetClass). Held back while:
    * - the summoning cooldown runs (the essence's SharedCooldown, PropertyInt 280: the client's cooldown
    *   enchantment, or the macro's own clock from its CooldownDuration);
    * - the server hasn't answered the last summon (5 s at most);
-   * - a refused summon waits 1 s before it is tried again;
+   * - a refused summon waits REFUSED_RETRY_MS before it is tried again; one refused for its Summoning Mastery
+   *   ("You must be a Naturalist to use the …": ACE sends no essence's mastery, so this is the only word of
+   *   it) is left out until your mastery changes, and the next essence is tried;
    * - there is no room 3 m ahead for the pet to appear (the client's collision sweep; can't tell = room).
+   * A summon that works has no reply line (ACE PetDevice.ActOnUse: the charges and the cooldown change), so
+   * it is used as a routine uses a carried item and the fight goes on, not ac_use's 10 s wait for a reply.
+   * When nothing can be summoned with a fight in pet range, the History says why once (petSilence).
    * Before 2026-10-11 a summon simply waited 45 s, whatever the server said. Summoning exists only where
    * the era's skill table has it: an era without essences has no device, and the window hides the controls.
    */
@@ -787,37 +797,113 @@ export class VtMacro {
     if (!(settings.SummonPets === true || settings.SummonPets === 'true')) return null;
     const t = this.now();
     if (t < this.petRetryAt) return null;
-    const summoning = base.skills.find((k) => k.id === 54);
+    const summoning = base.skills.find((k) => k.id === SUMMONING_SKILL);
     if (!summoning || summoning.training === 'untrained') return null;
     const range = VtMacro.petRange(settings);
-    const devices = this.items(p.vtank.items.map((x) => x.name)).filter((i) => i.ints?.[266] !== undefined);
+    const mastery = this.api.charInt(PropertyInt.SummoningMastery);
+    if (mastery !== this.petMasteryOf) { this.petMasteryOf = mastery; this.petWrongMastery.clear(); }
+    const listed = this.items(p.vtank.items.map((x) => x.name)).filter(isSummoningEssence);
+    if (listed.length) this.petSaid.delete('none');
+    const devices = listed.filter((d) => !this.petWrongMastery.has(d.name.toLowerCase()));
     // The cooldown every essence shares.
     for (const d of devices) {
       const cd = itemCooldown(d);
       if (cd && (this.api.cooldownRemaining(cd.id) > 0 || (this.cooldownUntil.get(cd.id) ?? 0) > t)) return null;
     }
     const me = this.api.self();
-    const mastery = this.api.charInt(362);
-    const pet = planPet({ ...base, monsters }, { range, minMonsters: Math.max(1, Number(settings.PetMonsterDensity) || 1), devices, ...(me ? { level: me.level } : {}), ...(mastery !== undefined ? { mastery } : {}) });
-    if (!pet) return null;
+    const minMonsters = Math.max(1, Number(settings.PetMonsterDensity) || 1);
+    const who = { ...(me ? { level: me.level } : {}), ...(mastery !== undefined ? { mastery } : {}) };
+    const pet = planPet({ ...base, monsters }, { range, minMonsters, devices, ...who });
+    if (!pet) return this.petSilence(p, base, monsters, listed, { range, minMonsters, ...who });
     if (this.api.roomAhead(3) === false) return null;
     return { label: `pet: ${pet.why}`, run: async () => {
-      // Held until the server answers (api.use waits for it); a refusal waits 1 s, a summon its cooldown.
+      // Held until the server answers; a refusal waits REFUSED_RETRY_MS, a summon its cooldown.
       this.petRetryAt = this.now() + 5_000;
-      const res = await this.api.use(pet.device.guid);
-      // A refusal (skill, level, an essence out of charges) is the same answer a second later: it waits as a refused buff
-      // item does (itemHeld's 30 s), not 1 s (BUG.autowield-full-pack-spam sweep).
+      const since = this.api.currentSeq();
+      const res = await this.api.useCarried(pet.device.guid);
+      // The client couldn't send it: the same a moment later, so it waits as a refused buff item does (BUG.autowield-full-pack-spam sweep).
       if (!res.ok) { this.petRetryAt = this.now() + VtMacro.REFUSED_RETRY_MS; return res; }
+      // ACE answers a refusal with a line before its UseDone; a summon with the cooldown enchantment and the charge update.
       const cd = itemCooldown(pet.device);
+      const left = pet.device.ints?.[PropertyInt.Structure];
+      let refusal: ReturnType<typeof petRefusal> = null;
+      for (let w = 0; w < VtMacro.PET_ANSWER_POLLS; w++) {
+        refusal = petRefusal(this.api.eventsSince(since).flatMap((e) => (e.type === 'chat' || e.type === 'use-failed' ? [e.text.replace(/^\(\w+\) /, '')] : [])), pet.device.name);
+        if (refusal) break;
+        if (cd && this.api.cooldownRemaining(cd.id) > 0) break;
+        const now = this.api.inventory().find((i) => i.guid === pet.device.guid)?.structure;
+        if (left !== undefined && now !== undefined && now < left) break;
+        await new Promise((ok) => setTimeout(ok, 100));
+      }
+      if (refusal?.mastery) {
+        // Never this essence again while your mastery is what it is; the next listed one at once.
+        this.petWrongMastery.set(pet.device.name.toLowerCase(), refusal.mastery);
+        this.petRetryAt = this.now();
+        return { ok: false, message: `${res.message}\n  ${refusal.line}: ${pet.device.name} needs a ${refusal.mastery} (your Summoning Mastery isn't), so it is left out from now on` };
+      }
+      if (refusal) {
+        this.petRetryAt = this.now() + VtMacro.REFUSED_RETRY_MS;
+        return { ok: false, message: `${res.message}\n  the server refused it: ${refusal.line} (tried again in ${VtMacro.REFUSED_RETRY_MS / 1000} s)` };
+      }
       if (cd) this.cooldownUntil.set(cd.id, this.now() + cd.seconds * 1000);
       this.petRetryAt = this.now();
       return res;
     } };
   }
+  /** How many 100 ms looks a summon takes for the server's answer before going on (a refusal comes with the UseDone). */
+  static readonly PET_ANSWER_POLLS = 10;
   /** How long a refused summon, refill, dispel item or buff item waits before it is asked again (ms). */
   static readonly REFUSED_RETRY_MS = 30_000;
   /** When Summon Pets may try again (the server's answer to the last summon, a refusal's REFUSED_RETRY_MS). */
   private petRetryAt = -Infinity;
+  /** Essences (lower-case name) the server refused for their Summoning Mastery, with the mastery it named. */
+  private petWrongMastery = new Map<string, string>();
+  /** The Summoning Mastery those refusals were for (a new mastery clears them). */
+  private petMasteryOf: number | undefined = undefined;
+  /** Summon Pets' "why nothing" lines already said (each once, until the reason changes). */
+  private petSaid = new Set<string>();
+  /** Carried essences not on the Items tab, examined quietly for the "add it" line: when asked. */
+  private petLookAt = new Map<number, number>();
+
+  /**
+   * Why Summon Pets does nothing with a fight in pet range, said once in the History (a player with an
+   * essence in the pack and Summon Pets on saw nothing happen and no reason): no summoning essence on the
+   * Items tab (VTank summons only listed pets, and its generated profile lists those carried when it is
+   * made: an essence got later must be added), naming the carried ones; or every listed one unusable, with
+   * each one's reason (skill, level, charges, mastery). Null when there is nothing (new) to say.
+   */
+  private petSilence(p: RoutineProfile & { vtank: VtankProfileData }, base: Omit<CombatInput, 'monsters'>, monsters: CombatMonster[], listed: PlanItem[], o: { range: number; minMonsters: number; level?: number; mastery?: number }): VtStep | null {
+    // Only with a fight that would want a pet: planPet with a stand-in essence anyone may use.
+    const probe: PlanItem = { guid: 0, name: '(any essence)', ints: {} };
+    if (!planPet({ ...base, monsters }, { ...o, devices: [probe] })) return null;
+    const t = this.now();
+    if (!listed.length) {
+      if (this.petSaid.has('none')) return null;
+      const tab = new Set(p.vtank.items.map((x) => x.name.toLowerCase()));
+      const inv = this.api.inventory();
+      // Listed by name but not examined yet: wait for that before calling the tab empty.
+      if (inv.some((i) => tab.has(i.name.toLowerCase()) && !this.api.itemData(i.guid))) return null;
+      // Carried essences not on the tab: examined quietly (once) so the line can name them.
+      const waiting = inv.filter((i) => !tab.has(i.name.toLowerCase()) && /essence/i.test(i.name) && !this.api.itemData(i.guid));
+      for (const i of waiting) if (!this.petLookAt.has(i.guid)) { this.petLookAt.set(i.guid, t); void this.api.appraise(i.guid, { quiet: true }); }
+      if (waiting.some((i) => t - (this.petLookAt.get(i.guid) ?? t) < 3000)) return null;
+      const carried = [...new Set(inv.filter((i) => !tab.has(i.name.toLowerCase()) && isSummoningEssence({ ints: this.api.itemData(i.guid)?.int })).map((i) => i.name))];
+      this.petSaid.add('none');
+      const message = carried.length
+        ? `you carry ${carried.join(', ')}: add ${carried.length > 1 ? 'one' : 'it'} with Add on the Items tab (VTank summons only the pets listed there; choosing [Default] on the Profiles tab again lists the essences you carry)`
+        : 'nothing to summon with (VTank summons only the pets listed on the Items tab)';
+      return { label: 'Summon Pets: no summoning essence on the Items tab', run: async () => ({ ok: true, message }) };
+    }
+    const why = listed.map((d) => {
+      const m = this.petWrongMastery.get(d.name.toLowerCase());
+      return m ? `${d.name} needs a ${m}` : petUnusable(d, base.skills, o.level, o.mastery);
+    });
+    if (why.some((w) => !w)) return null;
+    const key = `unusable:${why.join('|')}`;
+    if (this.petSaid.has(key)) return null;
+    this.petSaid.add(key);
+    return { label: 'Summon Pets: no essence on the Items tab you can use', run: async () => ({ ok: true, message: why.join('; ') }) };
+  }
 
   /**
    * VirindiTank's pet refills (petRefill.ts): an Items-tab essence down to `option`'s charge count is
@@ -825,7 +911,7 @@ export class VtMacro {
    */
   private refillStep(p: RoutineProfile & { vtank: VtankProfileData }, settings: Record<string, string | number | boolean>, stance: Stance, option: 'PetRefillCount-Normal' | 'PetRefillCount-Idle'): VtStep | null {
     if (!p.vtank.items.length || this.now() < this.refillRetryAt) return null;
-    const devices = this.items(p.vtank.items.map((x) => x.name)).filter((i) => i.ints?.[266] !== undefined);
+    const devices = this.items(p.vtank.items.map((x) => x.name)).filter(isSummoningEssence);
     if (!devices.length) return null;
     const r = planPetRefill(devices, this.items(), Number(opt(settings, option)) || 0);
     if (!r) return null;

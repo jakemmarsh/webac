@@ -1370,10 +1370,15 @@ async function main() {
 
   runtimeConfig = await loadRuntimeConfig();
 
+  // OBS.login-refusal-identity — this browser profile's random id (telemetry/LoginTags.ts), read once for every reporter.
+  const pageBrowserId = browserId(realLocalStorage());
   errorReporter = new ErrorReporter({
     endpoint: ErrorReporter.endpointFor(runtimeConfig.bridgeUrl),
     build: (import.meta.env.VITE_ACJS_BUILD_ID as string | undefined) ?? DEV_BUILD_ID,
     screen: () => reportScreen(),
+    // OBS.client-error-identity — the page trace (the PreworldReporter below makes it) and the browser id, as the pre-world lines carry.
+    trace: () => preworldReporter?.trace,
+    browserId: pageBrowserId,
   });
   errorReporter.install(window);
   errorReporter.watchCanvas(canvas);
@@ -1385,8 +1390,7 @@ async function main() {
     screen: () => preworldScreen(),
     chargenStep: () => preworldChargenStep(),
     loginRefusals: loginRefusalMemory,
-    // OBS.login-refusal-identity — this browser profile's random id (telemetry/LoginTags.ts).
-    browserId: browserId(realLocalStorage()),
+    browserId: pageBrowserId,
   });
   preworldReporter.install(window, document);
   worldReporter = new WorldReporter({
@@ -6945,7 +6949,7 @@ async function main() {
   // CORE.3.f — retail force-saves the PlayerModule on exit
   // (CPlayerModule::SaveToServer(true)); the browser equivalent is a
   // best-effort flush when the page is being hidden/unloaded.
-  window.addEventListener('pagehide', () => gameUI.flushChatOptionsSave());
+  window.addEventListener('pagehide', () => { gameUI.flushChatOptionsSave(); gameUI.flushAutomationSave(); });
   // TELEMETRY.refusal-events — every spew line the client raises goes to the refusal reporter.
   gameUI.refusalTap = (text) => refusalReporter?.clientSpew(text);
   document.addEventListener('visibilitychange', () => {
@@ -8616,7 +8620,7 @@ async function main() {
         loadDirectory: () => loadWorldDirectory(bridgeUrl),
         // BUG.world-list-unreachable — the bridge never saw these requests, so report through the web origin.
         onWorldListFailed: (f) => {
-          reportFromPage(worldListFailedReport(f, bridgeUrl, (import.meta.env.VITE_ACJS_BUILD_ID as string | undefined) ?? DEV_BUILD_ID));
+          reportFromPage({ ...worldListFailedReport(f, bridgeUrl, (import.meta.env.VITE_ACJS_BUILD_ID as string | undefined) ?? DEV_BUILD_ID), trace: preworldReporter?.trace, bid: pageBrowserId });
         },
         sourceUrl: runtimeConfig.sourceUrl,
         siteLinks: runtimeConfig.siteLinks,
@@ -17964,6 +17968,8 @@ async function main() {
     // Whatever this page stores (Claude's `ac_routines set` through the connector too) reaches the VirindiTank
     // window's model at once, so the plugins' stand-by loot sets aren't the copy loaded at login.
     routineSync.onStored((doc) => gameUI.automationStoredElsewhere(doc));
+    // BUG.routine-settings-reset — a save that kept another tab's / device's changes, or a stored document that couldn't be read.
+    routineSync.onStoreEvent = (e) => automationReporter?.routinesStore(e.what, e.mode);
     // AGENT.automation-allowlist — the automation UI shows on dev / URL-override builds, and on
     // playwebac.com for accounts the bridge allowlists (BRIDGE_AUTOMATION_ACCOUNTS, checked against
     // the account the server reported). The bridge's answer to the routines request carries it.
@@ -18328,11 +18334,14 @@ async function main() {
             ...gearNums(i),
             ...(ammoOf(i.id >>> 0) ? { ammoType: ammoOf(i.id >>> 0) } : {}),
             ...(i.weenieClassId ? { wcid: i.weenieClassId } : {}),
-            ...(serverObjectManager?.getObject(i.id >>> 0)?.uiEffects ? { uiEffects: serverObjectManager.getObject(i.id >>> 0)!.uiEffects } : {}),
+            // UiEffects (a summoning essence's element glow): the carried item's own record, kept current by
+            // PublicUpdatePropertyInt, else a world object's; a pack item need not have one.
+            ...((i.uiEffects || serverObjectManager?.getObject(i.id >>> 0)?.uiEffects) ? { uiEffects: (i.uiEffects || serverObjectManager?.getObject(i.id >>> 0)?.uiEffects)! } : {}),
             // Salvaging (VTank's Salvage loot action and CombineSalvage): the public description's material,
-            // units, workmanship (a bag's average) and Retained bit.
-            ...(i.materialType ? { materialType: i.materialType } : {}),
-            ...(i.structure ? { structure: i.structure } : {}),
+            // units, workmanship (a bag's average) and Retained bit. Structure is also uses left (an essence's charges, a
+            // kit's uses), as the server last updated it: 0 of a MaxStructure is said, not dropped (a spent essence read
+            // as unknown and the macro's summon fell back to the examination's 50).
+            ...(i.structure || (i.structure === 0 && i.maxStructure) ? { structure: i.structure } : {}),
             ...(i.workmanship ? { workmanship: i.workmanship } : {}),
             ...(i.objectDescFlags !== undefined ? { objectDescFlags: i.objectDescFlags } : {}),
           }));
@@ -19057,7 +19066,7 @@ async function main() {
         const metaTidyPass = new TidyPass(agentApi.routine.tidy, agentApi, (text) => gameUI.addSystemMessage(`[Automation] ${text}`, chatColorFor(ChatMessageType.System), ChatMessageType.System));
         gameUI.setAutomationSource({
           load: () => routineSync.load(),
-          save: (doc) => routineSync.save(doc),
+          save: (doc, base) => routineSync.save(doc, base),
           check: (since) => routineSync.check(since),
           status: () => agentApi.routine.status(),
           stats: () => agentApi.routine.statsNow(),
@@ -20079,7 +20088,7 @@ async function main() {
                 netErrorId: event.netErrorId ?? null, connectUrl, bridgeUrl, sinceLoginMs: Date.now() - launcherLoginAt,
                 build: (import.meta.env.VITE_ACJS_BUILD_ID as string | undefined) ?? DEV_BUILD_ID,
               });
-              if (report) { launcherLoginAt = null; reportFromPage(report); }
+              if (report) { launcherLoginAt = null; reportFromPage({ ...report, trace: preworldReporter?.trace, bid: pageBrowserId }); }
             }
             raiseNetError(netNotice);
             break;

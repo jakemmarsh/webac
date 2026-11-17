@@ -172,5 +172,6 @@ export function normalizeRoutineDoc(doc: unknown): number {
     if (n !== list[i]) { list[i] = n; fixed++; }
   }
   if (d.characters !== undefined && !isObj(d.characters)) { delete d.characters; fixed++; }
+  if (d.selected !== undefined && !(isObj(d.selected) && Object.values(d.selected).every((v) => typeof v === 'string'))) { delete d.selected; fixed++; }
   return fixed;
 }

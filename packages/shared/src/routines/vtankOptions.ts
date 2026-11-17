@@ -100,23 +100,23 @@ export const VT_OPTIONS: VtOption[] = [
   o('ClearLevelBoostFlagOnCast', 'bool', true, 'Recharge', { help: 'When true, RechargeBoost only applies to the first spell cast after switching to magic mode', engine: true }),
   // Melee / spell combat
   o('EnableCombat', 'bool', true, 'Melee Combat', { label: 'Enable Combat', help: 'Enable/Disable Combat', engine: true }),
-  o('DefaultMeleeAttackHeight', 'enum', 2, 'Melee Combat', { values: { 1: 'High', 2: 'Medium', 3: 'Low' }, engine: true }),
+  o('DefaultMeleeAttackHeight', 'enum', 2, 'Melee Combat', { help: 'The height melee attacks are made at', values: { 1: 'High', 2: 'Medium', 3: 'Low' }, engine: true }),
   o('TargetLock', 'bool', false, 'Melee Combat', { engine: true }),
-  o('TargetSelectMethod', 'enum', 3, 'Melee Combat', { values: { 1: 'By Range', 2: 'By Angle', 3: 'Both' }, engine: true }),
-  o('TargetSelectAngleRange', 'range', yd(0.0208333), 'Melee Combat', { engine: true }),
-  o('DebuffEachFirst', 'enum', 1, 'Melee Combat', { values: { 1: 'One', 2: 'Priority', 3: 'All' }, engine: true }),
+  o('TargetSelectMethod', 'enum', 3, 'Melee Combat', { help: 'How the next target is picked: by distance, by least turn, or Both (least turn within TargetSelectAngleRange, else distance)', values: { 1: 'By Range', 2: 'By Angle', 3: 'Both' }, engine: true }),
+  o('TargetSelectAngleRange', 'range', yd(0.0208333), 'Melee Combat', { help: 'With TargetSelectMethod Both, targets nearer than this are picked by least turn', engine: true }),
+  o('DebuffEachFirst', 'enum', 1, 'Melee Combat', { help: 'One: debuff a monster, then attack it. Priority: debuff every monster of one priority, then attack them. All: debuff everything before attacking', values: { 1: 'One', 2: 'Priority', 3: 'All' }, engine: true }),
   o('AutoAttackPower', 'bool', true, 'Melee Combat', { engine: true }),
-  o('DebuffSelectionMethod', 'enum', 2, 'Melee Combat', { values: { 1: 'Spell Level', 2: 'Skill' }, engine: true }),
+  o('DebuffSelectionMethod', 'enum', 2, 'Melee Combat', { help: 'Select \'Skill\' when fighting monsters with high magic defense', values: { 1: 'Spell Level', 2: 'Skill' }, engine: true }),
   o('UseRecklessness', 'bool', true, 'Melee Combat', { engine: true }),
   o('SpellDiffExcessThreshold-Hunt', 'int', 25, 'Spell Combat', { engine: true }),
   o('MinimumRingTargets', 'int', 4, 'Spell Combat', { engine: true }),
   o('SwitchWandsToDebuff', 'bool', false, 'Spell Combat', { aliases: ['SwitchWandToDebuff'], engine: true }),
   o('DoJiggle', 'bool', false, 'Spell Combat'),
-  o('UseArcs', 'enum', 1, 'Spell Combat', { values: { 1: 'No', 2: 'At Range', 3: 'Yes' }, engine: true }),
-  o('ArcRange', 'range', yd(0.0208333), 'Spell Combat', { engine: true }),
+  o('UseArcs', 'enum', 1, 'Spell Combat', { help: 'Casts arcs instead of bolts when both are known at the best level: always (Yes), or only at targets past ArcRange (At Range)', values: { 1: 'No', 2: 'At Range', 3: 'Yes' }, engine: true }),
+  o('ArcRange', 'range', yd(0.0208333), 'Spell Combat', { help: 'With UseArcs At Range, the least distance (yards) at which arcs are cast', engine: true }),
   o('DebuffPrecastSeconds', 'int', 5, 'Spell Combat', { engine: true }),
   o('SummonPets', 'bool', true, 'Spell Combat', { label: 'Summon Pets', engine: true }),
-  o('PetRangeMode', 'enum', 0, 'Spell Combat', { label: 'Custom Pet Range:', values: { 0: 'AttackDistance', 1: 'PetCustomRange' }, engine: true }),
+  o('PetRangeMode', 'enum', 0, 'Spell Combat', { label: 'Custom Pet Range:', help: 'Which range pets are summoned for: Monster Range (AttackDistance) or PetCustomRange', values: { 0: 'AttackDistance', 1: 'PetCustomRange' }, engine: true }),
   o('PetCustomRange', 'range', yd(0.0208333), 'Spell Combat', { engine: true }),
   o('PetRefillCount-Idle', 'int', 3, 'Spell Combat', { engine: true }),
   o('PetRefillCount-Normal', 'int', 1, 'Spell Combat', { engine: true }),
@@ -158,8 +158,8 @@ export const VT_OPTIONS: VtOption[] = [
   o('RebuffTimeRemainingSeconds', 'int', 300, 'Buffing', { engine: true }),
   o('BuffProfile-Prots', 'string', 'ALFCBPS', 'Buffing', { engine: true }),
   o('BuffProfile-Banes', 'string', 'ALFCBPS', 'Buffing', { engine: true }),
-  o('BuffProfile_Prots', 'enum', 2, 'Buffing', { values: { 1: 'Custom', 2: 'All', 3: 'None', 4: 'B', 5: 'BPS', 6: 'BPSA', 7: 'ALFC', 8: 'BPSAC' }, engine: true }),
-  o('BuffProfile_Banes', 'enum', 2, 'Buffing', { values: { 1: 'Custom', 2: 'All', 3: 'None', 4: 'B', 5: 'BPS', 6: 'BPSA', 7: 'BPSAC', 8: 'ALFC' }, engine: true }),
+  o('BuffProfile_Prots', 'enum', 2, 'Buffing', { help: 'Which protections to cast (B Blade, P Pierce, S Slash, A Acid, L Lightning, F Fire, C Cold); Custom uses the letters in BuffProfile-Prots', values: { 1: 'Custom', 2: 'All', 3: 'None', 4: 'B', 5: 'BPS', 6: 'BPSA', 7: 'ALFC', 8: 'BPSAC' }, engine: true }),
+  o('BuffProfile_Banes', 'enum', 2, 'Buffing', { help: 'Which banes to cast (letters as for protections); Custom uses the letters in BuffProfile-Banes', values: { 1: 'Custom', 2: 'All', 3: 'None', 4: 'B', 5: 'BPS', 6: 'BPSA', 7: 'BPSAC', 8: 'ALFC' }, engine: true }),
   o('BuffCastRecast_Seconds', 'int', 30, 'Buffing', { engine: true }),
   o('BuffCastRecastReset_Seconds', 'int', 30, 'Buffing', { engine: true }),
   o('FastCastBuffs', 'bool', false, 'Buffing', { help: 'Moves you backwards during casting, use with caution', engine: true }),
@@ -173,7 +173,7 @@ export const VT_OPTIONS: VtOption[] = [
   o('SpellCompMin-Critical', 'int', 4, 'Crafting', { help: 'Fewer of a component than this: split a pea before healing', engine: true }),
   o('SpellCompMin-Normal', 'int', 20, 'Crafting', { help: 'Fewer than this: split a pea after normal buffing', engine: true }),
   o('SpellCompMin-Idle', 'int', 20, 'Crafting', { help: 'Fewer than this: split a pea when idle', engine: true }),
-  o('UseSpecialAmmo', 'enum', 0, 'Crafting', { values: { 0: 'None', 1: 'Raider', 2: 'SCurrency', 3: 'Both' }, engine: true }),
+  o('UseSpecialAmmo', 'enum', 0, 'Crafting', { help: '"Raider" indicates Raider Lightning ammo, and "SCurrency" indicates ammo from Colosseum, Graveyard, and Paradox-touched Olthoi Infested Area', values: { 0: 'None', 1: 'Raider', 2: 'SCurrency', 3: 'Both' }, engine: true }),
   o('IdleCraftCount_HealthKits', 'int', 2, 'Crafting', { engine: true }),
   o('IdleCraftCount_StamKits', 'int', 2, 'Crafting', { engine: true }),
   o('IdleCraftCount_ManaKits', 'int', 2, 'Crafting', { engine: true }),
@@ -215,6 +215,48 @@ export function vtFromVTank(name: string, v: string | number | boolean): string 
 }
 /** A value the player typed in the window (ranges in yards = our metres), typed by the option. */
 export function vtStoredValue(name: string, text: string | number | boolean): string | number | boolean { return typeValue(vtOption(name), text); }
+/** What a typed value is: the value to store, or why it can't be one. */
+export type VtParsed = { ok: true; value: string | number | boolean } | { ok: false; why: string };
+
+/** A plain decimal number (no "1true", no blank, no "1e3"). */
+const NUMBER_TEXT = /^[-+]?(\d+(\.\d*)?|\.\d+)$/;
+
+/**
+ * What the player typed for an option, checked (BUG.vtank-advanced-options-reset, 2026-11-17: "1true" in
+ * UseArcs was stored as 1 without a word, and the box kept showing "1true"). Unlike vtStoredValue, nothing
+ * that isn't a value of the option is turned into one: a bool takes True / False (1 / 0, yes / no, on / off),
+ * a number a plain number (a whole-number option rounds it), a range no negative, an enum one of its numbers
+ * or names ("3" or "Yes" for UseArcs). `units: 'vtank'` reads a range in VTank's map units (`/vt opt set`).
+ * An option we don't know is taken as typed (plugins add their own).
+ */
+export function vtParseOption(name: string, text: string | number | boolean, units: 'ours' | 'vtank' = 'ours'): VtParsed {
+  const opt = vtOption(name);
+  if (!opt) return { ok: true, value: typeValue(undefined, text) };
+  const s = typeof text === 'string' ? text.trim() : text;
+  if (opt.kind === 'string') return { ok: true, value: String(s) };
+  if (opt.kind === 'bool') {
+    if (typeof s === 'boolean') return { ok: true, value: s };
+    const t = String(s);
+    if (/^(true|1|yes|on)$/i.test(t)) return { ok: true, value: true };
+    if (/^(false|0|no|off)$/i.test(t)) return { ok: true, value: false };
+    return { ok: false, why: 'is not True or False' };
+  }
+  if (opt.kind === 'enum') {
+    const vals = opt.values ?? {};
+    const byName = Object.entries(vals).find(([, label]) => label.toLowerCase() === String(s).toLowerCase());
+    if (byName) return { ok: true, value: Number(byName[0]) };
+    const num = typeof s === 'number' ? s : NUMBER_TEXT.test(String(s)) ? Number(s) : NaN;
+    if (Number.isInteger(num) && vals[num] !== undefined) return { ok: true, value: num };
+    return { ok: false, why: `is not one of ${Object.entries(vals).map(([k, label]) => `${k} ${label}`).join(', ')}` };
+  }
+  const num = typeof s === 'number' ? s : typeof s === 'string' && NUMBER_TEXT.test(s) ? Number(s) : NaN;
+  if (!Number.isFinite(num)) return { ok: false, why: 'is not a number' };
+  if (opt.kind === 'range' && num < 0) return { ok: false, why: 'cannot be negative' };
+  if (opt.kind === 'int') return { ok: true, value: Math.round(num) };
+  if (opt.kind === 'range') return { ok: true, value: units === 'vtank' ? Math.round(num * 240 * 1000) / 1000 : num };
+  return { ok: true, value: num };
+}
+
 /** A stored value as the window shows it. */
 export function vtDisplayValue(_name: string, v: string | number | boolean): string | number | boolean { return v; }
 

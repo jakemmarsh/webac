@@ -3,6 +3,9 @@
  * services/ws-tcp-bridge/src/clientErrors.ts), so failures on players'
  * machines are visible in the bridge logs.
  *
+ * Each report carries the page's `trace` and the browser's `bid` (the ids the
+ * pre-world reports use), never an address, account or password.
+ *
  * Reported: uncaught errors, unhandled promise rejections, WebGL context
  * loss, and boot failures the page reports itself. Never reported: account
  * names, passwords, chat, or anything from the URL's query string (stripped
@@ -11,11 +14,23 @@
  * MAX_REPORTS.
  */
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
+import { BROWSER_ID_PATTERN } from './LoginTags.js';
+
+/** The page trace's shape (PreworldReporter's trace; the bridge's TRACE_PATTERN). */
+const TRACE_PATTERN = /^[a-z0-9]{8,32}$/;
 
 export type ErrorKind = 'error' | 'unhandledrejection' | 'webglcontextlost' | 'boot';
 
 export interface ErrorReport {
   kind: ErrorKind;
+  /**
+   * OBS.client-error-identity — the page's trace id (PreworldReporter.trace,
+   * also on its client_preworld / client_world lines and its WebSocket URL),
+   * so a crash or boot refusal joins the rest of that page's lines.
+   */
+  trace?: string;
+  /** This browser profile's random id (LoginTags.browserId), as on login_refused / char_list: joins a refused boot to a later page of the same browser. */
+  bid?: string;
   message: string;
   stack: string | null;
   source: string | null;
@@ -40,6 +55,14 @@ export interface ErrorReporterOptions {
   userAgent?: string;
   /** As PreworldReporterOptions.send (TelemetryOutbox): a rejected promise keeps the report to go again. */
   send?: TelemetrySend;
+  /**
+   * OBS.client-error-identity — the page's trace id, read when each report is
+   * built (main.ts: the PreworldReporter's, made just after this reporter).
+   * Missing or malformed: no `trace`.
+   */
+  trace?: () => string | null | undefined;
+  /** This browser profile's id (LoginTags.browserId); null when storage failed: no `bid`. */
+  browserId?: string | null;
 }
 
 export const MAX_REPORTS = 20;
@@ -92,8 +115,12 @@ export class ErrorReporter {
     if (this.sent >= MAX_REPORTS) return;
     this.seen.set(key, 1);
     this.sent++;
+    const trace = this.safeTrace();
+    const bid = this.opts.browserId;
     const body: ErrorReport = {
       kind,
+      ...(trace ? { trace } : {}),
+      ...(typeof bid === 'string' && BROWSER_ID_PATTERN.test(bid) ? { bid } : {}),
       message: msg,
       stack: detail.stack ? stripUrlQueries(detail.stack).slice(0, 4000) : null,
       source,
@@ -108,6 +135,13 @@ export class ErrorReporter {
     };
     this.outbox.retry();
     this.outbox.post(this.opts.endpoint, JSON.stringify(body));
+  }
+
+  private safeTrace(): string | null {
+    try {
+      const t = this.opts.trace?.();
+      return typeof t === 'string' && TRACE_PATTERN.test(t) ? t : null;
+    } catch { return null; }
   }
 
   private safeScreen(): string {

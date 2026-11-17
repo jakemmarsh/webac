@@ -28,7 +28,7 @@
  * (no dead-end UI). Everything acts through AutomationSource.
  */
 import {
-  ALL_MODULES_OFF, PropertyDataId, PropertyFloat, PropertyInt, PropertyString, ROUTINE_SCHEMA_VERSION, SkillId, emptyRoutineDoc, explainProfile, importVTankFiles, validateRoutineDoc, vtankFileKind, type VtNames,
+  ALL_MODULES_OFF, PropertyDataId, PropertyFloat, PropertyInt, PropertyString, ROUTINE_SCHEMA_VERSION, SkillId, emptyRoutineDoc, explainProfile, importVTankFiles, mergeRoutineDocs, startingProfile, validateRoutineDoc, vtankFileKind, type VtNames,
   type BuffSet, type LootAction, type LootMatch, type LootRule, type Route, type RoutineAction, type RoutineCondition,
   type RoutineDoc, type RoutineProfile, type RoutineRule, type RoutineState,
 } from '@ac/shared';
@@ -73,7 +73,11 @@ type Loaded = { ok: true; doc: unknown; account?: string; server?: string } | { 
 /** What the panel drives. */
 export interface AutomationSource {
   load(): Promise<Loaded>;
-  save(doc: RoutineDoc): Promise<Loaded>;
+  /**
+   * Store the document; the result's doc is what was stored. `base`: the stored document the edits started
+   * from, so changes another tab or device stored since are kept (RoutineSync.save; BUG.routine-settings-reset).
+   */
+  save(doc: RoutineDoc, base?: RoutineDoc | null): Promise<Loaded>;
   status(): RoutineStatus;
   stats(): RoutineStats;
   current(): RoutineProfile | null;
@@ -296,6 +300,8 @@ const grow = (e: HTMLElement): HTMLElement => { const w = el('div', { flexGrow: 
 export class AutomationPanel {
   private tab: 'automation' | 'stats' = 'automation';
   private doc: RoutineDoc | null = null;
+  /** The stored document the panel's copy is in step with (the base its switches' saves merge from). */
+  private base: RoutineDoc | null = null;
   private selected: string | null = null;
   private message = '';
   private loading = false;
@@ -311,10 +317,10 @@ export class AutomationPanel {
     this.loading = false;
     if (r.ok) {
       this.doc = r.doc as RoutineDoc;
+      this.base = structuredClone(this.doc);
       const running = this.source.status().profile;
       const ch = this.source.character();
-      const assigned = ch ? this.doc.characters?.[ch] : undefined;
-      this.selected = running ?? (this.doc.profiles.some((p) => p.name === this.selected) ? this.selected : assigned ?? this.doc.profiles[0]?.name ?? null);
+      this.selected = running ?? (this.doc.profiles.some((p) => p.name === this.selected) ? this.selected : startingProfile(this.doc, ch));
       this.message = this.doc.profiles.length ? '' : 'No routines yet: Edit… makes one.';
     } else this.message = r.message;
     redraw();
@@ -330,9 +336,10 @@ export class AutomationPanel {
   storedElsewhere(doc: RoutineDoc): void {
     if (!this.doc || this.loading || !Array.isArray(doc?.profiles)) return;
     this.doc = doc;
+    this.base = structuredClone(doc);
     if (!doc.profiles.some((p) => p.name === this.selected)) {
       const ch = this.source.character();
-      this.selected = this.source.status().profile ?? (ch ? doc.characters?.[ch] : undefined) ?? doc.profiles[0]?.name ?? null;
+      this.selected = this.source.status().profile ?? startingProfile(doc, ch);
     }
   }
   get onStatsTab(): boolean { return this.tab === 'stats'; }
@@ -348,6 +355,7 @@ export class AutomationPanel {
     if (!this.doc) { this.message = this.message || 'Your routines have not loaded.'; redraw(); return; }
     this.editor = new RoutineEditor(this.kit, this.source, structuredClone(this.doc), this.selected, (saved) => {
       this.doc = saved;
+      this.base = structuredClone(saved);
       if (!saved.profiles.some((p) => p.name === this.selected)) this.selected = saved.profiles[0]?.name ?? null;
       redraw();
     }, tab);
@@ -432,7 +440,7 @@ export class AutomationPanel {
         const sp = d?.profiles.find((x) => x.name === prof.name);
         if (!d || !sp) return;
         sp.modules[m.key] = v;
-        void source.save(d).then((s) => { this.message = s.ok ? '' : s.message; if (s.ok) this.doc = s.doc as RoutineDoc; redraw(); });
+        void source.save(d, this.base).then((s) => { this.message = s.ok ? '' : s.message; if (s.ok) { this.doc = s.doc as RoutineDoc; this.base = structuredClone(this.doc); } redraw(); });
         redraw();
       }), { moduleSwitch: m.key }));
       const t = col(0);
@@ -534,7 +542,10 @@ export class RoutineEditor {
     private tab: EditorTab = 'routine',
   ) {
     this.profileName = profileName ?? doc.profiles[0]?.name ?? null;
+    this.base = structuredClone(doc);
   }
+  /** The stored document this editor's copy started from, then the one each Save stored (RoutineSync.save merges from it). */
+  private base: RoutineDoc;
 
   private profile(): RoutineProfile | null { return this.doc.profiles.find((p) => p.name === this.profileName) ?? null; }
 
@@ -544,8 +555,20 @@ export class RoutineEditor {
     if (local.length) { this.issues = local; this.note = `Not saved: ${local.length} problem${local.length > 1 ? 's' : ''}`; redraw(); return false; }
     this.note = 'Saving…';
     redraw();
-    const r = await this.source.save(this.doc);
-    if (r.ok) { this.issues = []; this.dirty = false; this.note = 'Saved to your account'; this.onSaved(r.doc as RoutineDoc); }
+    const sent = structuredClone(this.doc);
+    const r = await this.source.save(this.doc, this.base);
+    if (r.ok) {
+      const stored = r.doc as RoutineDoc;
+      // Changes another tab or device stored meanwhile (merged by the store) come into this copy too, so the
+      // next Save doesn't take them back out; edits made while saving stay on top.
+      if (stored && Array.isArray(stored.profiles)) {
+        const merged = mergeRoutineDocs(sent, this.doc, stored);
+        for (const k of Object.keys(this.doc)) delete (this.doc as unknown as Record<string, unknown>)[k];
+        Object.assign(this.doc, merged);
+        this.base = structuredClone(stored);
+      }
+      this.issues = []; this.dirty = false; this.note = 'Saved to your account'; this.onSaved(r.doc as RoutineDoc);
+    }
     else { this.issues = r.issues ?? []; this.note = r.message; }
     redraw();
     return r.ok;

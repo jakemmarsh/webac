@@ -357,6 +357,12 @@ export interface RoutineDoc {
   profiles: RoutineProfile[];
   /** Which profile each character starts with (character name → profile name). */
   characters?: Record<string, string>;
+  /**
+   * The profile each character last chose in the window (character name → profile name), shown again at the
+   * next login (startingProfile, mergeRoutine.ts). Unlike `characters` (Mine only) it says nothing about whose
+   * profile it is. An entry naming a profile that no longer exists is ignored.
+   */
+  selected?: Record<string, string>;
 }
 
 export function emptyRoutineDoc(server: string, account: string, now = new Date()): RoutineDoc {

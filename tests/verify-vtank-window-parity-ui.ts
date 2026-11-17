@@ -301,6 +301,22 @@ describe('§9.3 the generated [Default] / [By char] profile', () => {
     expect(l.items.map((x) => x.name)).toEqual(['Fire Longsword']);
   });
 
+  it('essences as ACE examines them (no PetClass 266 or SummoningMastery 362: Summoning to use them, 366 / 368) are listed; cosmetic pet devices are not', () => {
+    // Frost Wisp Essence (50), wcid 49331, and Mud Golem Essence, wcid 48886, as AppraiseInfo sends them ([AssessmentProperty] ints only);
+    // Baby Drudge Crate, wcid 33919: a PetDevice no Summoning is needed for (a passive pet).
+    const ace: LoadoutItem[] = [
+      { guid: 21, name: 'Frost Wisp Essence (50)', itemType: 0x80, ints: { 5: 50, 19: 4000, 91: 50, 92: 50, 280: 213, 366: 54, 367: 310, 369: 40 } },
+      { guid: 22, name: 'Mud Golem Essence', itemType: 0x80, ints: { 5: 50, 19: 5, 91: 50, 92: 50, 280: 213, 366: 54, 367: 50 } },
+      { guid: 23, name: 'Frost Phyntos Swarm Essence (200)', itemType: 0x80, ints: { 91: 50, 92: 50, 280: 213, 368: 54, 367: 530, 369: 200 } },
+      { guid: 24, name: 'Baby Drudge Crate', itemType: 0x80, ints: { 5: 50, 19: 200 } },
+    ];
+    expect(generateLoadout({ items: ace, skills, mastery: 1 }).items).toEqual([
+      { name: 'Frost Wisp Essence (50)', id: 21, noBuffs: true }, { name: 'Mud Golem Essence', id: 22, noBuffs: true }, { name: 'Frost Phyntos Swarm Essence (200)', id: 23, noBuffs: true },
+    ]);
+    // Summoning untrained, or an era without it: none.
+    expect(generateLoadout({ items: ace, skills: [skill(54, 'Summoning', 'untrained')], mastery: 1 }).items).toEqual([]);
+  });
+
   it('gatherLoadout examines weapons, foods and essences not yet examined (a few at a time), and waits for the answers', async () => {
     const answers = new Map<number, Record<number, number>>();
     const asked: number[] = [];

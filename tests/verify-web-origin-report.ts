@@ -116,7 +116,7 @@ describe('the report Worker (deploy/web/cloudflare/report-worker.mjs)', () => {
   const reportBody = JSON.stringify({
     kind: 'world_list_failed', build: 'abc', attempts: 3, elapsedMs: 7000, failedStep: 'healthz', errorName: 'TypeError',
     errorMessage: 'Failed to fetch', online: true, bridgeHost: 'bridge.playwebac.com', ua: 'Chromium/141', lang: 'en-US',
-    account: 'should-never-be-logged',
+    trace: '0123456789abcdef', bid: '0a1b2c3d', account: 'should-never-be-logged',
   });
   function post(body: string, headers: Record<string, string> = {}) {
     const req = new Request(`https://playwebac.com${REPORT_PATH}`, { method: 'POST', body, headers: { 'content-type': 'text/plain', 'cf-connecting-ip': '203.0.113.9', ...headers } });
@@ -135,6 +135,7 @@ describe('the report Worker (deploy/web/cloudflare/report-worker.mjs)', () => {
     expect(line).toEqual({
       event: 'web_report', kind: 'world_list_failed', build: 'abc', attempts: 3, elapsedMs: 7000, failedStep: 'healthz',
       errorName: 'TypeError', errorMessage: 'Failed to fetch', online: true, bridgeHost: 'bridge.playwebac.com', ua: 'Chromium/141', lang: 'en-US',
+      trace: '0123456789abcdef', bid: '0a1b2c3d',
       cf: { country: 'US', asn: 7922, colo: 'ORD' }, ip: '203.0.113.9',
     });
     expect(JSON.stringify(line)).not.toContain('should-never-be-logged');

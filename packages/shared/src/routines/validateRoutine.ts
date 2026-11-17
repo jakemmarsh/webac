@@ -363,6 +363,9 @@ export function validateRoutineDoc(doc: unknown): RoutineIssue[] {
     if (!isObj(doc.characters)) out.push({ path: 'characters', message: 'must map character names to profile names' });
     else for (const [c, p] of Object.entries(doc.characters)) if (!names.has(p as string)) out.push({ path: `characters.${c}`, message: `no profile named "${String(p)}"` });
   }
+  if (doc.selected !== undefined && !(isObj(doc.selected) && Object.values(doc.selected).every(isStr))) {
+    out.push({ path: 'selected', message: 'must map character names to profile names' });
+  }
   return out;
 }
 

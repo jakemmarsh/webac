@@ -8,14 +8,24 @@
  * counter in /metrics. No third-party service, no account data: the client
  * never sends credentials, and this module scrubs query strings and anything
  * shaped like `password=` / `account=` again in case a message carried one.
+ * The page's `trace` and the browser's random `bid` ride along (each only
+ * when well formed), so a report joins that page's other lines.
  */
 
 import { eidField } from './eventIds.js';
+import { TRACE_PATTERN } from './clientPreworld.js';
+
+/** A browser profile's random id (renderer LoginTags.browserId; clientPreworld identityFields). */
+const BID_PATTERN = /^[0-9a-f]{8}$/;
 
 export type ClientErrorKind = 'error' | 'unhandledrejection' | 'webglcontextlost' | 'boot';
 
 export interface ClientErrorReport {
   kind: ClientErrorKind;
+  /** OBS.client-error-identity — the page's trace id, as on its client_preworld / client_world / session lines. */
+  trace?: string;
+  /** This browser profile's random id, as on client_preworld login_refused / char_list lines. */
+  bid?: string;
   message: string;
   stack: string | null;
   /** Source file of the error (path only). */
@@ -80,8 +90,12 @@ export function sanitizeClientError(body: unknown): ClientErrorReport | null {
   const kind = KINDS.find(k => k === b.kind);
   const message = text(b.message, 500);
   if (!kind || !message) return null;
+  const trace = typeof b.trace === 'string' && TRACE_PATTERN.test(b.trace) ? b.trace : null;
+  const bid = typeof b.bid === 'string' && BID_PATTERN.test(b.bid) ? b.bid : null;
   return {
     kind,
+    ...(trace ? { trace } : {}),
+    ...(bid ? { bid } : {}),
     message,
     stack: text(b.stack, 4000),
     source: text(b.source, 300),

@@ -18,12 +18,17 @@
  * magic school trained; shields, gems and lockpicks are left to the player.
  *
  * Data, never names: the weapon's skill is its examined WeaponSkill
- * (PropertyInt 48) checked against your skill list, a pet device is one with
- * PetClass (266), and mastery is SummoningMastery (362) on the essence and on
- * you. Each era's own items and skills decide, so 1999's sword skills and end
+ * (PropertyInt 48) checked against your skill list, and a pet device is one
+ * whose examination says Summoning is needed to use it (petRefill.ts
+ * isSummoningEssence: ACE's examination never carries PetClass 266). Mastery is
+ * SummoningMastery (362) on the essence and on you where a server sends the
+ * essence's; ACE doesn't (not an [AssessmentProperty]), so there every essence
+ * you carry is listed and Summon Pets leaves out one the server refuses for its
+ * mastery (vtMacro petStep). Each era's own items and skills decide, so 1999's sword skills and end
  * of retail's Heavy Weapons both work; an era without Summoning has no pets.
  */
 import type { PlanSkill, VtItemEntry } from '@ac/shared';
+import { isSummoningEssence, SUMMONING_SKILL } from './petRefill.ts';
 
 /** What the generator reads of one carried (or wielded) object. */
 export interface LoadoutItem {
@@ -33,7 +38,7 @@ export interface LoadoutItem {
   itemType?: number;
   /** ObjectDescriptionFlags (Healer 0x10000). */
   flags?: number;
-  /** Examined PropertyInts (WeaponSkill 48, BoosterEnum 89, PetClass 266, SummoningMastery 362). */
+  /** Examined PropertyInts (WeaponSkill 48, BoosterEnum 89, UseRequiresSkill 366 / Spec 368, SummoningMastery 362 where sent). */
   ints?: Record<number, number>;
 }
 
@@ -53,12 +58,11 @@ export interface Loadout {
 
 const IT_MELEE = 0x1, IT_FOOD = 0x20, IT_MISSILE = 0x100, IT_CASTER = 0x8000, IT_MANASTONE = 0x80000;
 const FLAG_HEALER = 0x10000;
-const P_WEAPON_SKILL = 48, P_BOOSTER = 89, P_PET_CLASS = 266, P_MASTERY = 362;
+const P_WEAPON_SKILL = 48, P_BOOSTER = 89, P_MASTERY = 362;
 /** The magic schools (ACE Skill: Creature 31, Item 32, Life 33, War 34, Void 43). */
 const MAGIC_SKILLS = new Set([31, 32, 33, 34, 43]);
 /** BoosterEnum: Health 2, Stamina 4, Mana 6 (ACE PropertyAttribute2nd). */
 const VITAL_BOOSTERS = new Set([2, 4, 6]);
-const SUMMONING = 54;
 
 const trained = (s: PlanSkill | undefined): boolean => !!s && s.training !== 'untrained';
 
@@ -66,7 +70,7 @@ const trained = (s: PlanSkill | undefined): boolean => !!s && s.training !== 'un
 export function generateLoadout(input: LoadoutInput): Loadout {
   const byId = new Map(input.skills.map((s) => [s.id, s]));
   const anyMagic = input.skills.some((s) => MAGIC_SKILLS.has(s.id) && trained(s));
-  const summoning = trained(byId.get(SUMMONING)) || trained(input.skills.find((s) => /^summoning$/i.test(s.name)));
+  const summoning = trained(byId.get(SUMMONING_SKILL)) || trained(input.skills.find((s) => /^summoning$/i.test(s.name)));
   const items: VtItemEntry[] = [];
   const consumables: string[] = [];
   const unexamined: string[] = [];
@@ -82,9 +86,9 @@ export function generateLoadout(input: LoadoutInput): Loadout {
       const skill = ints?.[P_WEAPON_SKILL];
       if (skill === undefined) { unexamined.push(it.name); continue; }
       if (trained(byId.get(skill))) items.push({ name: it.name, id: it.guid >>> 0 });
-    } else if (ints?.[P_PET_CLASS] !== undefined) {
-      // An essence whose mastery is none or yours, with Summoning trained (CHG .157; MOSS: a different mastery can't be used).
-      const m = ints[P_MASTERY] ?? 0;
+    } else if (isSummoningEssence({ ints })) {
+      // An essence whose mastery is none, unknown (ACE never sends an essence's) or yours, with Summoning trained (CHG .157; MOSS: a different mastery can't be used).
+      const m = ints?.[P_MASTERY] ?? 0;
       if (summoning && (m === 0 || m === (input.mastery ?? 0))) items.push({ name: it.name, id: it.guid >>> 0, noBuffs: true });
     } else if ((it.flags ?? 0) & FLAG_HEALER) {
       if (!consumables.includes(it.name)) consumables.push(it.name);
@@ -106,7 +110,7 @@ export function loadoutNeedsExamining(it: LoadoutItem): boolean {
   const t = it.itemType ?? 0;
   if (t & IT_CASTER) return false;
   if (t & (IT_MELEE | IT_MISSILE | IT_FOOD)) return true;
-  // Summoning essences: a Misc-type object named as one ("… Essence"); its PetClass decides.
+  // Summoning essences: a Misc-type object named as one ("… Essence"); its examination decides (isSummoningEssence).
   return /essence/i.test(it.name);
 }
 

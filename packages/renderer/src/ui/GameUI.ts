@@ -16226,6 +16226,9 @@ export class GameUI {
     }
   }
 
+  /** The page is going: the VirindiTank window's edit still waiting on its debounce is saved now (VTankWindow.flushPendingSave). */
+  flushAutomationSave(): void { this.vtankModel?.flushPendingSave(); }
+
   /** CORE.3.f — send now if dirty (CPlayerModule::SaveToServer). */
   flushChatOptionsSave(): void {
     if (this.chatOptionsSaveTimer !== null) {

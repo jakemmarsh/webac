@@ -19,7 +19,7 @@
 import {
   type RoutineAction, type RoutineCondition, type RoutineDoc, type RoutineProfile, type RoutineRule, type Route, type VtMonsterRow, type VtOption, type VtankProfileData,
   type VTankExport,
-  ROUTINE_SCHEMA_VERSION, VT_DEFAULT_MONSTER, VT_MONSTER_COLUMNS, VT_OPTIONS, activeLoot, afToVTankText, emptyVtankData, importVTankFiles, vtankFileKind, exportMet, exportNav, exportUtl, exportVTank, validateRoutineDoc, vtankChatCommand, vtDisplayValue, vtFromVTank, vtLinkedSettings, vtOption, vtStoredValue, vtToVTank, exportAf, exportNavAf, exportUsd, type VtNames,
+  ROUTINE_SCHEMA_VERSION, VT_DEFAULT_MONSTER, VT_MONSTER_COLUMNS, VT_OPTIONS, activeLoot, afToVTankText, emptyVtankData, importVTankFiles, vtankFileKind, exportMet, exportNav, exportUtl, exportVTank, validateRoutineDoc, vtankChatCommand, vtDisplayValue, vtFromVTank, vtLinkedSettings, vtOption, vtParseOption, vtStoredValue, vtToVTank, exportAf, exportNavAf, exportUsd, mergeRoutineDocs, startingProfile, type VtNames, type VtParsed,
 } from '@ac/shared';
 import type { RoutineStatus } from '../../agent/RoutineEngine.js';
 import { matchMonsterRow } from '../../agent/macro/combatPlan.js';
@@ -34,6 +34,7 @@ import { renderVTankHistory, renderVTankRemote, VT_HISTORY_SIZE, VT_REMOTE_SIZE 
 import { VtLootEditor } from './lootEditor.js';
 import { ubNetCommand, type UbNet } from '../../agent/ubNet.js';
 import { VhsHotkeys, type RetailKeys, type VhsHotkey, type VhsStorage } from './vhsHotkeys.js';
+import { captureScroll, restoreScroll } from '../ScrollKeep.js';
 import { renderVhsAddVvs, renderVhsWindow, VHS_ADD_VVS_SIZE, VHS_SIZE, vtankHotkeys } from './VhsWindow.js';
 
 export type VtTab = 'options' | 'profiles' | 'vitals' | 'monsters' | 'items' | 'consumables' | 'buffs' | 'route' | 'meta';
@@ -229,6 +230,28 @@ export interface VtCondDef { id: string; label: string; make: () => RoutineCondi
 export interface VtActDef { id: string; label: string; make: (p: RoutineProfile) => RoutineAction[]; is: (a: RoutineAction[]) => boolean; params?: Param[]; get?: (a: RoutineAction[]) => Record<string, string | number>; set?: (v: Record<string, string>, p: RoutineProfile) => RoutineAction[] }
 
 const n = (v: string | undefined, d = 0): number => { const x = Number(v); return Number.isFinite(x) ? x : d; };
+
+/**
+ * What one Meta value box accepts (the window's shared box, VTankWindow.box): a number box a plain number,
+ * Set VT Option's Value one of the named option's values; any other text as typed.
+ */
+export function vtParamParse(prm: Param, values: () => Record<string, string | number>): (t: string) => VtParsed {
+  if (prm.type === 'number') return (t) => (/^[-+]?(\d+(\.\d*)?|\.\d+)$/.test(t.trim()) ? { ok: true, value: Number(t.trim()) } : { ok: false, why: 'is not a number' });
+  if (prm.key === 'value' && 'name' in values()) return (t) => vtParseOption(String(values().name ?? ''), t);
+  return (t) => ({ ok: true, value: t });
+}
+
+/** One editable box: how it reads what's typed, keeps it, and shows what's kept. */
+export interface VtBoxSpec {
+  /** Named in the line a rejected entry prints. */
+  label: string;
+  parse(text: string): VtParsed;
+  store(value: string | number | boolean, text: string): void;
+  /** The stored value as the box shows it. */
+  shown(): string;
+  /** Prints why an entry was not kept. */
+  say(message: string): void;
+}
 const isNever = (c: RoutineCondition) => c.kind === 'not' && c.condition.kind === 'always';
 
 /** VirindiTank's condition list (the Edit Meta Rule dropdown, in the wiki's order), mapped to ours; "≤ n" is ours "below n + 1". */
@@ -340,7 +363,8 @@ export const VT_ACTIONS: VtActDef[] = [
   { id: 'setopt', label: 'Set VT Option', make: () => [{ kind: 'set-setting', name: 'EnableCombat', value: true }], is: (a) => one(a, 'set-setting'),
     params: [{ key: 'name', label: 'Option', type: 'text' }, { key: 'value', label: 'Value', type: 'text' }],
     get: (a) => { const x = a[0] as { name: string; value: string | number | boolean }; return { name: x.name, value: String(vtDisplayValue(x.name, x.value)) }; },
-    set: (v) => { const name = vtOption(v.name ?? '')?.name ?? (v.name ?? ''); return [{ kind: 'set-setting', name, value: vtStoredValue(name, v.value ?? '') }]; } },
+    // A value the option takes by name ("Yes" for UseArcs) is stored as its number.
+    set: (v) => { const name = vtOption(v.name ?? '')?.name ?? (v.name ?? ''); const r = vtParseOption(name, v.value ?? ''); return [{ kind: 'set-setting', name, value: r.ok ? r.value : vtStoredValue(name, v.value ?? '') }]; } },
   { id: 'createview', label: 'Create View', make: () => [{ kind: 'create-view', name: 'View', xml: '<?xml version="1.0"?><view width="300" height="200" title="View"><control type="layout"></control></view>' }], is: (a) => one(a, 'create-view'),
     params: [{ key: 'name', label: 'View name', type: 'text' }, { key: 'xml', label: 'XML', type: 'text' }],
     get: (a) => ({ name: (a[0] as { name: string }).name, xml: (a[0] as { xml: string }).xml }), set: (v) => [{ kind: 'create-view', name: v.name ?? '', xml: v.xml ?? '' }] },
@@ -585,6 +609,11 @@ export class VTankWindow {
 
   /** The character the loaded document's selection was made for. */
   private loadedFor: string | null = null;
+  /**
+   * The stored document the window's copy was last in step with (a load, a re-check taken in, a save): the
+   * base a save merges from, so a change another tab or device stored meanwhile is kept (RoutineSync.save).
+   */
+  private base: RoutineDoc | null = null;
   /** Edits not yet stored: set by every change, cleared by the save that stores the last of them. */
   private unsaved = false;
   private editGen = 0;
@@ -636,6 +665,7 @@ export class VTankWindow {
     const body = (d: RoutineDoc) => JSON.stringify({ ...d, updatedAt: '' });
     if (body(stored) === body(this.doc)) {
       if (!this.busyEditing) this.doc.updatedAt = stored.updatedAt;
+      this.base = structuredClone(stored);
       return false;
     }
     if (this.busyEditing) {
@@ -645,9 +675,10 @@ export class VTankWindow {
       return false;
     }
     this.doc = stored;
+    this.base = structuredClone(stored);
     const ch = this.source.character();
     if (!this.profileName || !stored.profiles.some((p) => p.name === this.profileName)) {
-      this.profileName = this.source.status().profile ?? (ch ? stored.characters?.[ch] : undefined) ?? stored.profiles[0]?.name ?? null;
+      this.profileName = this.source.status().profile ?? startingProfile(stored, ch);
     }
     const p = this.profile();
     if (this.routeName !== null && !p?.routes.some((r) => r.name === this.routeName)) { this.routeName = null; this.waypoint = -1; }
@@ -697,12 +728,14 @@ export class VTankWindow {
     const r = await this.source.load();
     if (r.ok) {
       this.doc = r.doc as RoutineDoc;
+      this.base = structuredClone(this.doc);
       const ch = this.source.character();
       this.loadedFor = ch;
       this.standbyTry = -Infinity;
       this.lastCheck = this.source.now();
       this.unsaved = false;
-      this.profileName = this.source.status().profile ?? (ch ? this.doc.characters?.[ch] : undefined) ?? this.doc.profiles[0]?.name ?? null;
+      // The profile this character last chose (BUG.routine-settings-reset), else its Mine only one, else the first.
+      this.profileName = this.source.status().profile ?? startingProfile(this.doc, ch);
       this.message = '';
     } else this.message = r.message;
     redraw();
@@ -735,24 +768,57 @@ export class VTankWindow {
     redraw();
   }
 
+  /**
+   * The page is going (pagehide: a reload, the tab closed): an edit still inside the 400 ms debounce is saved
+   * now instead of lost. In browser storage the write lands before the page goes (BUG.routine-settings-reset).
+   */
+  flushPendingSave(): void {
+    if (this.saveTimer === null) return;
+    clearTimeout(this.saveTimer);
+    this.saveTimer = null;
+    void this.saveNow(this.redrawWindow);
+  }
+
   async saveNow(redraw: () => void): Promise<boolean> {
     if (!this.doc) return false;
     if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
     this.doc.schemaVersion = ROUTINE_SCHEMA_VERSION;
     this.doc.updatedAt = new Date(this.source.now() > 1e12 ? this.source.now() : Date.now()).toISOString();
+    // The profile shown is this character's choice, kept for its next login (BUG.routine-settings-reset).
+    const ch = this.source.character();
+    if (ch && this.profileName && this.doc.profiles.some((p) => p.name === this.profileName) && this.doc.selected?.[ch] !== this.profileName) {
+      this.doc.selected = { ...(this.doc.selected ?? {}), [ch]: this.profileName };
+    }
     const issues = validateRoutineDoc(this.doc);
     if (issues.length) { this.message = `Not saved: ${issues[0].path}: ${issues[0].message}`; redraw(); return false; }
     const doc = this.doc;
+    const sent = structuredClone(doc);
     const gen = this.editGen;
     this.unsaved = true;
     this.saving = true;
     let r: Awaited<ReturnType<VTankSource['save']>>;
-    try { r = await this.source.save(doc); } finally { this.saving = false; }
+    try { r = await this.source.save(doc, this.base); } finally { this.saving = false; }
+    // Still this document (no load replaced it while the save was out).
+    const current = doc === this.doc;
+    const stored = r.ok ? r.doc as RoutineDoc | null : null;
+    if (current && stored && typeof stored === 'object' && Array.isArray(stored.profiles)) {
+      const body = (d: RoutineDoc) => JSON.stringify({ ...d, updatedAt: '' });
+      if (body(stored) !== body(sent)) {
+        // The store kept changes another tab or device made (RoutineSync.save merged them): take them in,
+        // with any edit made here while the save was out on top.
+        this.doc = mergeRoutineDocs(sent, doc, stored);
+        if (!this.profileName || !this.doc.profiles.some((p) => p.name === this.profileName)) this.profileName = this.source.status().profile ?? startingProfile(this.doc, ch);
+        const st = this.source.status();
+        const run = st.running ? this.doc.profiles.find((x) => x.name === st.profile) : undefined;
+        if (run) this.source.update(run);
+      }
+      this.base = structuredClone(stored);
+    }
     if (r.ok && gen === this.editGen) {
       this.unsaved = false;
       // The store's stamp: the next re-check (refreshStored) asks "changed since this one?".
       const at = (r.doc as RoutineDoc | null)?.updatedAt;
-      if (doc === this.doc && typeof at === 'string') doc.updatedAt = at;
+      if (current && this.doc && typeof at === 'string') this.doc.updatedAt = at;
     }
     // The store's own check (a bridge on an older build can refuse what this one allows): name the field.
     this.message = r.ok ? '' : r.issues?.length ? `${r.message} (${r.issues[0].path}: ${r.issues[0].message})` : r.message;
@@ -814,15 +880,30 @@ export class VTankWindow {
 
   render(body: HTMLElement, w: number, h: number, redraw: () => void): void {
     this.redrawWindow = redraw;
+    // A list keeps its place across the rebuild (a pick in Advanced Options' combo box re-rendered it at the top,
+    // 2026-11-17): each list box is keyed by its view (VTankWindow.list), so another tab's list starts at the top.
+    const scroll = captureScroll(body);
     body.innerHTML = '';
     const { kit } = this;
     const root = el('div', { position: 'absolute', left: '0', top: '0', width: `${w}px`, height: `${h}px` }, { vtank: 'window' });
     body.appendChild(root);
     const tabs = row(9);
     at(tabs, 4, 0);
+    tabs.style.width = `${w - 8}px`;
     for (const t of VT_TABS) {
       if (!VT_TAB_READY[t.id]) continue;
-      tabs.appendChild(tag(kit.textTab(t.label, this.tab === t.id, () => { this.tab = t.id; this.advanced = false; redraw(); }), { vtankTab: t.id }));
+      tabs.appendChild(tag(kit.textTab(t.label, this.tab === t.id, () => { this.tab = t.id; this.advanced = false; this.message = ''; redraw(); }), { vtankTab: t.id }));
+    }
+    // The window's message line: in the tab strip's free space, right of the tabs, so it never covers a control
+    // (it was drawn over the tab's bottom row, 2026-11-17). One line; the whole text is its tooltip. A message
+    // belongs to the view it came from: changing tabs or opening / closing Advanced Options clears it.
+    if (this.doc && this.message) {
+      const line = el('div', { flex: '1 1 auto', minWidth: '0', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', paddingLeft: '12px' }, { vtank: 'message' });
+      line.title = this.message;
+      const t = kit.text(this.message, { color: kit.colors.warn });
+      Object.assign(t.style, { overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' });
+      line.appendChild(t);
+      tabs.appendChild(line);
     }
     root.appendChild(tabs);
     const area = el('div', { position: 'absolute', left: '0', top: '18px', width: `${w}px`, height: `${h - 18}px` });
@@ -839,7 +920,13 @@ export class VTankWindow {
     else if (this.tab === 'items') this.renderItems(area, w, ch, redraw);
     else if (this.tab === 'consumables') this.renderConsumables(area, w, ch, redraw);
     else if (this.tab === 'buffs') this.renderBuffs(area, w, ch, redraw);
-    if (this.message) root.appendChild(tag(at(kit.text(this.message, { color: kit.colors.warn, maxWidth: w - 16 }), 8, h - 16), { vtank: 'message' }));
+    restoreScroll(body, scroll);
+  }
+
+  /** A list box with VVS's scrollbar, keyed by its view so a rebuild keeps its scroll (render). */
+  private list(box: HTMLElement): void {
+    box.dataset.scrollKey = box.dataset.vtank ?? box.dataset.vtankList ?? 'list';
+    this.kit.list(box);
   }
 
   // ── Options ──
@@ -855,15 +942,61 @@ export class VTankWindow {
     if (o.kind === 'enum') return this.check(o.label ?? o.name, Number(this.value(o.name)) === 1, (v) => this.setValue(o.name, v ? 1 : 0, redraw), { vtankOption: o.name });
     return this.check(o.label ?? o.name, this.value(o.name) === true || this.value(o.name) === 'true', (v) => this.setValue(o.name, v, redraw), { vtankOption: o.name });
   }
+  /**
+   * Every editable box in the window (BUG.vtank-advanced-options-reset, 2026-11-17: a player typed "true"
+   * into UseArcs, the box read "1true", the profile kept 1 and nothing said so; "the settings reset
+   * constantly"). Each keystroke that reads as a value is kept at once (a running macro follows it); one that
+   * doesn't is not kept. On Enter or leaving the box it shows what is kept: normalised ("5.5" in a
+   * whole-number box reads 6), or, for an entry that isn't a value, the value kept, with a line saying why.
+   * So the box never shows something other than what's stored.
+   */
+  box(text: string, width: number, spec: VtBoxSpec): HTMLElement {
+    const input = this.kit.input(text, width, (t) => { const r = spec.parse(t); if (r.ok) spec.store(r.value, t); });
+    // The kit's box may wrap its text field (a plate around it): the events are the field's own.
+    const field = (input.tagName === 'INPUT' ? input : input.querySelector('input') ?? input) as HTMLInputElement;
+    const commit = () => {
+      const typed = field.value;
+      const r = spec.parse(typed);
+      const shown = spec.shown();
+      if (typed === shown) return;
+      if (!r.ok) { field.value = shown; spec.say(`${spec.label}: "${typed.trim()}" ${r.why}; it stays ${shown || '(blank)'}.`); return; }
+      field.value = shown;
+    };
+    field.addEventListener('change', commit);
+    field.addEventListener('blur', commit);
+    field.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') commit(); });
+    return input;
+  }
+
+  /** An option's control: a check for a bool, VTank's value names for an enum, else a box. */
   private optionField(o: VtOption, width: number, redraw: () => void): HTMLElement {
-    return tag(this.kit.input(String(vtDisplayValue(o.name, this.value(o.name))), width, (v) => {
-      const p = this.macroProfile();
-      // The Approach box sets the corpse approach range too (vtLinkedSettings).
-      const set = vtLinkedSettings(o.name, vtStoredValue(o.name, v));
-      p.settings = { ...(p.settings ?? {}), ...set };
-      if (this.running()) for (const [k, x] of Object.entries(set)) this.source.setSetting(k, x);
-      this.changed(() => {});
+    if (o.kind === 'bool') return tag(this.kit.check(this.value(o.name) === true || this.value(o.name) === 'true', (v) => this.setValue(o.name, v, redraw)), { vtankOption: o.name });
+    if (o.kind === 'enum') return this.optionChoice(o, width, redraw);
+    return tag(this.box(String(vtDisplayValue(o.name, this.value(o.name))), width, {
+      label: (o.label ?? o.name).replace(/:$/, ''),
+      parse: (t) => vtParseOption(o.name, t),
+      store: (v) => {
+        const p = this.macroProfile();
+        // The Approach box sets the corpse approach range too (vtLinkedSettings).
+        const set = vtLinkedSettings(o.name, v);
+        p.settings = { ...(p.settings ?? {}), ...set };
+        if (this.running()) for (const [k, x] of Object.entries(set)) this.source.setSetting(k, x);
+        this.changed(() => {});
+      },
+      shown: () => String(vtDisplayValue(o.name, this.value(o.name))),
+      say: (m) => { this.message = m; redraw(); },
     }), { vtankOption: o.name });
+  }
+
+  /**
+   * An enum option: the window's combo box listing VTank's names for its values (UseArcs: No / At Range /
+   * Yes), writing the number VTank stores. A value the list doesn't name (an imported file's) shows as its number.
+   */
+  private optionChoice(o: VtOption, width: number, redraw: () => void): HTMLElement {
+    const { kit } = this;
+    const cur = this.value(o.name);
+    const label = o.values?.[Number(cur)] ?? String(cur);
+    return tag(kit.dropdown(label, (a) => kit.menu(a, Object.entries(o.values ?? {}).map(([k, name]) => ({ label: name, value: k })), (k) => this.setValue(o.name, Number(k), redraw)), width), { vtankOption: o.name, value: String(cur) });
   }
 
   private renderOptions(area: HTMLElement, _w: number, h: number, redraw: () => void): void {
@@ -890,7 +1023,7 @@ export class VTankWindow {
     area.appendChild(at(tag(kit.flatButton('Force Buff', () => say(this.running() ? this.source.forceBuff() : { ok: false, message: 'Turn Run Macro on to buff.' }), 110, 22), { vtank: 'force-buff' }), 97, 2));
     area.appendChild(at(tag(kit.flatButton('Cancel Force Buff', () => say(this.source.cancelForceBuff()), 110, 22), { vtank: 'cancel-force-buff' }), 97, 34));
     // Advanced Options and Run Macro, bottom right.
-    area.appendChild(at(this.check('Advanced Options', false, () => { this.advanced = true; redraw(); }, { vtank: 'advanced' }), 620, Math.min(129, h - 44)));
+    area.appendChild(at(this.check('Advanced Options', false, () => { this.advanced = true; this.message = ''; redraw(); }, { vtank: 'advanced' }), 620, Math.min(129, h - 44)));
     const st = this.source.status();
     const on = this.running() && !st.paused;
     area.appendChild(at(this.check('Run Macro', on, (v) => this.runMacro(v, redraw), { vtank: 'run-macro' }), 620, Math.min(149, h - 24)));
@@ -922,7 +1055,7 @@ export class VTankWindow {
     const c = kit.colors;
     const head = row(10);
     head.appendChild(kit.text('Advanced Options', { color: c.gold }));
-    head.appendChild(tag(kit.flatButton('Close', () => { this.advanced = false; redraw(); }, 60), { vtank: 'advanced-close' }));
+    head.appendChild(tag(kit.flatButton('Close', () => { this.advanced = false; this.message = ''; redraw(); }, 60), { vtank: 'advanced-close' }));
     area.appendChild(at(head, 8, 2));
     const box = el('div', { position: 'absolute', left: '8px', top: '24px', width: `${w - 16}px`, height: `${h - 30}px` }, { vtank: 'advanced-list' });
     const list = el('div', { display: 'flex', flexDirection: 'column', gap: '2px', paddingRight: '20px' });
@@ -934,14 +1067,14 @@ export class VTankWindow {
       const name = el('div', { width: '230px', flexShrink: '0' });
       name.appendChild(kit.text(o.name, { color: c.text }));
       r.appendChild(name);
-      if (o.kind === 'bool') r.appendChild(kit.check(this.value(o.name) === true || this.value(o.name) === 'true', (v) => this.setValue(o.name, v, redraw)));
-      else r.appendChild(this.optionField(o, 80, redraw));
-      if (o.help) r.appendChild(kit.text(o.help, { color: c.dim, maxWidth: w - 380 }));
+      // A check, a combo box of the enum's names, or a box; ranges in yards (= our metres) as on VTank's Options tab.
+      r.appendChild(this.optionField(o, o.kind === 'bool' ? 80 : 110, redraw));
+      if (o.help) r.appendChild(kit.text(o.help, { color: c.dim, maxWidth: w - 410 }));
       list.appendChild(r);
     }
     box.appendChild(list);
     area.appendChild(box);
-    kit.list(box);
+    this.list(box);
   }
 
   // ── Profiles ──
@@ -965,7 +1098,8 @@ export class VTankWindow {
       if (v === VT_LOAD_FROM_FILE) { this.loadFromFile(redraw); return; }
       if (this.source.status().running) { this.message = 'Turn Run Macro off (and stop) before changing profiles.'; redraw(); return; }
       if (v === VT_DEFAULT_PROFILE || v === VT_BY_CHAR) { void this.useTemplate(v, redraw); return; }
-      this.profileName = v; this.routeName = null; redraw();
+      // Kept as this character's choice for its next login (saveNow; BUG.routine-settings-reset).
+      this.profileName = v; this.routeName = null; this.changed(redraw);
     }), 130), { vtank: 'macro-profile' }), 146, 4));
     area.appendChild(at(tag(kit.flatButton('CopyTo', () => {
       // VTank: /vt settings save (Mine Only off) or savechar (Mine Only on), for the player to name (BBG).
@@ -1108,7 +1242,7 @@ export class VTankWindow {
     });
     box.appendChild(list);
     area.appendChild(box);
-    kit.list(box);
+    this.list(box);
     // Bottom: route type, insert mode, and the waypoint arrows.
     const by = h - 22;
     const modes: Array<{ v: Route['mode']; l: string }> = [{ v: 'circular', l: 'Circular' }, { v: 'linear', l: 'Linear' }, { v: 'follow', l: 'Follow' }, { v: 'once', l: 'Once' }];
@@ -1182,7 +1316,13 @@ export class VTankWindow {
     area.appendChild(at(tag(kit.flatButton('Add Recall', () => needHere((co) => this.addWaypoint({ coords: co, ...hereZ(), step: [{ kind: 'cast', spell: this.recall, target: 'self' }] }, redraw)), 86), { vtank: 'add-recall' }), bx, 62));
     area.appendChild(at(tag(kit.dropdown(this.recall, (a) => kit.menu(a, VT_RECALLS.map((x) => ({ label: x, value: x })), (v) => { this.recall = v; redraw(); }), 210), { vtank: 'recall' }), bx + 94, 62));
     area.appendChild(at(tag(kit.flatButton('Add Pause', () => needHere((co) => this.addWaypoint({ coords: co, ...hereZ(), step: [{ kind: 'wait', seconds: Math.max(0, Number(this.pauseSeconds) || 0) }] }, redraw)), 86), { vtank: 'add-pause' }), bx, 84));
-    area.appendChild(at(tag(kit.input(this.pauseSeconds, 66, (v) => { this.pauseSeconds = v; }), { vtank: 'pause-seconds' }), bx + 94, 84));
+    area.appendChild(at(tag(this.box(this.pauseSeconds, 66, {
+      label: 'Pause',
+      parse: (t) => (/^\+?(\d+(\.\d*)?|\.\d+)$/.test(t.trim()) ? { ok: true, value: Number(t.trim()) } : { ok: false, why: 'is not a number of seconds' }),
+      store: (v) => { this.pauseSeconds = String(v); },
+      shown: () => this.pauseSeconds,
+      say: (m) => { this.message = m; redraw(); },
+    }), { vtank: 'pause-seconds' }), bx + 94, 84));
     area.appendChild(at(kit.text('seconds', { color: c.text }), bx + 166, 86));
     area.appendChild(at(tag(kit.flatButton('Add Chat', () => needHere((co) => this.addWaypoint({ coords: co, ...hereZ(), step: [{ kind: 'say', text: this.chatText }] }, redraw)), 86), { vtank: 'add-chat' }), bx, 106));
     area.appendChild(at(tag(kit.input(this.chatText, 120, (v) => { this.chatText = v; }), { vtank: 'chat-text' }), bx + 94, 106));
@@ -1235,7 +1375,7 @@ export class VTankWindow {
     });
     box.appendChild(list);
     area.appendChild(box);
-    kit.list(box);
+    this.list(box);
   }
 
   /** Take an Items-tab entry off; a Monsters row whose Weapon / Offhand was that entry goes back to <AUTO>. */
@@ -1308,7 +1448,7 @@ export class VTankWindow {
     });
     box.appendChild(list);
     area.appendChild(box);
-    kit.list(box);
+    this.list(box);
     // Under the list: a name box, Add (that name) and Add Sel (the selected monster).
     const by = h - 22;
     let typed = '';
@@ -1450,7 +1590,7 @@ export class VTankWindow {
     }
     box.appendChild(list);
     area.appendChild(box);
-    kit.list(box);
+    this.list(box);
     const by = h - 24;
     area.appendChild(at(kit.text('Current State:', { color: c.text }), 8, by + 2));
     const cur = this.running() ? st.state ?? '' : p?.initialState ?? 'Default';
@@ -1521,12 +1661,20 @@ export class VTankWindow {
     }, 136), { vtank: 'new-state' }), 160, 22));
     // State name (renaming follows it everywhere it's named).
     root.appendChild(at(kit.text('State name', { color: c.dim }), 4, 48));
-    root.appendChild(at(tag(kit.input(s.name, 150, (v) => {
-      const nv = v.trim();
-      if (!nv || p.states.some((x) => x !== s && x.name === nv)) return;
-      renameState(p, s.name, nv);
-      this.editing = { state: nv, index: ed.index };
-      this.changed(redraw);
+    // A blank name or another state's is not kept (the box goes back to the name, with a line saying why).
+    const say = (m: string) => { this.message = m; dredraw(); };
+    this.ruleSay = say;
+    root.appendChild(at(tag(this.box(s.name, 150, {
+      label: 'State name',
+      parse: (t) => { const nv = t.trim(); return !nv ? { ok: false, why: 'is blank' } : p.states.some((x) => x !== s && x.name === nv) ? { ok: false, why: 'is another state\'s name' } : { ok: true, value: nv }; },
+      store: (v) => {
+        if (v === s.name) return;
+        renameState(p, s.name, String(v));
+        this.editing = { state: String(v), index: ed.index };
+        this.changed(redraw);
+      },
+      shown: () => s.name,
+      say,
     }), { vtank: 'state-name' }), 80, 46));
     // The condition's values (left pane).
     const left = el('div', { position: 'absolute', left: '4px', top: '72px', width: '300px', height: '326px' }, { vtank: 'condition-pane' });
@@ -1549,22 +1697,36 @@ export class VTankWindow {
       const label = this.ruleHelp === 'condition' ? vtCondDef(cond)?.label ?? '' : act?.label ?? '';
       const text = (this.ruleHelp === 'condition' ? VT_CONDITION_HELP : VT_ACTION_HELP)[label] ?? 'No help for this one.';
       root.appendChild(tag(at(kit.text(`${label}: ${text}`, { color: c.dim, maxWidth: 540 }), 74, 404), { vtank: 'rule-help' }));
-    }
+    } else if (this.message) root.appendChild(tag(at(kit.text(this.message, { color: c.warn, maxWidth: 540 }), 74, 410), { vtank: 'rule-message' }));
+  }
+
+  /** Prints a refused Meta value in Edit Meta Rule (set as it draws). */
+  private ruleSay: (m: string) => void = (m) => { this.message = m; };
+
+  /** A Meta value box: what's typed goes through the condition's or action's own set; the box shows what it kept. */
+  private paramBox(prm: Param, width: number, read: () => Record<string, string | number>, write: (cur: Record<string, string>) => void): HTMLElement {
+    return tag(this.box(String(read()[prm.key] ?? ''), width, {
+      label: prm.label,
+      parse: vtParamParse(prm, read),
+      store: (_v, t) => { const cur = Object.fromEntries(Object.entries(read()).map(([k, x]) => [k, String(x)])); cur[prm.key] = t; write(cur); },
+      shown: () => String(read()[prm.key] ?? ''),
+      say: (m) => this.ruleSay(m),
+    }), { vtankParam: prm.key });
   }
 
   /** Which "?" of Edit Meta Rule is showing its help. */
   private ruleHelp: 'condition' | 'action' | null = null;
 
-  private params(host: HTMLElement, p: RoutineProfile, values: Record<string, string | number>, defs: Param[], commit: (v: Record<string, string>) => void): void {
+  private params(host: HTMLElement, p: RoutineProfile, read: () => Record<string, string | number>, defs: Param[], commit: (v: Record<string, string>) => void): void {
     const { kit } = this;
-    const cur: Record<string, string> = Object.fromEntries(Object.entries(values).map(([k, v]) => [k, String(v)]));
+    const cur: Record<string, string> = Object.fromEntries(Object.entries(read()).map(([k, v]) => [k, String(v)]));
     defs.forEach((d, i) => {
       host.appendChild(at(kit.text(d.label, { color: kit.colors.dim }), 0, i * 24 + 2));
       if (d.type === 'state' || d.type === 'route') {
         const names = d.type === 'state' ? p.states.map((s) => s.name) : p.routes.map((r) => r.name);
         host.appendChild(at(tag(kit.dropdown(cur[d.key] || '[None]', (a) => kit.menu(a, names.map((x) => ({ label: x, value: x })), (v) => { cur[d.key] = v; commit(cur); }), 170), { vtankParam: d.key }), 110, i * 24));
       } else {
-        host.appendChild(at(tag(kit.input(cur[d.key] ?? '', 180, (v) => { cur[d.key] = v; commit(cur); }), { vtankParam: d.key }), 110, i * 24));
+        host.appendChild(at(this.paramBox(d, 180, read, commit), 110, i * 24));
       }
     });
   }
@@ -1588,14 +1750,16 @@ export class VTankWindow {
         if (sd?.params && sd.get && sd.set) {
           // A sub-condition's values: one compact line under it.
           const vals = row(4);
-          for (const prm of sd.params) vals.appendChild(tag(kit.input(String(sd.get(sc)[prm.key] ?? ''), 70, (v) => { const cur = Object.fromEntries(Object.entries(sd.get!(sc)).map(([k, x]) => [k, String(x)])); cur[prm.key] = v; const next = [...subs]; next[i] = sd.set!(cur); put(next); }), { vtankParam: prm.key }));
+          let now: RoutineCondition = sc;
+          for (const prm of sd.params) vals.appendChild(this.paramBox(prm, 70, () => sd.get!(now), (cur) => { now = sd.set!(cur); const next = [...subs]; next[i] = now; put(next); }));
           host.appendChild(at(vals, 16, i * 22 + 18));
         }
       });
       if (cond.kind !== 'not') host.appendChild(at(tag(kit.flatButton('Add...', () => put([...subs, { kind: 'always' }]), 100), { vtank: 'add-condition' }), 0, Math.max(0, subs.length) * 44 + 4));
       return;
     }
-    if (d?.params && d.get && d.set) this.params(host, p, d.get(cond), d.params, (v) => set(d.set!(v)));
+    let now: RoutineCondition = cond;
+    if (d?.params && d.get && d.set) this.params(host, p, () => d.get!(now), d.params, (v) => { now = d.set!(v); set(now); });
   }
 
   private actionPane(host: HTMLElement, p: RoutineProfile, rule: RoutineRule, both: () => void): void {
@@ -1615,19 +1779,17 @@ export class VTankWindow {
         const sd = vtActDef([a]);
         if (sd?.params && sd.get && sd.set) {
           const vals = row(4);
-          for (const prm of sd.params) vals.appendChild(tag(kit.input(String(sd.get([a])[prm.key] ?? ''), 90, (v) => {
-            const cur = Object.fromEntries(Object.entries(sd.get!([rule.do[i]])).map(([k, x]) => [k, String(x)]));
-            cur[prm.key] = v;
+          for (const prm of sd.params) vals.appendChild(this.paramBox(prm, 90, () => sd.get!([rule.do[i]]), (cur) => {
             rule.do.splice(i, 1, ...sd.set!(cur, p));
             this.changed(() => {});
-          }), { vtankParam: prm.key }));
+          }));
           host.appendChild(at(vals, 16, i * 44 + 20));
         }
       });
       host.appendChild(at(tag(kit.flatButton('Add...', () => { rule.do.push({ kind: 'say', text: '' }); both(); }, 100), { vtank: 'add-action' }), 0, rule.do.length * 44 + 4));
       return;
     }
-    if (d?.params && d.get && d.set) this.params(host, p, d.get(rule.do), d.params, (v) => { rule.do = d.set!(v, p); this.changed(() => {}); });
+    if (d?.params && d.get && d.set) this.params(host, p, () => d.get!(rule.do), d.params, (v) => { rule.do = d.set!(v, p); this.changed(() => {}); });
   }
 
   menuItems(items: string[]): MenuItem[] { return items.map((x) => ({ label: x, value: x })); }
@@ -2162,7 +2324,10 @@ export class VTankWindow {
         if (sub.toLowerCase() === 'get') return [`${o.name} = ${String(vtToVTank(o.name, this.value(o.name)))}`];
         if (sub.toLowerCase() === 'set' || sub.toLowerCase() === 'setinall') {
           // VTank's own units here (ranges ÷ 240), as /vt opt set takes them.
-          const val = vtFromVTank(o.name, v.join(' '));
+          // A value that isn't one of the option's is refused, not quietly turned into its default.
+          const r = vtParseOption(o.name, v.join(' '), 'vtank');
+          if (!r.ok) return [`${o.name}: "${v.join(' ').trim()}" ${r.why}; it stays ${String(vtToVTank(o.name, this.value(o.name)))}`];
+          const val = r.value;
           if (sub.toLowerCase() === 'setinall') for (const p of doc.profiles) p.settings = { ...(p.settings ?? {}), [o.name]: val };
           this.setValue(o.name, val, () => {});
           await this.saveNow(() => {});

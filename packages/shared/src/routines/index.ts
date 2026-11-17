@@ -16,3 +16,4 @@ export * from './vtankAf.js';
 export * from './vtankFiles.js';
 export * from './ubVerbs.js';
 export * from './normalizeRoutine.js';
+export * from './mergeRoutine.js';

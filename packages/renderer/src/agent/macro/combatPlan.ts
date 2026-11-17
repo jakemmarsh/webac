@@ -1102,7 +1102,8 @@ export interface PetOptions {
 /**
  * Whether an essence can be used now (MOSS PetAutomation.IsUsable): its level and Summoning skill
  * requirements met (itemUse.ts, the server's own check), charges left (Structure, PropertyInt 92; unknown
- * counts as some), and no other Summoning Mastery's (PropertyInt 362 against yours). Null when usable.
+ * counts as some), and no other Summoning Mastery's (PropertyInt 362 against yours, where a server sends the essence's;
+ * ACE doesn't, and vtMacro's petStep learns it from the server's refusal instead). Null when usable.
  */
 export function petUnusable(device: PlanItem, skills: PlanSkill[], level?: number, mastery?: number): string | null {
   const req = useRequirementProblem(device, skills, level);

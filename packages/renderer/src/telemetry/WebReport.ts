@@ -13,11 +13,17 @@
  * Cloudflare's country / ASN / colo.
  *
  * Privacy: codes, counts, durations, the bridge's host name, the browser's
- * brand list and language only. No account, character, password or address
+ * brand list and language, and the page's random `trace` / the browser
+ * profile's random `bid` (the ids the bridge's client_preworld lines carry,
+ * so a report joins them) only. No account, character, password or address
  * typed by the player (a custom bridge is never reported); Cloudflare sees
  * the client IP itself.
  */
 import type { WorldListStep } from '../launcher/worldDirectory.js';
+import { BROWSER_ID_PATTERN } from './LoginTags.js';
+
+/** The page trace's shape (PreworldReporter.trace). */
+const TRACE_PATTERN = /^[a-z0-9]{8,32}$/;
 
 export const WEB_REPORT_PATH = '/__webac/report';
 
@@ -44,6 +50,10 @@ export interface WebReport {
   bridgeHost: string | null;
   ua: string;
   lang: string | null;
+  /** OBS.client-error-identity — the page's trace id (PreworldReporter.trace), when well formed. */
+  trace?: string;
+  /** This browser profile's random id (LoginTags.browserId), when well formed. */
+  bid?: string;
 }
 
 export interface WebReportInput {
@@ -56,6 +66,10 @@ export interface WebReportInput {
   error: unknown;
   /** The bridge URL the request went to (ws:// / wss://); only its host is reported. */
   bridgeUrl: string;
+  /** The page's trace id (PreworldReporter.trace); dropped unless well formed. */
+  trace?: string | null;
+  /** This browser profile's id (LoginTags.browserId); dropped unless well formed. */
+  bid?: string | null;
 }
 
 type NavLike = {
@@ -98,6 +112,8 @@ export function buildWebReport(input: WebReportInput, nav: NavLike | null | unde
     bridgeHost: hostOf(input.bridgeUrl),
     ua: browserBrand(nav),
     lang: typeof nav?.language === 'string' ? nav.language.slice(0, 35) : null,
+    ...(typeof input.trace === 'string' && TRACE_PATTERN.test(input.trace) ? { trace: input.trace } : {}),
+    ...(typeof input.bid === 'string' && BROWSER_ID_PATTERN.test(input.bid) ? { bid: input.bid } : {}),
   };
 }
 

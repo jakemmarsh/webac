@@ -12,7 +12,7 @@ import { buildCombatFamilies, planCombat, type CombatInput, type CombatMonster, 
 import { pickLadderWeapon, weaponElement, weaponRating, type LadderInput } from '../packages/renderer/src/agent/macro/weaponLadder.ts';
 import { debuffSources, itemCastLine } from '../packages/renderer/src/agent/macro/itemDebuffs.ts';
 import { planDrain, type DrainRow } from '../packages/renderer/src/agent/macro/drainPlan.ts';
-import { planPetRefill } from '../packages/renderer/src/agent/macro/petRefill.ts';
+import { isSummoningEssence, petRefusal, planPetRefill } from '../packages/renderer/src/agent/macro/petRefill.ts';
 import { drainRow, parseSpellSql } from '../tools/build-drain-tables.ts';
 import EOL_DRAINS from '../packages/renderer/src/agent/macro/drains/eol.ts';
 import DM_DRAINS from '../packages/renderer/src/agent/macro/drains/dm.ts';
@@ -271,6 +271,26 @@ describe('pet refills (§1.8; PetRefillCount-Normal / -Idle, MOSS TrySelectRefil
     expect(planPetRefill([ess(1, 1, 1)], [spirit(9, 1)], 3)).toBeNull();
     expect(planPetRefill([ess(1, 10)], [spirit(9, 1)], 3)).toBeNull();
     expect(planPetRefill([ess(1, 1)], [], 3)).toBeNull();
+  });
+});
+
+describe('what the client can tell of an essence on ACE (isSummoningEssence, petRefusal)', () => {
+  it('an essence is an item Summoning is needed to use (366 / 368 = 54); ACE never sends PetClass 266', () => {
+    expect(isSummoningEssence({ ints: { 91: 50, 92: 50, 280: 213, 366: 54, 367: 310, 369: 40 } })).toBe(true); // Frost Wisp Essence (50)
+    expect(isSummoningEssence({ ints: { 91: 50, 92: 50, 280: 213, 368: 54, 367: 530 } })).toBe(true); // a (200) one: Summoning specialized
+    expect(isSummoningEssence({ ints: { 266: 49206 } })).toBe(true); // a server that sends PetClass
+    expect(isSummoningEssence({ ints: { 5: 50, 19: 200 } })).toBe(false); // Baby Drudge Crate: a cosmetic pet device
+    expect(isSummoningEssence({ ints: { 366: 34 } })).toBe(false); // an item needing War Magic
+    expect(isSummoningEssence({})).toBe(false); // not examined
+  });
+  it('ACE\'s refusal lines are read as refusals; the mastery one names the mastery for that essence only', () => {
+    expect(petRefusal(['You must be a Naturalist to use the Fire Grievver Essence (50)'], 'Fire Grievver Essence (50)')).toEqual({ line: 'You must be a Naturalist to use the Fire Grievver Essence (50)', mastery: 'Naturalist' });
+    expect(petRefusal(['You must be a Naturalist to use the Fire Grievver Essence (50)'], 'Mud Golem Essence')).toBeNull();
+    for (const l of ["Claude's Frost Wisp is already active", 'You have used this item too recently', 'Your summoning device does not have enough charges to function!',
+      'You are not high enough level to use that!', "Your Summoning is too low to use that item's magic.", "You must specialize Summoning to use that item's magic."]) {
+      expect(petRefusal(['The Drudge Skulker hits you for 5 points of bludgeoning damage!', l], 'Frost Wisp Essence (50)')?.line).toBe(l);
+    }
+    expect(petRefusal(['You cast Flame Bolt I on Drudge Skulker'], 'Frost Wisp Essence (50)')).toBeNull();
   });
 });
 

@@ -43,6 +43,9 @@ export function validateReport(body) {
     bridgeHost: typeof body.bridgeHost === 'string' && /^[a-z0-9.-]{1,253}$/i.test(body.bridgeHost) ? body.bridgeHost : null,
     ua: str(body.ua, 160),
     lang: str(body.lang, 35),
+    // OBS.client-error-identity — the page's random trace and the browser profile's random id, as the bridge's client_preworld lines carry them.
+    trace: typeof body.trace === 'string' && /^[a-z0-9]{8,32}$/.test(body.trace) ? body.trace : null,
+    bid: typeof body.bid === 'string' && /^[0-9a-f]{8}$/.test(body.bid) ? body.bid : null,
   };
 }
 
