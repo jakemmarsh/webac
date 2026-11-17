@@ -1226,6 +1226,13 @@ export { magicSkillChance };
 const GIVE_ANSWER = /^(you give |item not found|target not found|give amount not valid|you can only move or use one item|you cannot move or use an item while attacking|action cancelled)|can't be given|not accepting gifts|too busy to accept|cowers from you/i;
 /** A give's refusal because one of you was busy: worth one retry a moment later (AgentApi.giveNow). */
 const GIVE_BUSY = /too busy to accept gifts|you can only move or use one item at a time/i;
+/**
+ * A wield the client itself turned down for the state it is in, not for the moment: the double-click's blocker had
+ * nowhere to go ("<pack> is completely full!" with "Moving X to your backpack - cannot unwield the X", acclient.exe
+ * 0x3ccd04 / 0x3ccd38) or AutoSort's "You're already wearing …". Sent again unchanged, it is refused again
+ * (BUG.autowield-full-pack-spam): AgentApi.equipHeld holds it until the packs or gear change.
+ */
+const WIELD_REFUSED_BY_STATE = /cannot unwield the |is completely full!|already wearing/i;
 const INVENTORY_REFUSAL = /can't be|cannot|can not|you can only|too busy|too encumbered|unable to|not experienced enough|must unwield|already wearing|you need|you must/i;
 /** A cast's outcome among its reply lines (AgentApi.castOnce waits for one): it landed, fizzled, was refused or resisted, did damage, restored or drained a vital, or the target died. */
 const CAST_OUTCOME = /you cast|fizzle|do not have|don't have|can't|cannot|not enough|unable|refuse|too busy|out of range|resists?|you fail to affect|invalid target|you are not|your spell|\bpoints? with\b|\byou (?:restore|drain) [\d,]+ points? of\b|hit the environment|you've earned [\d,]+ experience/i;
@@ -8768,6 +8775,38 @@ export class AgentApi {
       : { ok: false, message: `${failed}: no answer from the server in ${secs} s (ac_inventory in a moment shows whether it went through)` };
   }
 
+  /**
+   * Wields the client refused for the state the packs and gear were in (WIELD_REFUSED_BY_STATE), by item: that state
+   * (wieldStateKey), when, and the client's words. A routine's combat step asked for the same arrows every macro step
+   * (STEP_MS, ~0.58 s) with the main pack full, and each ask printed the refusal pair again, ~105 times a minute for
+   * 7+ minutes (prod, end of retail, 2026-11-17 03:13Z). Retail's AutoWield answers each double-click once; a player
+   * doesn't double-click twice a second for seven minutes.
+   */
+  private equipRefused = new Map<number, { key: string; at: number; why: string }>();
+  /** A held wield is tried again after this long (ms) even when nothing seen changed, in case the change was one the key misses. */
+  static readonly EQUIP_REFUSED_HOLD_MS = 60_000;
+
+  /** What a refused wield's answer depends on: free pack slots, what is worn, and how many things you carry. */
+  private wieldStateKey(): string {
+    const inv = this.host.inventory();
+    const worn = inv.filter((i) => i.where === 'equipped').map((i) => i.guid >>> 0).sort((a, b) => a - b).join(',');
+    return `${this.packSlots()?.free ?? '?'}|${worn}|${inv.length}`;
+  }
+
+  /**
+   * Why a wield of `guid` would be refused again now, or null: the client turned it down (WIELD_REFUSED_BY_STATE) and
+   * neither the packs nor the gear have changed since, within EQUIP_REFUSED_HOLD_MS. equip() answers with it and sends
+   * nothing; the macro's planners leave the item out (vtMacro.items), so the fight goes on with what is in hand.
+   * Freeing a pack slot, or any change to what is carried or worn, lets the next ask go out.
+   */
+  equipHeld(guid: number): string | null {
+    const h = this.equipRefused.get(guid >>> 0);
+    if (!h) return null;
+    const secs = Math.round((this.host.now() - h.at) / 1000);
+    if (this.host.now() - h.at >= AgentApi.EQUIP_REFUSED_HOLD_MS || this.wieldStateKey() !== h.key) { this.equipRefused.delete(guid >>> 0); return null; }
+    return `${h.why} (${secs} s ago, and nothing in your packs or gear has changed since, so it was not asked again: ${/already wearing/i.test(h.why) ? 'take off what is there' : 'free a pack slot'} first)`;
+  }
+
   /** After an optimistic equip looks done, how long a host that can't say whether the server answered waits for a refusal (ms). */
   static readonly INVENTORY_CONFIRM_MS = 1200;
 
@@ -8961,6 +9000,9 @@ export class AgentApi {
     const inv = this.host.inventory();
     const it = inv.find((i) => i.guid === g);
     if (it?.where === 'equipped') return { ok: true, message: `${name} is already equipped${it.slot ? ` (${slotText(it.mask ?? 0) || it.slot})` : ''}` };
+    // Refused a moment ago for the packs or gear as they still are: said again, nothing sent or taken off (equipHeld).
+    const held = this.equipHeld(g);
+    if (held) return { ok: false, message: `not equipped: ${name}: ${held}` };
     // A shield beside a held caster, two-hander or launcher: the server refuses it (ACE CheckWeaponCollision), and
     // retail's AutoWield sends it anyway. Said before sending, as the paperdoll would show the hand taken.
     const blocked = it ? shieldRefusal(it, inv) : null;
@@ -8991,6 +9033,9 @@ export class AgentApi {
     }
     const r = await this.inventoryRequest(`equipped ${name}`, `not equipped: ${name}`, () => this.host.wield(g),
       () => this.host.inventory().find((i) => i.guid === g)?.where === 'equipped', 4000, { optimistic: g, item: name });
+    if (!r.ok && WIELD_REFUSED_BY_STATE.test(r.message)) {
+      this.equipRefused.set(g >>> 0, { key: this.wieldStateKey(), at: this.host.now(), why: r.message.slice(`not equipped: ${name}: `.length).split('\n')[0] });
+    } else this.equipRefused.delete(g >>> 0);
     if (!r.ok) {
       // What came off on the way (taken off here, or the double-click's own dequip of a blocker) is said: it is in the pack now.
       const nowWorn = new Set(this.host.inventory().filter((i) => i.where === 'equipped').map((i) => i.guid));
@@ -15581,8 +15626,11 @@ export class AgentApi {
       picks.set(next.guid, tries);
       pending = { item: next, at: now, seq: this.seqN, units: units(), tries };
       if (!this.host.pickUp(next.guid)) {
-        // The client refused to send it (its own centre-screen notice says why).
-        failed.set(next.guid, { item: next, why: saidSince(pending.seq) ?? 'the client would not send the move', tries });
+        // The client refused to send it (its own centre-screen notice says why). A full pack ("… is completely full!")
+        // refuses it again while this loot runs (it only fills the packs), so it is not picked again: with
+        // CorpseLootItemMaxAttempts 20 each item printed the notice up to 20 times (BUG.autowield-full-pack-spam sweep).
+        const why = saidSince(pending.seq) ?? 'the client would not send the move';
+        failed.set(next.guid, { item: next, why, tries: /completely full|can carry no more/i.test(why) ? itemTries : tries });
         pending = null;
       }
       return null;

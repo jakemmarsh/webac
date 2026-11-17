@@ -682,7 +682,9 @@ export class UbRuntime {
           for (const b of step.buy) { if (!job.cancelled) h.buy(b.item.guid, b.amount); }
           await h.sleep(1500);
         } else if (step.splitNote) {
-          h.splitStack(step.splitNote.guid, 1);
+          // Refused (a full pack: "… is completely full!"): the same split is refused every round, so stop, as an unsold
+          // round does (BUG.autowield-full-pack-spam sweep: up to 50 refusals 1.5 s apart).
+          if (!h.splitStack(step.splitNote.guid, 1)) break;
           await h.sleep(1500);
         } else {
           let sold = 0;

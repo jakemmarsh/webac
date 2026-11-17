@@ -274,7 +274,14 @@ export class VtMacro {
     if (!step) return null;
     if (stance !== 'peace') return { label: `craft: to make ${step.result}: switching to peace mode`, run: () => this.switchMode(p, 'peace') };
     // A recipe on two of the same thing, one stack carried: split one off; the next decision crafts.
-    if (step.split) { const s = step.split; return { label: `craft: ${step.why}`, run: async () => { this.craftAt = this.now() - 2000; return this.api.splitStack(s.guid, 1); } }; }
+    // A split needs a free pack slot: with none the client refuses it ("… is completely full!") every time, and the
+    // 1 s re-ask after a split printed that each second (BUG.autowield-full-pack-spam sweep). A refused split waits the
+    // full craft gate.
+    if (step.split) {
+      if (this.api.packSlots()?.free === 0) return null;
+      const s = step.split;
+      return { label: `craft: ${step.why}`, run: async () => { const r = this.api.splitStack(s.guid, 1); this.craftAt = r.ok ? this.now() - 2000 : this.now(); return r; } };
+    }
     return { label: `craft: ${step.why}`, run: async () => {
       this.craftAt = this.now();
       const res = this.api.useOn(step.first.guid, step.second.guid);
@@ -352,7 +359,8 @@ export class VtMacro {
    * are left out for a minute (and said so) instead of asking forever.
    */
   private toMagic(p: RoutineProfile & { vtank: VtankProfileData }, label: string, before?: () => void): VtStep {
-    const inv = this.api.inventory();
+    // A wand whose wield was just refused for the packs or gear as they are is not asked for again (AgentApi.equipHeld).
+    const inv = this.api.inventory().filter((i) => i.where === 'equipped' || !this.api.equipHeld(i.guid));
     const isCaster = (i: { itemType?: number }) => ((i.itemType ?? 0) & 0x8000) !== 0;
     if (!inv.some((i) => i.where === 'equipped' && isCaster(i))) {
       const listed = new Set(p.vtank.items.map((x) => x.name.toLowerCase()));
@@ -642,7 +650,10 @@ export class VtMacro {
     const want = names ? new Set(names.map((n) => n.toLowerCase())) : null;
     const look = new Set(examine.map((n) => n.toLowerCase()));
     const ids = this.spellIdsByName();
-    return this.api.inventory().filter((i) => !want || want.has(i.name.toLowerCase())).map((i) => {
+    // A carried item whose wield the client just refused for a full pack (or a taken slot) is left out until the packs or
+    // gear change (AgentApi.equipHeld): the plan goes on with what is in hand rather than asking for it again every step
+    // (BUG.autowield-full-pack-spam: the refusal pair ~105 times a minute for 7+ minutes).
+    return this.api.inventory().filter((i) => (!want || want.has(i.name.toLowerCase())) && (i.where === 'equipped' || !this.api.equipHeld(i.guid))).map((i) => {
       const d = this.api.itemData(i.guid);
       // Listed items, and carried ammunition and wielded launchers (their AmmoType / DamageType pick the arrows), are examined quietly once.
       // So are wielded melee weapons: their DamageType / AttackType / WeaponType set the power bar (attackPower.ts).
@@ -794,19 +805,23 @@ export class VtMacro {
       // Held until the server answers (api.use waits for it); a refusal waits 1 s, a summon its cooldown.
       this.petRetryAt = this.now() + 5_000;
       const res = await this.api.use(pet.device.guid);
-      if (!res.ok) { this.petRetryAt = this.now() + 1_000; return res; }
+      // A refusal (skill, level, an essence out of charges) is the same answer a second later: it waits as a refused buff
+      // item does (itemHeld's 30 s), not 1 s (BUG.autowield-full-pack-spam sweep).
+      if (!res.ok) { this.petRetryAt = this.now() + VtMacro.REFUSED_RETRY_MS; return res; }
       const cd = itemCooldown(pet.device);
       if (cd) this.cooldownUntil.set(cd.id, this.now() + cd.seconds * 1000);
       this.petRetryAt = this.now();
       return res;
     } };
   }
-  /** When Summon Pets may try again (the server's answer to the last summon, a refusal's 1 s). */
+  /** How long a refused summon, refill, dispel item or buff item waits before it is asked again (ms). */
+  static readonly REFUSED_RETRY_MS = 30_000;
+  /** When Summon Pets may try again (the server's answer to the last summon, a refusal's REFUSED_RETRY_MS). */
   private petRetryAt = -Infinity;
 
   /**
    * VirindiTank's pet refills (petRefill.ts): an Items-tab essence down to `option`'s charge count is
-   * topped up with an Encapsulated Spirit in peace mode. A refused refill waits 1 s.
+   * topped up with an Encapsulated Spirit in peace mode. A refused refill waits REFUSED_RETRY_MS.
    */
   private refillStep(p: RoutineProfile & { vtank: VtankProfileData }, settings: Record<string, string | number | boolean>, stance: Stance, option: 'PetRefillCount-Normal' | 'PetRefillCount-Idle'): VtStep | null {
     if (!p.vtank.items.length || this.now() < this.refillRetryAt) return null;
@@ -818,7 +833,7 @@ export class VtMacro {
     return { label: `pet refill: ${r.why}`, run: async () => {
       const res = this.api.useOn(r.spirit.guid, r.device.guid);
       // The essence's charges change on the server's answer: look again shortly, and after a refusal wait 1 s.
-      this.refillRetryAt = this.now() + (res.ok ? 2_000 : 1_000);
+      this.refillRetryAt = this.now() + (res.ok ? 2_000 : VtMacro.REFUSED_RETRY_MS);
       this.asked.delete(r.device.guid);
       setTimeout(() => void this.api.appraise(r.device.guid, { quiet: true }), 1_500);
       return res;
@@ -865,7 +880,14 @@ export class VtMacro {
         const d = this.api.itemData(i.guid);
         if (!d) { if (/gem|food|potion|misc/i.test(i.type ?? '') && !this.asked.has(i.guid)) { this.asked.add(i.guid); void this.api.appraise(i.guid, { quiet: true }); } continue; }
         const sid = d.did?.[28];
-        if (sid && isDispel(t.spells.get(sid)?.desc ?? '')) return { label: `dispel: ${bad.name} on you, using ${i.name}`, run: async () => this.api.useCarried(i.guid, 'self') };
+        // The buff items' hold (itemHeld): a refused use (mana, Arcane Lore, a wield it needs) waits 30 s, not the next
+        // step; every 500 ms before (BUG.autowield-full-pack-spam sweep). Another dispel item is tried meanwhile.
+        if ((this.itemHeld.get(`i${i.guid}`) ?? 0) > this.now()) continue;
+        if (sid && isDispel(t.spells.get(sid)?.desc ?? '')) return { label: `dispel: ${bad.name} on you, using ${i.name}`, run: async () => {
+          const res = await this.api.useCarried(i.guid, 'self');
+          this.itemHeld.set(`i${i.guid}`, this.now() + (res.ok ? 5_000 : VtMacro.REFUSED_RETRY_MS));
+          return res;
+        } };
       }
     }
     return null;
@@ -1548,7 +1570,7 @@ export class VtMacro {
     return { label: `buff item: ${pick.why}`, run: async () => {
       const res = await this.api.use(pick.item.guid);
       // The effect shows a moment after the use: the item and its family wait 5 s, or 30 s when it was refused.
-      const until = this.now() + (res.ok ? 5_000 : 30_000);
+      const until = this.now() + (res.ok ? 5_000 : VtMacro.REFUSED_RETRY_MS);
       this.itemHeld.set(`i${pick.item.guid}`, until);
       this.itemHeld.set(`c${pick.spell.category}`, until);
       const cd = itemCooldown(pick.item);

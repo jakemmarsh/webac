@@ -1006,6 +1006,27 @@ describe.skipIf(!existsSync(PORTAL))('VirindiTank\'s macro over the real spell t
         expect(host.sent).toContain('mode peace');
         expect(host.sent).toContain(`usewith 50000b01 ${ESSENCE.toString(16)}`);
       });
+
+      it('BUG.autowield-full-pack-spam sweep: a refused refill waits REFUSED_RETRY_MS, not 1 s (it was asked again every second)', async () => {
+        const data = essence({ 92: 1, 91: 50 });
+        host.inv = [...host.inv, { guid: 0x50000b01, name: 'Encapsulated Spirit', where: 'main pack', stack: 5 }] as never;
+        host.useWithTarget = (a: number, b: number) => { host.sent.push(`usewith ${a.toString(16)} ${b.toString(16)}`); return false; };
+        api.routine.start(vt({ vtank: data, settings }));
+        await step(20_000);
+        expect(host.sent.filter((x) => x === `usewith 50000b01 ${ESSENCE.toString(16)}`)).toHaveLength(1);
+        await step(15_000);
+        expect(host.sent.filter((x) => x === `usewith 50000b01 ${ESSENCE.toString(16)}`)).toHaveLength(2);
+      });
+
+      it('BUG.autowield-full-pack-spam sweep: a refused summon waits REFUSED_RETRY_MS, not 1 s', async () => {
+        skulker();
+        withSummoning();
+        const data = essence();
+        host.use = (g: number) => { host.sent.push(`use ${g.toString(16)}`); return false; };
+        api.routine.start(vt({ vtank: data, settings }));
+        await step(25_000);
+        expect(host.sent.filter((x) => x === `use ${ESSENCE.toString(16)}`)).toHaveLength(1);
+      });
     });
   });
 

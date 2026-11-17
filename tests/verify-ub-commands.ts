@@ -352,6 +352,27 @@ describe('AutoVendor (UB AutoVendor.cs)', () => {
     expect(h.navHeld.at(-1)).toBe(0);
   });
 
+  it('BUG.autowield-full-pack-spam sweep: a note split the client refuses (a full pack) ends the run, not 50 refusals 1.5 s apart', async () => {
+    const { ub, h } = setup();
+    h.vend = vendor();
+    const sellNotes: LootRule[] = [{ label: 'Scarabs', action: 'keep-up-to', count: 10, match: { name: 'Mana Scarab' } }, { label: 'Notes', action: 'sell', match: { name: 'Trade Note' } }];
+    h.inv = [{ guid: 40, name: 'Trade Note (250)', where: 'pack', value: 250, stack: 3 }];
+    h.self.pyreals = 0;
+    h.splitStack = (g: number, n: number) => { h.log.push(`split ${g} ${n}`); return false; };
+    const lines = await ub.runVendor({ cancelled: false }, 500, sellNotes);
+    expect(h.log.filter((l) => l.startsWith('split'))).toEqual(['split 40 1']);
+    expect(lines).toEqual(['AutoVendor finished: Aun Shaman']);
+    // The inverse: a split that goes through carries on to the sale.
+    const ok = setup();
+    ok.h.vend = vendor();
+    ok.h.inv = [{ guid: 40, name: 'Trade Note (250)', where: 'pack', value: 250, stack: 3 }];
+    ok.h.self.pyreals = 0;
+    // (The fake's split leaves one note behind, the rest gone elsewhere: the next round sells it.)
+    ok.h.splitStack = (g: number, n: number) => { ok.h.log.push(`split ${g} ${n}`); ok.h.inv = [{ ...ok.h.inv[0]!, stack: 1 }]; return true; };
+    await ok.ub.runVendor({ cancelled: false }, 500, sellNotes);
+    expect(ok.h.log.filter((l) => /^(split|sell)/.test(l))).toEqual(['split 40 1', 'sell 40 null']);
+  });
+
   it('starts by itself when a vendor with a profile opens (UB ApproachVendor); TestMode only says what it would do', async () => {
     const { ub, h, store } = setup();
     store.setValue('AutoVendor.TestMode', true);

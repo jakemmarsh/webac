@@ -256,7 +256,9 @@ export function vtankExprHost(api: AgentApi, engine: RoutineEngine, print: (text
       const listed = new Set((engine.current()?.vtank?.items ?? []).map((x) => x.name.toLowerCase()));
       const wands = api.inventory().filter((i) => ((i.itemType ?? 0) & CASTER) !== 0 && listed.has(i.name.toLowerCase()));
       if (wands.some((w) => w.where === 'equipped')) return true;
-      if (wands[0]) void api.equip(wands[0].guid);
+      // One whose wield the client just refused for the packs or gear as they are is passed over (AgentApi.equipHeld).
+      const next = wands.find((w) => !api.equipHeld(w.guid));
+      if (next) void api.equip(next.guid);
       return false;
     },
     busyState: () => (game.busy?.() ? 1 : 0),
