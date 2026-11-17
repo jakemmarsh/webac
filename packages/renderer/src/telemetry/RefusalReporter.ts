@@ -471,3 +471,22 @@ export class RefusalReporter {
     this.outbox.post(this.opts.endpoint, JSON.stringify(ev));
   }
 }
+
+/**
+ * BUG.server-text-spew-double-refusal — show a server-sent line (ServerMessage 0xF7E0 / the 1999
+ * server's 0xF62C, a transient string) and report it once, as the server's. `show` runs with the
+ * client spew tap off: a 0x1a line lands in the spew through GameUI.displayErrorText, whose tap would
+ * otherwise record it as a client refusal (`c:`) beside the server record (`t:`), and the monitor read
+ * GDLE's "… does not have enough pack space to complete this trade!" as our client's (2026-11-16).
+ */
+export function showServerText(
+  reporter: Pick<RefusalReporter, 'quietly' | 'serverText'> | null | undefined,
+  context: 'server_text' | 'transient',
+  text: string,
+  chatType: number | null,
+  show: () => void,
+): void {
+  if (reporter) reporter.quietly(show);
+  else show();
+  reporter?.serverText(context, text, chatType);
+}

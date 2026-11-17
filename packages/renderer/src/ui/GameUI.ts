@@ -13953,11 +13953,17 @@ export class GameUI {
           this.targetGlowTimer = setTimeout(() => { this.targetGlowTimer = null; glow.style.display = 'none'; }, GameUI.SELECTION_FLASH_MS);
           this.seedToolbarSplit(this.hud.target, stackSize);
         }
-        if (isStack && this.toolbarMaxSplitSize !== stackSize) {
-          // Server changed the selected stack's size (SetStackSize) —
-          // track the new bound, keeping the user's split choice clamped.
-          this.toolbarMaxSplitSize = stackSize;
-          this.setToolbarSplitSize(this.toolbarSplitSize);
+        if (Math.max(1, stackSize) !== this.toolbarMaxSplitSize) {
+          // Server changed the selected stack's size (SetStackSize, a merge
+          // into it, a split off it): gmToolbarUI::RecvNotice_
+          // ItemAttributesChanged @ 004bf8f0 re-runs HandleSelectionChanged
+          // whenever the selection's stack size (0 → 1) differs from
+          // maxSplitSize, which seeds the split afresh (the whole stack, or
+          // 1/1 below two). Keeping the old choice left a partial split
+          // nobody picked, so the next drag split the stack and the 1999
+          // tray refused it ("Move the split item before making a shortcut",
+          // prod 2026-11-16 trace 6c1831d3dfd9daa4).
+          this.seedToolbarSplit(this.hud.target, stackSize);
         }
         // CORE.10.b — the snake mana meter (el 0x100001a2) replaces the
         // heart meter once a successful QueryItemMana reply arrives for

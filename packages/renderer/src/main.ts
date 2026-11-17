@@ -452,7 +452,7 @@ import { launcherConnectFailedReport, reportFromPage, worldListFailedReport } fr
 import { WorldReporter, classifyGpu, unmaskedRenderer, type WorldEndCause } from './telemetry/WorldReporter.js';
 import { FramePhaseTimer, PHASE, ProgramCreationCounter, CompileTrace, netHandlerCost, streamHandlerCost, connectionEventOp, timedAgentTick } from './telemetry/MainThreadCost.js';
 import { AutomationReporter } from './telemetry/AutomationReporter.js';
-import { RefusalReporter, scrubNames } from './telemetry/RefusalReporter.js';
+import { RefusalReporter, scrubNames, showServerText } from './telemetry/RefusalReporter.js';
 import { knownObjectNames, pendingRequestDetail, castRefusalDetail, selectionRefusalDetail, CastPressTracker, type RefusalDetail, type PlacedObject } from './telemetry/RefusalTemplates.js';
 import { ObjsendReporter, countReleasedInView, summarizeObjects, type ObjsendSnapshot } from './telemetry/ObjsendReporter.js';
 import { MoveLimiterReporter } from './telemetry/MoveLimiterReporter.js';
@@ -11084,9 +11084,10 @@ async function main() {
         // SWEEP1999.messages HC-1 / HC-8 — TextboxString @ 0057d3a0 is an AddTextToScroll: type 0x1a
         // goes to the spew box (it showed nowhere before: the main window hides 0x1a). The 1999
         // client paints the raw channel from its own slot table instead, 0x1a a green chat line.
-        addServerTextLine(gameUI, eraRules.serverTextSlots, data.message, data.chatType);
-        // TELEMETRY.refusal-events — GDLE's and the AC1999 server's text refusals (error type, or a refusal's wording).
-        refusalReporter?.serverText('server_text', data.message, data.chatType);
+        // TELEMETRY.refusal-events — GDLE's and the AC1999 server's text refusals (error type, or a refusal's wording),
+        // recorded once as the server's: the spew tap is off while the line is shown (BUG.server-text-spew-double-refusal).
+        showServerText(refusalReporter, 'server_text', data.message, data.chatType,
+          () => addServerTextLine(gameUI, eraRules.serverTextSlots, data.message, data.chatType));
 
         // BUG.login-position-restore-unreachable-positiontypes — ACE never
         // ships a position packet for a lifestone/portal Tie bind (verified:
@@ -11128,8 +11129,7 @@ async function main() {
       onCommunicationTransientString: (data: TransientStringData) => {
         // DECOMP.transient-string-notice — Handle_Communication__TransientString
         // @ 0057d460: AddTextToScroll(text, 0x1a) — the spew-box notice.
-        refusalQuietly(() => addTextToScroll(gameUI, transientStringLine(data.message)));
-        refusalReporter?.serverText('transient', data.message, null);
+        showServerText(refusalReporter, 'transient', data.message, null, () => addTextToScroll(gameUI, transientStringLine(data.message)));
         // BUG.nonpositional-human-table-sounds — no chime: retail's client
         // plays nothing for a transient string (audio/RetailLocalSounds).
       },
@@ -13425,8 +13425,7 @@ async function main() {
       onTransientString: (data) => {
         // Same retail handler as onCommunicationTransientString
         // (DECOMP.transient-string-notice): the 0x1a spew-box notice.
-        refusalQuietly(() => addTextToScroll(gameUI, transientStringLine(data.message)));
-        refusalReporter?.serverText('transient', data.message, null);
+        showServerText(refusalReporter, 'transient', data.message, null, () => addTextToScroll(gameUI, transientStringLine(data.message)));
       },
 
       // FAITHFUL.581 — `GameMessagePublicUpdatePosition` (0x02DC) ships

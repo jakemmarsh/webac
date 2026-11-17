@@ -225,6 +225,37 @@ describe('CORE.10.a — toolbar stack-split UI (behavioral)', () => {
     expect(ui.targetNameHost.textContent).toBe('60 Arrowheads');
   });
 
+  // gmToolbarUI::RecvNotice_ItemAttributesChanged @ 004bf8f0: a stack-size change of the selection
+  // re-runs HandleSelectionChanged, which seeds the split afresh (prod 2026-11-16: a stale partial
+  // split refused an AC1999 tray drop with "Move the split item before making a shortcut").
+  it('a stack that grows (a merge into it) reseeds the split to the whole stack, not the old amount', () => {
+    clearTarget();
+    setTarget({ stackSize: 10, id: 0x8000777a });
+    expect(ui.getToolbarSplitState()).toEqual({ splitSize: 10, maxSplitSize: 10 });
+    ui.hud.target.stackSize = 25;
+    ui.updateHUD();
+    expect(ui.getToolbarSplitState()).toEqual({ splitSize: 25, maxSplitSize: 25 });
+  });
+
+  it('a partial split the player chose is dropped when the stack size changes (retail reseeds)', () => {
+    clearTarget();
+    setTarget({ stackSize: 40, id: 0x8000777b });
+    entryEl().value = '7';
+    commit();
+    expect(ui.getToolbarSplitState()).toEqual({ splitSize: 7, maxSplitSize: 40 });
+    ui.hud.target.stackSize = 33; // 7 split off and moved
+    ui.updateHUD();
+    expect(ui.getToolbarSplitState()).toEqual({ splitSize: 33, maxSplitSize: 33 });
+  });
+
+  it('a stack that drops to one resets the split to 1/1 (no stale maxSplitSize)', () => {
+    clearTarget();
+    setTarget({ stackSize: 5, id: 0x8000777c });
+    ui.hud.target.stackSize = 1;
+    ui.updateHUD();
+    expect(ui.getToolbarSplitState()).toEqual({ splitSize: 1, maxSplitSize: 1 });
+  });
+
   it('an owned coinstack labels "%d %hs (of %d)" against hud.coinValue', () => {
     clearTarget();
     ui.hud.coinValue = 5000;
