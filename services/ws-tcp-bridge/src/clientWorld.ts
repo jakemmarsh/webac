@@ -63,6 +63,10 @@ export interface ClientWorldLeftEvent extends WorldIds {
   drainWaitMs?: number | null;
   /** OBS.dm-stall-diagnostics — the connection's state when a silent / closed session ended (netDiag.ts). */
   net?: NetDiag;
+  contextRestored?: boolean | null;
+  contextLossCount?: number | null;
+  restoreMs?: number | null;
+  lostForMs?: number | null;
 }
 
 /** The first minute after enter_ok (renderer WorldReporter FirstMinuteEvent). */
@@ -147,6 +151,24 @@ export interface ClientFirstMinuteEvent extends WorldIds {
   viewCellFound?: boolean | null;
   cameraCell?: string | null;
   visibleCells?: number | null;
+  /**
+   * TELEMETRY.context-restore (renderer WorldReporter contextFields): a webglcontextrestored followed the latest
+   * loss (null: no loss), the session's losses, loss → restore ms, and ms lost and not restored at the report.
+   */
+  contextRestored?: boolean | null;
+  contextLossCount?: number | null;
+  restoreMs?: number | null;
+  lostForMs?: number | null;
+}
+
+/** TELEMETRY.context-restore — the WebGL loss / restore fields, each only when the page sent it (older pages send none). */
+function contextFields(b: Record<string, unknown>): Pick<ClientFirstMinuteEvent, 'contextRestored' | 'contextLossCount' | 'restoreMs' | 'lostForMs'> {
+  return {
+    ...('contextRestored' in b ? { contextRestored: bool(b.contextRestored) } : {}),
+    ...('contextLossCount' in b ? { contextLossCount: uint(b.contextLossCount, 100_000) } : {}),
+    ...('restoreMs' in b ? { restoreMs: uint(b.restoreMs, SESSION_MS) } : {}),
+    ...('lostForMs' in b ? { lostForMs: uint(b.lostForMs, SESSION_MS) } : {}),
+  };
 }
 
 /** frameStep's phases (renderer telemetry/MainThreadCost.ts FRAME_PHASES): phaseMs keeps only these keys. */
@@ -697,6 +719,8 @@ export function sanitizeClientWorld(body: unknown): ClientWorldEvent | null {
       ...('frozenMs' in b ? { frozenMs: uint(b.frozenMs, SESSION_MS) } : {}),
       ...('lastBeatAgoMs' in b ? { lastBeatAgoMs: uint(b.lastBeatAgoMs, SESSION_MS) } : {}),
       ...('drainWaitMs' in b ? { drainWaitMs: uint(b.drainWaitMs, SESSION_MS) } : {}),
+      // After freezes: the monitor's launch-filter reads "contextLost=true errors=1 freezes=0" in that order.
+      ...contextFields(b),
     };
   }
   return {
@@ -711,6 +735,8 @@ export function sanitizeClientWorld(body: unknown): ClientWorldEvent | null {
     frameP95Ms: uint(b.frameP95Ms, FRAME_HIST_MAX_MS),
     frameMaxMs: uint(b.frameMaxMs, MINUTE_MS),
     contextLost: bool(b.contextLost),
+    // Beside contextLost: the monitor cuts a line at 700 characters, and first_minute lines run longer.
+    ...contextFields(b),
     gpu: pick(b.gpu, GPU_CLASSES),
     dpr: dpr(b.dpr),
     canvasW: px100(b.canvasW),

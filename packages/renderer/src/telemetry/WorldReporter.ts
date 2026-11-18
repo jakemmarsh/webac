@@ -111,6 +111,15 @@ export interface FirstMinuteEvent {
   frameP95Ms: number | null;
   frameMaxMs: number | null;
   contextLost: boolean;
+  /**
+   * TELEMETRY.context-restore — whether a webglcontextrestored on the game canvas followed this session's latest
+   * loss (null: no loss), the losses this session, ms from the latest loss to its restore (null: not restored),
+   * and ms the context had been lost and not restored at the report (null: not lost, or restored).
+   */
+  contextRestored: boolean | null;
+  contextLossCount: number;
+  restoreMs: number | null;
+  lostForMs: number | null;
   gpu: GpuClass;
   /** devicePixelRatio to the nearest 0.25. */
   dpr: number | null;
@@ -284,6 +293,15 @@ export interface WorldLeftEvent {
   exit: Exclude<WorldExit, 'hidden' | 'still_in'>;
   sessionMs: number;
   contextLost: boolean;
+  /**
+   * TELEMETRY.context-restore — whether a webglcontextrestored on the game canvas followed this session's latest
+   * loss (null: no loss), the losses this session, ms from the latest loss to its restore (null: not restored),
+   * and ms the context had been lost and not restored at the report (null: not lost, or restored).
+   */
+  contextRestored: boolean | null;
+  contextLossCount: number;
+  restoreMs: number | null;
+  lostForMs: number | null;
   errors: number;
   /** Exit 'disconnected': what ended the session, and the socket's close code. */
   endCause?: WorldEndCause | null;
@@ -563,6 +581,10 @@ export class WorldReporter {
   private minuteSent = false;
   private errorsAtEnter = 0;
   private contextLost = false;
+  /** TELEMETRY.context-restore — this session's losses, and the latest loss's time and its restore's (null: none). */
+  private contextLossCount = 0;
+  private contextLostAt: number | null = null;
+  private contextRestoredAt: number | null = null;
   private frames = 0;
   private worldFrames = 0;
   private lastFrameAt: number | null = null;
@@ -713,6 +735,9 @@ export class WorldReporter {
     this.minuteSent = false;
     this.errorsAtEnter = safe(this.src.errors, 0);
     this.contextLost = false;
+    this.contextLossCount = 0;
+    this.contextLostAt = null;
+    this.contextRestoredAt = null;
     this.frames = 0;
     this.worldFrames = 0;
     this.lastFrameAt = null;
@@ -821,7 +846,29 @@ export class WorldReporter {
 
   /** The WebGL context was lost. */
   contextLostNow(): void {
-    if (this.enterAt !== null) this.contextLost = true;
+    if (this.enterAt === null) return;
+    this.contextLost = true;
+    this.contextLossCount++;
+    this.contextLostAt = this.now();
+    this.contextRestoredAt = null;
+  }
+
+  /** The WebGL context came back (webglcontextrestored): the latest loss in this session was restored. */
+  contextRestoredNow(): void {
+    if (this.enterAt === null || this.contextLostAt === null || this.contextRestoredAt !== null) return;
+    this.contextRestoredAt = this.now();
+  }
+
+  /** TELEMETRY.context-restore — the loss / restore fields at `at`. */
+  private contextFields(at: number): Pick<FirstMinuteEvent, 'contextRestored' | 'contextLossCount' | 'restoreMs' | 'lostForMs'> {
+    const lostAt = this.contextLostAt;
+    const restoredAt = this.contextRestoredAt;
+    return {
+      contextRestored: lostAt === null ? null : restoredAt !== null,
+      contextLossCount: this.contextLossCount,
+      restoreMs: lostAt !== null && restoredAt !== null ? count(restoredAt - lostAt, SESSION_CAP_MS) : null,
+      lostForMs: lostAt !== null && restoredAt === null ? count(Math.max(0, at - lostAt), SESSION_CAP_MS) : null,
+    };
   }
 
   /** The 1 s tick: the blocking window's open time, and the 60 s mark. */
@@ -909,6 +956,7 @@ export class WorldReporter {
         sessionMs: Math.round(at - this.enterAt),
         contextLost: this.contextLost,
         errors: this.errorsSince(),
+        ...this.contextFields(at),
         ...detail,
         hiddenMs: this.hiddenSince === null ? null : Math.max(0, Math.round(at - Math.max(this.hiddenSince, this.enterAt))),
         // A freeze still open (the tab closed or the session dropped before 'resume') counts up to
@@ -923,7 +971,7 @@ export class WorldReporter {
     for (const f of this.ends) { try { f(exit); } catch { /* a listener never breaks the report */ } }
   }
 
-  /** pagehide / visibilitychange (hidden) / the 1 s tick / the canvas's webglcontextlost. */
+  /** pagehide / visibilitychange (hidden) / the 1 s tick / the canvas's webglcontextlost and webglcontextrestored. */
   install(
     win: Pick<Window, 'addEventListener' | 'setInterval'>,
     doc: Pick<Document, 'addEventListener'> & { visibilityState?: string },
@@ -941,6 +989,7 @@ export class WorldReporter {
     doc.addEventListener('keydown', ((e: KeyboardEvent) => { if (!e.repeat) this.keyDown(); }) as EventListener, true);
     canvas?.addEventListener('pointerdown', () => this.worldClick());
     canvas?.addEventListener('webglcontextlost', () => this.contextLostNow());
+    canvas?.addEventListener('webglcontextrestored', () => this.contextRestoredNow());
     this.installLongTasks();
     this.outbox.install(win);
     win.setInterval(() => this.tick(), 1000);
@@ -992,6 +1041,7 @@ export class WorldReporter {
       frameP95Ms: histQuantile(this.hist, this.intervals, 0.95),
       frameMaxMs: this.intervals ? Math.round(this.maxFrame) : null,
       contextLost: this.contextLost,
+      ...this.contextFields(at),
       gpu: this.gpu,
       dpr: Number.isFinite(dpr) && dpr > 0 ? Math.min(8, Math.max(0.25, Math.round(dpr * 4) / 4)) : null,
       canvasW: canvas ? Math.max(0, Math.floor(canvas.width / 100) * 100) : null,

@@ -39,12 +39,18 @@ const FIRST_MINUTE_KEYS = [
   'charging', 'batteryLevel', 'cpuProbeMs',
   // BUG.dungeon-login-black (verify-bug-dungeon-login-black.ts): the canvas luma sample + the indoor view, null when unknown.
   'lumaMean', 'lumaDarkPct', 'lumaAtMs', 'viewCell', 'viewCellFound', 'cameraCell', 'visibleCells',
+  // TELEMETRY.context-restore: whether a lost WebGL context came back (null fields when there was no loss).
+  'contextRestored', 'contextLossCount', 'restoreMs', 'lostForMs',
 ].sort();
 const WORLD_LEFT_BASE_KEYS = ['outcome', 'era', 'server', 'trace', 'build', 'exit', 'sessionMs', 'contextLost', 'errors', 'eid'].sort();
 // BUG.hidden-tab-session-drop: the page adds hiddenMs / freezes / frozenMs to every world_left (endCause / closeCode
 // on a drop only); the bridge keeps them only when sent, so an older page's event keeps the base keys.
 // TELEMETRY.freeze-ending-in-close: lastBeatAgoMs and drainWaitMs (verify-freeze-ending-in-close.ts).
-const WORLD_LEFT_KEYS = [...WORLD_LEFT_BASE_KEYS, 'hiddenMs', 'freezes', 'frozenMs', 'lastBeatAgoMs', 'drainWaitMs'].sort();
+// TELEMETRY.context-restore: contextRestored / contextLossCount / restoreMs / lostForMs.
+const WORLD_LEFT_KEYS = [
+  ...WORLD_LEFT_BASE_KEYS, 'hiddenMs', 'freezes', 'frozenMs', 'lastBeatAgoMs', 'drainWaitMs',
+  'contextRestored', 'contextLossCount', 'restoreMs', 'lostForMs',
+].sort();
 
 interface Rig {
   r: WorldReporter;
@@ -253,10 +259,91 @@ describe('WorldReporter — first_minute', () => {
     g.clock.t += 3000;
     fire('win:pagehide');
     expect(g.events[0]).toMatchObject({ exit: 'closed_tab', keys: 1, firstClickMs: 2000, contextLost: true, modal: 'book', modalMs: 3000 });
+    // The loss was never restored: lost for the 3 s up to the pagehide.
+    expect(g.events[0]).toMatchObject({ contextRestored: false, contextLossCount: 1, restoreMs: null, lostForMs: 3000 });
     g.r.enteredWorld();
+    // The canvas's webglcontextrestored after a loss: restored, with the loss → restore time.
+    fire('canvas:webglcontextlost');
+    g.clock.t += 700;
+    fire('canvas:webglcontextrestored');
     doc.visibilityState = 'hidden';
     fire('doc:visibilitychange');
-    expect(g.events[1]).toMatchObject({ exit: 'hidden' });
+    expect(g.events[1]).toMatchObject({ exit: 'hidden', contextLost: true, contextRestored: true, contextLossCount: 1, restoreMs: 700, lostForMs: null });
+  });
+});
+
+describe('WorldReporter — TELEMETRY.context-restore (did a lost WebGL context come back?)', () => {
+  it('no loss: contextRestored / restoreMs / lostForMs null, count 0; the bridge leaves the nulls out of the line', () => {
+    const g = rig();
+    g.r.enteredWorld();
+    run(g, 2000, 16, true);
+    g.r.left('closed_tab');
+    expect(g.events[0]).toMatchObject({ contextLost: false, contextRestored: null, contextLossCount: 0, restoreMs: null, lostForMs: null });
+    expect(sanitizeClientWorld(g.events[0])).toEqual(g.events[0]);
+  });
+
+  it('loss then restore: contextRestored true and restoreMs; the bridge keeps them', () => {
+    const g = rig('dm', 'seedsow');
+    g.r.enteredWorld();
+    g.state.screen = 'world';
+    run(g, 4000, 16, true);
+    g.r.contextLostNow();
+    run(g, 1500, 16, true);
+    g.r.contextRestoredNow();
+    run(g, 2000, 16, true);
+    // A second restore event changes nothing.
+    g.r.contextRestoredNow();
+    g.r.left('closed_tab');
+    const ev = g.events[0] as FirstMinuteEvent;
+    expect(ev).toMatchObject({ contextLost: true, contextRestored: true, contextLossCount: 1, lostForMs: null });
+    expect(ev.restoreMs).toBeGreaterThanOrEqual(1500);
+    expect(ev.restoreMs).toBeLessThan(1520);
+    expect(sanitizeClientWorld(ev)).toEqual(ev);
+  });
+
+  it('loss with no restore (the 2026-11-18 black screen): contextRestored false, lostForMs > 0 at the report', () => {
+    const g = rig('dm', 'seedsow');
+    g.r.enteredWorld();
+    g.state.screen = 'world';
+    run(g, 4000, 16, true);
+    g.r.contextLostNow();
+    run(g, 20_000, 16, false);
+    g.r.left('closed_tab');
+    const ev = g.events[0] as FirstMinuteEvent;
+    expect(ev).toMatchObject({ contextLost: true, contextRestored: false, contextLossCount: 1, restoreMs: null });
+    expect(ev.lostForMs).toBeGreaterThanOrEqual(20_000);
+    expect(ev.lostForMs).toBeLessThan(20_100);
+    expect(sanitizeClientWorld(ev)).toEqual(ev);
+  });
+
+  it('a second loss after a restore: counted, and the latest loss decides; world_left carries the fields; a new session resets them', () => {
+    const g = rig();
+    g.r.enteredWorld();
+    g.r.contextLostNow();
+    g.clock.t += 200;
+    g.r.contextRestoredNow();
+    run(g, FIRST_MINUTE_MS + 1000, 16, true);
+    expect(g.events[0]).toMatchObject({ outcome: 'first_minute', exit: 'still_in', contextRestored: true, restoreMs: 200, contextLossCount: 1 });
+    g.r.contextLostNow();
+    g.clock.t += 90_000;
+    g.r.left('logout');
+    const left = g.events[1] as WorldLeftEvent;
+    expect(left).toMatchObject({ outcome: 'world_left', contextLost: true, contextRestored: false, contextLossCount: 2, restoreMs: null, lostForMs: 90_000 });
+    expect(sanitizeClientWorld(left)).toEqual(left);
+    // A restore before any loss, or outside a session, does nothing.
+    g.r.contextRestoredNow();
+    g.r.enteredWorld();
+    g.r.contextRestoredNow();
+    g.r.left('logout');
+    expect(g.events[2]).toMatchObject({ contextLost: false, contextRestored: null, contextLossCount: 0, restoreMs: null, lostForMs: null });
+  });
+
+  it('the bridge bounds the fields and keeps them only when sent (an older page sends none)', () => {
+    const old = sanitizeClientWorld({ outcome: 'world_left', exit: 'logout', sessionMs: 90_000, contextLost: true, errors: 1 })!;
+    expect(Object.keys(old)).not.toContain('contextRestored');
+    expect(Object.keys(old)).not.toContain('lostForMs');
+    const bad = sanitizeClientWorld({ outcome: 'first_minute', contextRestored: 'yes', contextLossCount: -1, restoreMs: 1.5, lostForMs: 1e12 })!;
+    expect(bad).toMatchObject({ contextRestored: null, contextLossCount: null, restoreMs: null, lostForMs: null });
   });
 });
 

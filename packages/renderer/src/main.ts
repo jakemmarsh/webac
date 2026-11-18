@@ -156,7 +156,7 @@ let agentMeleeSentTap: ((height: string) => void) | null = null;
 /** The agent's tap on every WeenieError the server sends (after the client has shown its text), set when the agent API is on. */
 let agentWeenieErrorTap: ((code: number) => void) | null = null;
 import { examineText } from './agent/examineText.js';
-import { EMOTE_INPUT_ACTION_MOTIONS, resolvePress } from './input/KeybindActionLookup.js';
+import { EMOTE_INPUT_ACTION_MOTIONS, resolvePress, dispatchKeyPress } from './input/KeybindActionLookup.js';
 import { cellIdRange, cellStandPoint, floorsAt, findRouteViaOutside, loadCellGraph, routeBarrier, routeCutOff, type CellGraph } from './agent/cellPath.js';
 import { RoutineSync } from './agent/RoutineSync.js';
 import { isAutomationCommand } from './ui/automation/AutomationPanel.js';
@@ -18594,10 +18594,8 @@ async function main() {
           const r = resolvePress(keybinds.actions(), (id) => keybinds.getMappings(id), input);
           if (!r.ok) return r;
           const { code, action } = r;
-          const parts = code.split('+');
-          const init = { code: parts[parts.length - 1], ctrlKey: parts.includes('Ctrl'), altKey: parts.includes('Alt'), shiftKey: parts.includes('Shift'), bubbles: true, cancelable: true };
-          document.dispatchEvent(new KeyboardEvent('keydown', init));
-          setTimeout(() => document.dispatchEvent(new KeyboardEvent('keyup', init)), 80);
+          // On the focused element (else body), as a real key: CameraController listens on body.
+          dispatchKeyPress(document, code);
           return { ok: true, message: `pressed ${code}${action ? ` (${action.name})` : ''}` };
         },
         keyBindings: (filter) => keybinds.actions()

@@ -95,3 +95,24 @@ export function resolvePress<T extends NamedKeybindAction>(actions: readonly T[]
   const code = mappings(found.action.id).find((m): m is string => !!m);
   return code ? { ok: true, code, action: found.action } : { ok: false, message: `"${found.action.name}" has no key bound` };
 }
+
+/** Where a real key press lands: the focused element, else the body. */
+export function keyEventTarget(doc: Document): Element {
+  const active = doc.activeElement;
+  return active instanceof doc.defaultView!.Element ? active : doc.body;
+}
+
+/**
+ * ac_press's key: a keydown now and its keyup `releaseMs` later, both on the element a real key press would target
+ * (keyEventTarget), so the press bubbles through body (CameraController's movement / camera listeners) to document
+ * and window exactly as a player's does. Dispatched on `document` it never reached body, so Autorun and every
+ * movement key were reported pressed and did nothing.
+ */
+export function dispatchKeyPress(doc: Document, code: string, releaseMs = 80, schedule: (fn: () => void, ms: number) => unknown = setTimeout): void {
+  const parts = code.split('+');
+  const init: KeyboardEventInit = { code: parts[parts.length - 1], ctrlKey: parts.includes('Ctrl'), altKey: parts.includes('Alt'), shiftKey: parts.includes('Shift'), bubbles: true, cancelable: true };
+  const KE = doc.defaultView!.KeyboardEvent;
+  const target = keyEventTarget(doc);
+  target.dispatchEvent(new KE('keydown', init));
+  schedule(() => target.dispatchEvent(new KE('keyup', init)), releaseMs);
+}
