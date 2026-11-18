@@ -25,7 +25,7 @@ export class FakeHost implements AgentHost {
   chats: string[] = [];
   target: number | null = null;
   dying = new Set<number>();
-  container: { guid: number; items: Array<{ guid: number; name: string; stack?: number }> } | null = null;
+  container: { guid: number; items: Array<{ guid: number; name: string; stack?: number; itemType?: number; objectDescFlags?: number }> } | null = null;
   inv: AgentItem[] = [];
   screenName: ReturnType<AgentHost['screen']> = 'world';
 

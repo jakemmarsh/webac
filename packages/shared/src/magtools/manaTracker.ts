@@ -58,6 +58,58 @@ export interface MtWornItem {
   manaUpdatedAt: number;
 }
 
+/** A worn item as the inventory holds it: its CreateObject weenie header fields. */
+export interface MtWornSource {
+  id: number;
+  name: string;
+  iconDid?: number;
+  /** The slot it is worn in (CurrentWieldedLocation, from CreateObject / the wield event). */
+  slot: number;
+  /** ValidLocations (CreateObject weenie header). */
+  validLocations?: number;
+  /** Its built-in spell (CreateObject WeenieHeaderFlag.Spell, PropertyDataId Spell). */
+  spellDid?: number;
+}
+
+/** The item's appraisal, as the client keeps it (property records by ACE id, spell ids). */
+export interface MtWornAppraisal {
+  int: Readonly<Record<number, number>>;
+  float: Readonly<Record<number, number>>;
+  bool: Readonly<Record<number, boolean>>;
+  did: Readonly<Record<number, number>>;
+  spellIds: readonly number[];
+  activeSpellIds: readonly number[];
+  at?: number;
+}
+
+/**
+ * One worn item for the tracker. Decal's EquipableSlots, EquippedSlots and AssociatedSpell came
+ * from the object's public description (CreateObject), and ACE never puts ValidLocations (int 9),
+ * CurrentWieldedLocation (int 10) or Spell (DID 28) in an appraisal (they aren't
+ * [AssessmentProperty]), so those come from the worn entry first; an appraisal that does carry
+ * them (GDLE's deny-list appraisal) is the fallback. The mana figures (CurMana 107, MaxMana 108,
+ * ManaRate 5, Retained 91) are appraisal properties on every server.
+ */
+export function mtWornItemOf(
+  e: MtWornSource,
+  a: MtWornAppraisal | null | undefined,
+  spell: (id: number) => MtSpellInfo | null,
+  enchantment: (id: number) => MtEnchantment | null,
+  now: number,
+): MtWornItem {
+  return {
+    id: e.id >>> 0, name: e.name, icon: e.iconDid,
+    validLocations: e.validLocations || a?.int[9] || 0,
+    wieldedLocation: e.slot || a?.int[10] || 1,
+    appraised: !!a,
+    spells: (a?.spellIds ?? []).map(spell).filter((x): x is MtSpellInfo => !!x),
+    associatedSpellId: e.spellDid || a?.did[28] || undefined,
+    curMana: a?.int[107] ?? 0, maxMana: a?.int[108] ?? 0, manaRate: a?.float[5] ?? 0, retained: !!a?.bool[91],
+    enchantments: (a?.activeSpellIds ?? []).map(enchantment).filter((x): x is MtEnchantment => !!x),
+    manaUpdatedAt: a?.at ?? now,
+  };
+}
+
 export interface MtManaReads {
   worn(): readonly MtWornItem[];
   playerEnchantments(): readonly MtPlayerEnchantment[];

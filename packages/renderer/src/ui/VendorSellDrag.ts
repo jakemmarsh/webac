@@ -48,9 +48,8 @@
 
 import { getAppropriateName, vendorSellRejectionReason, vendorBuyPrice, unitValueOf, PROMISSORY_NOTE_RATES_EOR, type InventoryItem, type PromissoryNoteRates } from '@ac/shared';
 import { uiItemDragAcceptState } from './UIItemDragAccept.js';
+import { isRetailContainer } from '../inventory/RetailIsContainer.js';
 
-/** ITEM_TYPE::TYPE_CONTAINER. */
-const TYPE_CONTAINER = 0x200;
 /** ITEM_TYPE::TYPE_PROMISSORY_NOTE — exempt from the vendor's max_value. */
 const TYPE_PROMISSORY_NOTE = 0x40000;
 /** PublicWeenieDesc bitfield BF_RETAINED (ACE ObjectDescriptionFlag.Retained). */
@@ -84,6 +83,7 @@ export interface VendorSellDragItem {
   value?: number;
   /** pwd._bitfield (ObjectDescriptionFlag). */
   objectDescFlags?: number;
+  itemsCapacity?: number;
   /** IsOwnedByPlayer (an inventory drag: true). */
   ownedByPlayer?: boolean;
   /** pwd._containerID — where a split in place lands (0: the player). */
@@ -181,8 +181,9 @@ export function vendorSellSplitNotice(item: Pick<VendorSellDragItem, 'name' | 'p
   return VENDOR_NOTICE_TEMPLATES.sellSplit.replace('%s', () => vendorSellAppropriateName(item));
 }
 
+/** GetNumContainedContainers counts the _containersList: AddContent's IsContainer test. */
 function isVendorContainer(item: VendorSellDragItem): boolean {
-  return ((item.itemType ?? 0) & TYPE_CONTAINER) !== 0;
+  return isRetailContainer(item);
 }
 
 /** GetNumContainedItems / GetNumContainedContainers. */

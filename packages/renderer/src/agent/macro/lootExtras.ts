@@ -8,7 +8,7 @@ import type { AgentApi } from '../AgentApi.ts';
 import type { AgentResult } from '../types.ts';
 import { CorpseBook, corpseBookSettings, type CorpseBookSettings } from './corpseBook.ts';
 import { DRAIN_CONFIRM, donorNeedsLook, isDonor, manaLootAction, planDrain, type DonorProps, type StoneItem } from './manaDonorPlan.ts';
-import { canReadScroll, isScrollRefusal, ITEM_TYPE_WRITABLE, scrollSpell, type ScrollContext } from './scrollPlan.ts';
+import { canReadScroll, isScrollRefusal, ITEM_TYPE_WRITABLE, notAScroll, scrollSpell, type ScrollContext } from './scrollPlan.ts';
 
 type Settings = Record<string, string | number | boolean | undefined>;
 const on = (v: unknown): boolean => v === true || v === 1 || (typeof v === 'string' && /^(true|1|yes|on)$/i.test(v));
@@ -127,10 +127,15 @@ export class LootExtras {
 
   private readStep(st: Settings): { label: string; run: () => Promise<AgentResult> } | null {
     if (!this.reads.size) return null;
-    const have = new Set(this.api.inventory().map((i) => i.guid));
+    const inv = this.api.inventory();
+    const have = new Set(inv.map((i) => i.guid));
     const ctx = this.scrollCtx();
     for (const [g, r] of [...this.reads]) {
       if (!have.has(g)) { this.reads.delete(g); continue; }
+      // In the pack its type is known: a "read" (a Use) of armor, jewelry or a weapon wears or wields it (the client's
+      // UseObject: AutoSort / AutoWield), so only a scroll is ever read; anything else taken to read is kept.
+      const carried = inv.find((i) => i.guid === g);
+      if (carried && (carried.where === 'equipped' || notAScroll(carried.itemType))) { this.reads.delete(g); continue; }
       // Known since (another copy read), or no longer learnable: kept, not read.
       if (!on(st.ReadUnknownScrolls) || !canReadScroll(r.spell, ctx)) { this.reads.delete(g); continue; }
       return { label: `read ${r.name}`, run: async () => {

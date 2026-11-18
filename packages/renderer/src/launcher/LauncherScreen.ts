@@ -35,6 +35,7 @@ import {
 import { matchUrlWorld } from './urlLogin.js';
 import { loadFavoriteWorlds, loadRememberedLogin, saveFavoriteWorlds, saveRememberedLogin, worldKeyOf, type RememberedLogin } from './launcherStorage.js';
 import { WORLD_LIST_BACKGROUND_RETRY_MS, WORLD_LIST_RETRY_DELAYS_MS } from '../session/RetryPolicy.js';
+import { sharedDoubleClick } from '../ui/DoubleClickAcrossRedraw.js';
 
 export const CHARSEL_LAYOUT = 0x21000004;
 
@@ -853,7 +854,9 @@ export class LauncherScreen {
       }
       row.addEventListener('click', () => this.select(w));
       // Retail's character list enters on a double-click; a world row does the same.
-      row.addEventListener('dblclick', () => { this.select(w); this.attemptEnter(); });
+      // select() re-renders the list, so the second click lands on a new row: read the pair
+      // from the click count on the same world (BUG.vendor-dblclick-buy-dropped).
+      sharedDoubleClick().bind(row, () => `world:${worldKeyOf(w)}`, () => { this.select(w); this.attemptEnter(); });
       row.addEventListener('keydown', (e) => {
         const k = (e as KeyboardEvent).key;
         if (k === 'Enter') { e.preventDefault(); this.select(w); this.attemptEnter(); } else if (k === ' ') { e.preventDefault(); this.select(w); }

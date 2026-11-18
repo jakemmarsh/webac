@@ -6,7 +6,7 @@
  * auto trade add / accept, Autopack (with VirindiTank's tidy kept off placed items), and the
  * preview gate: with preview UI off nothing changes.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ChatMessageType, mtCommandListKey, MT_TRADE_WHITELIST_KEY, type LootRule } from '@ac/shared';
 import { MagToolsWindow } from '../packages/renderer/src/ui/magtools/MagToolsWindow.js';
 import { MagToolsRuntime, mtOptionWired, mtSenderClass, type MagToolsExtras } from '../packages/renderer/src/agent/magtools/magToolsRuntime.js';
@@ -561,6 +561,35 @@ describe('GameUI hands the window the runtime\'s sources', () => {
     expect(tops).toEqual(expect.arrayContaining(['Trackers', 'Loggers', 'Tools', 'Misc']));
     H.ui.toggleMagToolsWindow();
     H.ui.setMagTools(null);
+  });
+
+  it('PERF: a burst of tracker changes redraws the open window once, and reopening keeps one 1 s ticker', () => {
+    vi.useFakeTimers();
+    try {
+      const m = runtime();
+      H.ui.setMagTools(m.rt);
+      H.ui.toggleMagToolsWindow();
+      const entry = H.ui.vtankWindows.get('magtools');
+      let redraws = 0;
+      const orig = entry.redraw;
+      entry.redraw = () => { redraws++; orig(); };
+      for (let i = 0; i < 40; i++) m.rt.onChange?.(); // forty combat lines in a burst
+      expect(redraws).toBe(0);
+      vi.advanceTimersByTime(H.mod.GameUI.MT_CHANGE_REDRAW_MS);
+      expect(redraws).toBe(1);
+      // Closed and reopened inside the second: one ticker, not two.
+      H.ui.toggleMagToolsWindow();
+      H.ui.toggleMagToolsWindow();
+      const again = H.ui.vtankWindows.get('magtools');
+      let ticks = 0;
+      const orig2 = again.redraw;
+      again.redraw = () => { ticks++; orig2(); };
+      vi.advanceTimersByTime(3000);
+      expect(ticks).toBe(3);
+      H.ui.toggleMagToolsWindow();
+      vi.advanceTimersByTime(2000);
+      H.ui.setMagTools(null);
+    } finally { vi.useRealTimers(); }
   });
 
   it('Misc → Options\' whitelist editor feeds Auto Trade Accept: a partner added there is accepted', () => {

@@ -24,14 +24,24 @@ export const ITEM_TYPE_WRITABLE = 0x00002000;
 /** Magic school (the spell table's) → its skill id. */
 export const SCHOOL_SKILL: Record<number, number> = { 1: 34, 2: 33, 3: 32, 4: 31, 5: 43 };
 
-/** The spell a scroll teaches: its examination's spell, else "Scroll of <spell>"; null for anything else. */
-export function scrollSpell(item: { name: string; itemType?: number }, props?: { spells?: string[] } | null): string | null {
-  if (item.itemType && !(item.itemType & ITEM_TYPE_WRITABLE)) return null;
-  const s = props?.spells?.[0];
+/**
+ * The spell a scroll teaches: its examination's spell, else "Scroll of <spell>"; null for anything else. Only a
+ * Writable item (its ItemType, else the examination's ItemType 1) is a scroll: an examined ring, sword or coat lists
+ * its spells too. With no type known at all, only the name says so. Before 2026-11-17 an unknown type passed, and a
+ * corpse item's type was never known (AgentApi.loot), so the macro took any magic item "to read" and used it, which
+ * wore or wielded it (BUG.vtank-loot-wears-items).
+ */
+export function scrollSpell(item: { name: string; itemType?: number }, props?: { spells?: string[]; int?: Record<number, number> } | null): string | null {
+  const type = item.itemType || props?.int?.[1] || 0;
+  if (type && !(type & ITEM_TYPE_WRITABLE)) return null;
+  const s = type ? props?.spells?.[0] : undefined;
   if (s) return s;
   const m = /^Scroll of (.+)$/i.exec(item.name);
   return m ? m[1] : null;
 }
+
+/** A carried item that is known not to be a scroll (its ItemType says so): never used to "read" it. */
+export const notAScroll = (itemType: number | undefined): boolean => !!itemType && !(itemType & ITEM_TYPE_WRITABLE);
 
 export interface ScrollContext {
   /** Names of the spells you know (any case). */

@@ -432,6 +432,25 @@ describe('CORE.15 — renderContractPanel (behavioral)', () => {
     const plPanel = ui.contractPanel as HTMLElement;
     expect(plPanel.querySelectorAll('.page-list-row').length).toBeGreaterThan(0);
 
+    // BUG.vendor-dblclick-buy-dropped sweep — a row's first click selects it
+    // and rebuilds the panel (no native dblclick then): the click count on
+    // the same page still opens it in the Journal tab
+    // (gmPageListUI::CheckForDoubleClick).
+    const press = (el: HTMLElement, detail: number) => {
+      for (const type of ['mousedown', 'mouseup', 'click']) {
+        el.dispatchEvent(new domWindow.MouseEvent(type, { bubbles: true, cancelable: true, button: 0, detail }));
+      }
+    };
+    const row0 = () => (ui.contractPanel as HTMLElement).querySelector('.page-list-row[data-page-idx="0"]') as HTMLElement;
+    ui.journalPageIdx = -1;
+    const first = row0();
+    press(first, 1);
+    expect(first.isConnected).toBe(false);
+    expect(ui.contractTab).toBe('page_list');
+    press(row0(), 2);
+    expect(ui.contractTab).toBe('journal');
+    expect(ui.journalPageIdx).toBe(0);
+
     ui.toggleContractPanel();
   });
 

@@ -20,6 +20,7 @@ import { acStringHash, getStringParts } from '@ac/dat-parser/file-types/LayoutDe
 import { getAppropriateName } from '@ac/shared';
 import { UI_STATE_DISABLED, UI_STATE_NORMAL } from './DatTextStyle.js';
 import { uiItemDragAcceptState } from './UIItemDragAccept.js';
+import { isRetailContainer } from '../inventory/RetailIsContainer.js';
 
 export const SECURE_TRADE_EL = {
   root: 0x1000007a,
@@ -134,9 +135,6 @@ export function tradeTotalItemsText(count: number): string {
  *    AddItem(id, 0, walk = true).
  * ──────────────────────────────────────────────────────────────────────── */
 
-/** ITEM_TYPE::TYPE_CONTAINER. */
-const TYPE_CONTAINER = 0x200;
-
 /** What gmSecureTradeUI asks ACCWeenieObject about a dragged object. */
 export interface TradeDragItem {
   guid: number;
@@ -145,6 +143,9 @@ export interface TradeDragItem {
   weenieClassId: number;
   stackSize: number;
   itemType?: number;
+  /** pwd._bitfield (ObjectDescriptionFlag): RequiresPackSlot puts a focus among the contained containers. */
+  objectDescFlags?: number;
+  itemsCapacity?: number;
   /** IsOwnedByPlayer (an inventory or paperdoll drag: true). */
   ownedByPlayer?: boolean;
   /** pwd._containerID — where a split in place lands (0: the player). */
@@ -189,8 +190,9 @@ export function tradeSplitNotice(item: Pick<TradeDragItem, 'name' | 'pluralName'
   return TRADE_NOTICE_TEMPLATES.split.replace('%s', () => tradeAppropriateName(item));
 }
 
+/** GetNumContainedContainers counts the _containersList: AddContent's IsContainer test. */
 function isTradeContainer(item: TradeDragItem): boolean {
-  return ((item.itemType ?? 0) & TYPE_CONTAINER) !== 0;
+  return isRetailContainer(item);
 }
 
 /** GetNumContainedItems / GetNumContainedContainers. */

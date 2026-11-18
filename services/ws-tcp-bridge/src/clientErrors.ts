@@ -51,6 +51,7 @@ export interface ClientErrorReport {
 export const WEBGL_FAILURE_CAUSES = [
   'blocklisted', 'acceleration_disabled', 'gpu_process_unavailable', 'context_lost_after_crash',
   'webgl1_only', 'no_webgl', 'unknown', 'disabled_by_policy', 'webgl2_blocked', 'webgl_turned_off',
+  'blocked_in_page',
 ] as const;
 export type WebGlFailureCause = typeof WEBGL_FAILURE_CAUSES[number];
 export const WEBGL_STATUS_MAX = 120;

@@ -525,8 +525,10 @@ import {
 import { STYLE_ARROW_PREV, STYLE_ARROW_NEXT, stepChargenStyle, clampChargenColor, chargenCategoryRowRect } from './ChargenStyleArrows.js';
 import { appearanceHeritageRules, appearanceUpdateRandomize, APPEARANCE_ROWS, APPEARANCE_CLOTHES_BUTTON, APPEARANCE_FACE_STACK, APPEARANCE_CLOTHES_STACK } from './ChargenAppearanceHeritage.js';
 import type { PaperdollDropTarget } from '../inventory/PaperdollDragObject.js';
+import { isRetailContainer, sideContainerFixedSlots } from '../inventory/RetailIsContainer.js';
 import { datMissEpoch, noDatMissSince, onDatMissResolved } from '@ac/dat-parser/streaming/DatMiss.js';
 import { PanelPressGuard } from './PanelPressGuard.js';
+import { sharedDoubleClick } from './DoubleClickAcrossRedraw.js';
 import { captureScroll, restoreScroll, unrestoredScroll, type ScrollSnapshot } from './ScrollKeep.js';
 
 /* ------------------------------------------------------------------ */
@@ -3454,6 +3456,12 @@ export class GameUI {
   private examinePanel: HTMLDivElement | null = null;
   /** Holds a panel's rebuild while a press inside it waits for its click (PanelPressGuard). */
   private readonly pressGuard = new PanelPressGuard();
+  /**
+   * BUG.vendor-dblclick-buy-dropped — every list double-click (message 10) is
+   * read from the click count on the same item, so a rebuild between its two
+   * clicks (no native dblclick then) still acts, once (DoubleClickAcrossRedraw).
+   */
+  private readonly dblClick = sharedDoubleClick();
   private examinePanelHandle: PanelHandle | null = null;
   /** gmExaminationUI::current_appraisal_ID — the object the open window shows. */
   private examineCurrentGuid = 0;
@@ -7196,11 +7204,15 @@ export class GameUI {
         // name enters the world. The first click's re-render replaces the row,
         // so the second is read from the click's OS-timed click count.
         if (pendingRowText !== null) slotEl.style.cursor = 'default';
-        slotEl.addEventListener('click', (e) => {
+        slotEl.addEventListener('click', () => {
           if (pendingRowText !== null) return;
           this.selectScreen.selectCharacter(i);
           this.renderCharacterSelect();
-          if (e.detail === 2) this.enterSelectedCharacter();
+        });
+        this.dblClick.bind(slotEl, () => (pendingRowText !== null ? '' : `char:${slotEl.dataset.charId ?? i}`), () => {
+          if (pendingRowText !== null) return;
+          this.selectScreen.selectCharacter(i);
+          this.enterSelectedCharacter();
         });
         scrollEl.appendChild(slotEl);
       }
@@ -14553,11 +14565,10 @@ export class GameUI {
       const wasAtBottom = this.chatWasAtBottom();
       const msg = this.buildSystemChatLine(text, color, type, GameUI.chatLogWrapWidth(this.chatMessages));
       this.chatMessages.appendChild(msg);
-      // FAITHFUL.267 — cap chat log at 100 entries to match addChatMessage.
-      // Pre-fix addSystemMessage grew the log unboundedly, leaking memory
-      // and DOM nodes over long sessions. Server combat/spell/recall lines
-      // all flow through here, so the growth is steady. The era's cap
-      // (EraWorldRules.chatHistory): 1999 keeps 300, trimming to 200.
+      // FAITHFUL.267 — cap the chat log (pre-fix it grew without bound over
+      // long sessions). The era's cap (EraWorldRules.chatHistory): end of
+      // retail past 10000 glyphs keeps the last ~7500 (TruncateChatLog
+      // @ 004f4290); 1999 keeps 300 lines, trimming to 200.
       trimChatLog(this.chatMessages, this.clientRules.world.chatHistory);
       this.maybeScrollChatToBottom(wasAtBottom);
     }
@@ -16267,7 +16278,7 @@ export class GameUI {
     }
   }
 
-  /** Append one line to a floating window's log (100-line cap, stick-to-bottom, new-text indicator). */
+  /** Append one line to a floating window's log (the era's chat cap, stick-to-bottom, new-text indicator). */
   private appendLineToFloaty(
     inst: { logEl: HTMLElement; indicatorEl: HTMLElement | null },
     makeLine: (log: HTMLElement) => HTMLElement,
@@ -16862,7 +16873,7 @@ export class GameUI {
         // SWEEP1006B — a wear slot is a UIElement_ItemList (gmPaperDollUI::
         // PostInit @ 004a5360): its double-click is ItemHolder::UseObject,
         // whose DetermineUseResult case 2 places the worn item in the pack.
-        slotEl.addEventListener('dblclick', () => {
+        this.dblClick.bind(slotEl, () => (equipped ? `worn:${equipped.id}` : ''), () => {
           if (equipped) this.dragCallbacks.onUseObject?.(equipped.id);
         });
 
@@ -17481,12 +17492,15 @@ export class GameUI {
         // to the attribute and UpdateEmptySlots @ 004e3700 pads the visible
         // area only while the attribute is -1 — so a 24-cell pack shows four
         // rows and blank list region below, not padding to the viewport.
-        // Only a container whose capacity is unknown (no Openable bit, or
-        // the world DB's signed -1) keeps the visible-area padding.
+        // A side-column object without the Openable bit lists none (the
+        // decomp's `lVar3 = 0` branch); only a capacity that is unknown (no
+        // record) or the world DB's signed -1 keeps the visible-area padding.
         const MIN_SLOTS = 6 * Math.ceil(gridListH / 32);
+        // BUG.foci-in-main-pack — a side-column object that is not Openable (a focus: RequiresPackSlot,
+        // no capacity) lists no cells, as ItemList_UpdateContainerListSize sets it.
         const fixedSlots = this.selectedPackSlot === 0
           ? this.inventoryItemsCapacity
-          : (openPackItem?.itemsCapacity ?? -1);
+          : (openPackItem ? sideContainerFixedSlots(openPackItem) : -1);
         // RECON.inventory-grid-dat-cells.b.a — m_pendingItem: ItemList_InsertItem
         // @ 004e3f40 opens a cell at its index (a fixed list with no empty
         // cell left takes none) and the object shows there ghosted.
@@ -17595,7 +17609,7 @@ export class GameUI {
             select();
           });
 
-          cell.addEventListener('dblclick', () => {
+          this.dblClick.bind(cell, () => `pack:${item.id}`, () => {
             this.dragCallbacks.onUseObject?.(item.id);
           });
 
@@ -18835,7 +18849,7 @@ export class GameUI {
         // vendor list sets a UIItem's quantity text, UpdateQuantityDisplay
         // @ 004e1da0); the tooltip carries it.
 
-        cell.addEventListener('dblclick', () => {
+        this.dblClick.bind(cell, () => `external:${item.guid}`, () => {
           // CORE.17.o.d — message 10 (double-click) on a UIItem of the item
           // row (ListenToElementMessage @ 004e4d50: not a container list,
           // not a vendor / salvage list) is ItemHolder::UseObject(itemID) —
@@ -18980,7 +18994,7 @@ export class GameUI {
   private bindItemShortcutSlot(slot: HTMLDivElement, index: number): void {
     slot.dataset.itemShortcut = String(index);
     slot.addEventListener('click', () => this.itemShortcutCallbacks.onClick?.(index));
-    slot.addEventListener('dblclick', () => this.itemShortcutCallbacks.onUse?.(index));
+    this.dblClick.bind(slot, () => `shortcut:${index}`, () => this.itemShortcutCallbacks.onUse?.(index));
     slot.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -20327,7 +20341,7 @@ export class GameUI {
       endowmentIcon.style.pointerEvents = 'auto';
       endowmentIcon.style.cursor = 'pointer';
       endowmentIcon.addEventListener('click', () => this.selectEndowment());
-      endowmentIcon.addEventListener('dblclick', () => { this.selectEndowment(); this.castSelectedSpell(); });
+      this.dblClick.bind(endowmentIcon, () => 'endowment', () => { this.selectEndowment(); this.castSelectedSpell(); });
       endowmentIcon.addEventListener('contextmenu', (e) => { e.preventDefault(); this.examineEndowment(); });
       for (const id of [SPELLBAR_ENDOWMENT_UNDERLAY, SPELLBAR_ENDOWMENT_OVERLAY, SPELLBAR_ENDOWMENT_SELECTED]) {
         const child = handle.elements.get(id);
@@ -20568,7 +20582,7 @@ export class GameUI {
       const sp = this.spellBarSlots[tabIdx]?.[slotIdx];
       if (sp) this.onExamineSpell?.(sp.id);
     });
-    slot.addEventListener('dblclick', () => {
+    this.dblClick.bind(slot, () => `spellbar:${tabIdx}:${slotIdx}:${this.spellBarSlots[tabIdx]?.[slotIdx]?.id ?? 0}`, () => {
       const sp = this.spellBarSlots[tabIdx]?.[slotIdx];
       if (!sp) return;
       this.selectSpellShortcut(sp.id);
@@ -25170,8 +25184,22 @@ export class GameUI {
     if (rt) for (const p of VCS_MAGTOOLS_PRESETS) this.vcs.register(p.plugin, p.category, p.description);
     this.chatLineFilter = rt ? (line) => rt.filterChat(line) : null;
     this.statusTextFilter = rt ? (text) => rt.statusTextHidden(text) : null;
-    if (rt) rt.onChange = () => this.vtankWindows.get('magtools')?.redraw();
+    // A combat line changes the trackers: the open window redraws at most once per MT_CHANGE_REDRAW_MS
+    // (it rebuilds every row; one redraw per hit of a fight cost the main thread a rebuild a line).
+    if (rt) rt.onChange = () => this.magToolsChanged();
     this.refreshVvsBar();
+  }
+
+  /** The Mag-Tools window's coalesced redraw after a tracker change (setMagTools). */
+  static readonly MT_CHANGE_REDRAW_MS = 250;
+  private magToolsRedrawTimer: ReturnType<typeof setTimeout> | null = null;
+  private magToolsTick: ReturnType<typeof setInterval> | null = null;
+  private magToolsChanged(): void {
+    if (this.magToolsRedrawTimer !== null || !this.vtankWindows.has('magtools')) return;
+    this.magToolsRedrawTimer = setTimeout(() => {
+      this.magToolsRedrawTimer = null;
+      this.vtankWindows.get('magtools')?.redraw();
+    }, GameUI.MT_CHANGE_REDRAW_MS);
   }
 
   toggleMagToolsWindow(): void {
@@ -25201,7 +25229,13 @@ export class GameUI {
     });
     this.openVTankAux('magtools', MT_WINDOW.title, MT_FRAME.w, MT_FRAME.h, (body) => win!.render(body), { icon: MT_WINDOW.icon });
     // The mana column counts down between appraisals: redraw once a second while open.
-    const tick = setInterval(() => { if (!this.vtankWindows.has('magtools')) { clearInterval(tick); return; } redraw(); }, 1000);
+    // One ticker however often the window is closed and opened (a reopen within the second used to leave the old one running too).
+    if (this.magToolsTick !== null) clearInterval(this.magToolsTick);
+    const tick = setInterval(() => {
+      if (!this.vtankWindows.has('magtools')) { clearInterval(tick); if (this.magToolsTick === tick) this.magToolsTick = null; return; }
+      redraw();
+    }, 1000);
+    this.magToolsTick = tick;
   }
 
   // ── GoArrow (ui/goarrow/; preview UI) ──
@@ -32566,8 +32600,7 @@ export class GameUI {
     let containers = 0;
     for (const { item, qty } of lines) {
       const n = (item.maxStackSize ?? 0) < 2 ? qty : 1;
-      const isContainer = ((item.objectDescFlags ?? 0) & 0x800000) !== 0 || (item.itemsCapacity ?? 0) !== 0 || (item.containersCapacity ?? 0) !== 0;
-      if (isContainer) containers += n; else items += n;
+      if (isRetailContainer(item)) containers += n; else items += n;
     }
     // GetNumContainedItems / GetNumContainedContainers on the player: the
     // main pack's loose items (containedItemCount) and the side packs.
@@ -32982,7 +33015,7 @@ export class GameUI {
     return {
       guid: item.id, name: item.name, pluralName: item.pluralName,
       weenieClassId: item.weenieClassId, stackSize: item.stackSize, itemType: item.itemType ?? 0,
-      value: item.value, objectDescFlags: item.objectDescFlags, containerId: item.containerId,
+      value: item.value, objectDescFlags: item.objectDescFlags, itemsCapacity: item.itemsCapacity, containerId: item.containerId,
       ownedByPlayer: true,
       ...(contents.length > 0 ? { contents } : {}),
     };
@@ -33571,7 +33604,7 @@ export class GameUI {
       }
       if (gestures?.onDoubleClick) {
         const onDoubleClick = gestures.onDoubleClick;
-        cell.addEventListener('dblclick', () => onDoubleClick(item, idx));
+        this.dblClick.bind(cell, () => `vendorlist:${listElId}:${idx}:${item.guid ?? 0}`, () => onDoubleClick(item, idx));
       }
       if (gestures?.onDragStart) {
         const onDragStart = gestures.onDragStart;
@@ -34139,7 +34172,7 @@ export class GameUI {
       // ListenToElementMessage: message 0x1c dwParam1 10 (double-click) on
       // a cell → RemoveItem; RecvNotice_ItemListBeginDrag @ 004cb220 (a
       // cell dragged out) → RemoveItem.
-      cell.addEventListener('dblclick', () => {
+      this.dblClick.bind(cell, () => `salvage:${item.id}`, () => {
         this.removeSalvageItem(item.id);
       });
       // The base ItemList gestures still apply (the salvage flag only
@@ -35202,7 +35235,7 @@ export class GameUI {
           this.pageListSelected = idx;
           this.renderContractPanel();
         });
-        rowEl.addEventListener('dblclick', () => {
+        this.dblClick.bind(rowEl, () => `journalpage:${idx}`, () => {
           this.journalPageIdx = idx;
           this.contractTab = 'journal';
           this.renderContractPanel();

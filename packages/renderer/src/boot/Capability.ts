@@ -10,7 +10,10 @@
  * dialog's look reproduced in CSS from its DAT values.
  */
 import { classifyGpu } from '../telemetry/WorldReporter.js';
-import { probeWebGl2, canCreateWebGl2, detectHelpPlatform, webgl2HelpText, type WebGlFailure, type HelpPlatform } from './WebGlDiagnosis.js';
+import {
+  probeWebGl2, canCreateWebGl2, detectHelpPlatform, webgl2HelpText, pageBlockEvidence,
+  type WebGlFailure, type HelpPlatform, type PageBlockWindow,
+} from './WebGlDiagnosis.js';
 import { renderAdaptConfigFor, type RenderAdaptConfig } from '../scene/RenderScale.js';
 import { showBootNotice } from './BootNotice.js';
 
@@ -49,6 +52,8 @@ export interface CapabilityEnv {
   webgl2Failure?: WebGlFailure | null;
   /** OS + browser family, for the fix the message gives. Absent = unknown. */
   platform?: HelpPlatform;
+  /** BUG.webgl-blocked-in-page — this page's hostname, named in the "allow WebGL for …" advice. Absent = "this site". */
+  site?: string | null;
 }
 
 /** The render adaptation this browser gets (scene/RenderScale.ts). */
@@ -65,7 +70,7 @@ export function capabilityProblems(env: CapabilityEnv): CapabilityProblem[] {
     // BOOT.webgl2-diagnosis: the text names the fix for the cause the probe found, on this OS and browser
     // (boot/WebGlDiagnosis.ts). Unknown cause: the general advice, including the restart after a graphics
     // crash (live 2026-10-13: Chrome 155 on Windows, minutes after playing).
-    out.push({ id: 'webgl2', hard: true, text: webgl2HelpText(env.webgl2Failure ?? null, env.platform ?? { os: 'other', browser: 'other' }) });
+    out.push({ id: 'webgl2', hard: true, text: webgl2HelpText(env.webgl2Failure ?? null, env.platform ?? { os: 'other', browser: 'other' }, env.site || undefined) });
   }
   if (!env.websocket) {
     out.push({ id: 'websocket', hard: true, text: 'This browser cannot open the connection the game uses (WebSocket). Use a current desktop browser.' });
@@ -90,9 +95,12 @@ export function capabilityProblems(env: CapabilityEnv): CapabilityProblem[] {
 
 /** Probe the real browser. */
 export function probeCapabilities(win: Window & typeof globalThis): CapabilityEnv {
-  const probe = probeWebGl2(() => win.document.createElement('canvas'));
+  // BUG.webgl-blocked-in-page: on failure, look for an extension's getContext override (WebGlDiagnosis.ts).
+  const probe = probeWebGl2(() => win.document.createElement('canvas'), () => pageBlockEvidence(win as unknown as PageBlockWindow));
   const webgl2 = probe.webgl2;
   const rendererString = probe.renderer;
+  let site: string | null = null;
+  try { site = win.location?.hostname || null; } catch { site = null; }
   let renderAdapt: string | null = null;
   try { renderAdapt = new URLSearchParams(win.location?.search ?? '').get('renderAdapt'); } catch { renderAdapt = null; }
   const mem = (win.navigator as Navigator & { deviceMemory?: number }).deviceMemory;
@@ -107,6 +115,7 @@ export function probeCapabilities(win: Window & typeof globalThis): CapabilityEn
     webdriver: win.navigator.webdriver === true,
     renderAdapt,
     webgl2Failure: probe.failure,
+    site,
     platform: detectHelpPlatform(win.navigator as Navigator & { userAgentData?: { platform?: string; brands?: Array<{ brand: string }> } }),
   };
 }

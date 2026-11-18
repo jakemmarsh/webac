@@ -22,6 +22,7 @@ import {
   STAT_VALUE_COLORS, MISC_INFO_COLORS,
   type CreatureExamineContext, type CharacterPageModel, type CreaturePageModel,
 } from '../packages/renderer/src/ui/examine/CreatureAppraisalText';
+import { aceAppraisal } from './_harness/aceAppraisal.js';
 
 const GENDER: Record<number, string> = { 1: 'Male', 2: 'Female' };
 const HERITAGE: Record<number, string> = {
@@ -43,10 +44,11 @@ const ctx = (over: Partial<CreatureExamineContext> = {}): CreatureExamineContext
 });
 
 function daeglan(): IdentifyResponseData {
-  return {
+  // Server-shaped (tests/_harness/aceAppraisal.ts): ACE never appraises Name (PropertyString 1); the title comes from objectName.
+  return aceAppraisal({
     guid: 0x80000001, flags: 0x4109,
     propertiesInt: new Map([[25, 220], [113, 1], [188, 1], [2, 31]]),
-    propertiesString: new Map([[1, 'Sir Daeglan'], [5, 'Royal Investigator']]),
+    propertiesString: new Map([[5, 'Royal Investigator']]),
     creatureProfile: {
       profileFlags: 0x8, health: 341, healthMax: 341,
       attributes: {
@@ -55,7 +57,7 @@ function daeglan(): IdentifyResponseData {
       },
     },
     armorLevels: { head: 20, chest: 90, abdomen: 0, upperArm: 0, lowerArm: 0, hand: 420, upperLeg: 0, lowerLeg: 0, foot: 0 },
-  };
+  });
 }
 
 describe('page choice (gmExaminationUI::SetAppraiseInfo @ 004adae0)', () => {
@@ -179,7 +181,7 @@ describe('creature page (CreatureExamineUI::SetAppraiseInfo @ 004b3ff0)', () => 
 });
 
 describe('character page misc list (CharExamineUI::SetAppraiseInfo @ 004b45f0)', () => {
-  const player = (): IdentifyResponseData => ({
+  const player = (): IdentifyResponseData => aceAppraisal({
     guid: 0x50000001, flags: 0,
     propertiesInt: new Map([
       [25, 126], [113, 2], [188, 2], [261, 1], [281, 2], [288, 450], [30, 3],

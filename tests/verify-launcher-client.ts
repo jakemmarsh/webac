@@ -924,6 +924,31 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     expect(settled).toBe(false);
   });
 
+  // BUG.vendor-dblclick-buy-dropped sweep — select() rebuilds the list, so a
+  // real double-click's second click lands on a new row and Chrome sends no
+  // dblclick: the click count on the same world enters.
+  it('a double-click on an unselected world enters across the list rebuild its first click makes', async () => {
+    const s = await open();
+    s.account.value = 'probe';
+    s.password.value = 'pw';
+    const press = (el: HTMLElement, detail: number) => {
+      for (const type of ['mousedown', 'mouseup', 'click']) {
+        el.dispatchEvent(new domWindow.MouseEvent(type, { bubbles: true, cancelable: true, button: 0, detail }));
+      }
+    };
+    // Two slow clicks on Conquest select it and say nothing.
+    press(s.row('Conquest'), 1);
+    press(s.row('Conquest'), 1);
+    expect(s.messages).toEqual([]);
+    const first = s.row('Funky');
+    press(first, 1);
+    expect(first.isConnected).toBe(false);
+    press(s.row('Funky'), 2);
+    expect(s.screen.selectedWorld.name).toBe('Funky');
+    expect(s.messages).toHaveLength(1);
+    expect(s.messages[0]).toMatch(/offline/);
+  });
+
   it('double-clicking a good world connects with ?server=<id> and remembers world + account only', async () => {
     const s = await open();
     s.account.value = ' Aerfalle ';

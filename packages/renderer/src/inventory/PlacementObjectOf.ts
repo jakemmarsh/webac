@@ -16,6 +16,7 @@
  */
 import { ObjectDescriptionFlag } from '@ac/shared';
 import type { PlacementObject } from './ItemHolderPlacement.js';
+import { isRetailContainer } from './RetailIsContainer.js';
 
 /** The PublicWeenieDesc / PhysicsDesc slice a placement reads off one server record. */
 export interface PlacementRecord {
@@ -62,7 +63,7 @@ export function placementObjectFromRecords(
     id, name: pick('name') ?? '', weenieClassId: pick('weenieClassId') ?? 0,
     stackSize: pick('stackSize') ?? 0, maxStackSize: pick('maxStackSize') ?? 0,
     itemsCapacity, containersCapacity,
-    isContainer: (flags & 0x800000) !== 0 || itemsCapacity !== 0 || containersCapacity !== 0,
+    isContainer: isRetailContainer({ objectDescFlags: flags, itemsCapacity, containersCapacity }),
     holder: (flags & ObjectDescriptionFlag.Openable) !== 0, inTrade: ctx.inTrade,
     isPlayer: (flags & ObjectDescriptionFlag.Player) !== 0,
     // A housing hook's _hook_type / _hook_item_types / _house_owner_iid.

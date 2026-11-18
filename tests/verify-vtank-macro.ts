@@ -173,14 +173,32 @@ describe.skipIf(!existsSync(PORTAL))('VirindiTank\'s macro over the real spell t
     expect(host.sent).toContain(`cast ${id('Flame Bolt I')} 80005001`);
   });
 
-  it('magic mode needs a wand on ACE: the macro wields a carried caster first; a server that keeps refusing gets spells left out, not asked forever', async () => {
+  it('magic mode needs a wand on ACE: the macro wields an Items-tab caster first, never an unlisted one; a server that keeps refusing gets spells left out, not asked forever', async () => {
     host.me.health.current = 10; // a heal is due
     host.me.combatMode = 'peace';
-    host.inv = [{ guid: 0x50000097, name: 'Training Wand', where: 'main pack', type: 'Caster', itemType: 0x8000, fits: 'Held' }] as never;
-    api.routine.start(vt({}));
+    // A looted wand in the pack beside the listed one: VTank wields only Items-tab casters (BUG.vtank-loot-wears-items).
+    host.inv = [
+      { guid: 0x50000098, name: 'Wand', where: 'main pack', type: 'Caster', itemType: 0x8000, fits: 'Held' },
+      { guid: 0x50000097, name: 'Training Wand', where: 'main pack', type: 'Caster', itemType: 0x8000, fits: 'Held' },
+    ] as never;
+    const listed = emptyVtankData();
+    listed.items = [{ name: 'Training Wand' }];
+    api.routine.start(vt({ vtank: listed }));
     await step(1500);
     expect(host.sent).toContain('wield 50000097');
+    expect(host.sent).not.toContain('wield 50000098');
     api.routine.stop();
+    // Only the looted one carried: nothing is wielded; magic mode is asked for, refused, and spells rest, with VTank's advice.
+    host.inv = [{ guid: 0x50000098, name: 'Wand', where: 'main pack', type: 'Caster', itemType: 0x8000, fits: 'Held' }] as never;
+    host.sent.length = 0;
+    const setMode = host.setCombatMode;
+    host.setCombatMode = (m: string) => { host.sent.push(`mode ${m}`); };
+    api.routine.start(vt({}));
+    await step(6000);
+    expect(host.sent.filter((x) => x.startsWith('wield '))).toEqual([]);
+    expect(api.routine.history().join('\n')).toMatch(/Add at least one wand to your profile first/);
+    api.routine.stop();
+    host.setCombatMode = setMode;
     // No caster at all, and the server turns magic mode back every time (ACE: no wand).
     host.inv = [] as never;
     host.sent.length = 0;

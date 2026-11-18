@@ -21,7 +21,7 @@
  * Creature or Life self buff (not a fellowship spell) of a minute or more, or a FastCast spell.
  */
 import { PropertyFloat, PropertyInt, type PlanEnchantment, type PlanItem, type PlanSkill } from '@ac/shared';
-import { itemSpellId, useRequirementProblem } from './itemUse.ts';
+import { itemSpellId, useRequirementProblem, useWouldPutOn } from './itemUse.ts';
 
 /** VirindiTank's default GemFoodItems table (its default settings profile; the ids are the end-of-retail spells 3810 / 3811). */
 export const VT_GEM_FOOD_ITEMS = ["Asheron's Benediction", "Blackmoor's Favor"];
@@ -68,7 +68,8 @@ function familyLeft(active: PlanEnchantment[], category: number, power: number):
 export function planBuffItem(input: BuffItemInput): BuffItemPick | null {
   const listed = new Set(input.listed.map((n) => n.trim().toLowerCase()));
   for (const item of input.items) {
-    if (item.equipped || !listed.has(item.name.trim().toLowerCase()) || !item.ints) continue;
+    // A listed name a Use would put on (a ring or wand of that name) is no buff item: its Use wears or wields it.
+    if (item.equipped || !listed.has(item.name.trim().toLowerCase()) || !item.ints || useWouldPutOn(item.itemType)) continue;
     const spellId = itemSpellId(item);
     const spell = spellId !== undefined ? input.spellTable.spells.get(spellId) : undefined;
     if (!spellId || !spell || !(spell.bitfield & BENEFICIAL) || !((spell.duration ?? 0) > 0)) continue;

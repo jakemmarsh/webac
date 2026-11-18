@@ -12,6 +12,7 @@
  * its items list.
  */
 import type { InventoryManager } from '@ac/shared';
+import { isRetailContainer } from './RetailIsContainer.js';
 
 export interface ContainIdEvent {
   itemGuid: number;
@@ -40,9 +41,6 @@ export interface ContainedCreate {
   containersCapacity?: number;
 }
 
-/** ObjectDescriptionFlag.RequiresPackSlot: AddContent's containers-list test. */
-const BF_REQUIRES_PACKSLOT = 0x800000;
-
 /**
  * webac#29 — a create that names a container lists the object there the way retail's
  * ACCObjectMaint::SetWeenieDesc @ 00557a20 (1999: 0x004df510) does: its place in that container's
@@ -59,7 +57,6 @@ const BF_REQUIRES_PACKSLOT = 0x800000;
  */
 export function applyContainOnCreate(inventory: InventoryManager, d: ContainedCreate): { changed: boolean; packs: boolean } {
   if (!d.containerId || d.wielderId) return { changed: false, packs: false };
-  const packs = ((d.objectDescFlags ?? 0) & BF_REQUIRES_PACKSLOT) !== 0
-    || (d.itemsCapacity ?? 0) !== 0 || (d.containersCapacity ?? 0) !== 0;
+  const packs = isRetailContainer({ objectDescFlags: d.objectDescFlags, itemsCapacity: d.itemsCapacity, containersCapacity: d.containersCapacity });
   return { changed: inventory.containOnCreate(d.guid, d.containerId, packs), packs };
 }

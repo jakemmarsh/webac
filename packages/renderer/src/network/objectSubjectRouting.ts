@@ -238,7 +238,8 @@ export function buildInventoryEntry(data: InventoryEntrySource): {
     // ItemList_UpdateContainerListSize @ 004e39e0 takes the container's
     // pwd._itemsCapacity only when its bitfield carries Openable (0x1) or
     // it is the player; any other container resolves to 0. A non-openable
-    // pack therefore stays undefined (visible-area padding), while an
+    // pack therefore stays undefined (the grid reads the bitfield for its 0
+    // cells: RetailIsContainer.sideContainerFixedSlots), while an
     // openable one keeps its wire value — the unpack default 0 and the
     // signed -1 of a world-DB "-1" container (chest, corpse) included; the
     // grid treats a negative value as retail does (attribute -1 → padding).

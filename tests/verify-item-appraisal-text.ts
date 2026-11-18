@@ -27,6 +27,7 @@ import {
   clothingPriorityToString, insertCommas,
 } from '../packages/renderer/src/ui/examine/appraisalFormat.js';
 import { acStringHash, registerStringTable } from '@ac/dat-parser/file-types/LayoutDesc.js';
+import { aceAppraisal } from './_harness/aceAppraisal.js';
 
 const REPO = resolve(__dirname, '..');
 const LANG_DAT = resolve(REPO, 'dat/client_local_English.dat');
@@ -38,12 +39,13 @@ function item(p: Partial<IdentifyResponseData> & {
 }): IdentifyResponseData {
   const m = <T>(o?: Record<number, T>) => (o ? new Map(Object.entries(o).map(([k, v]) => [Number(k), v])) : undefined);
   const { ints, floats, bools, strings, int64s, dids, ...rest } = p;
-  return {
+  // Every fixture is one an end-of-retail ACE server could send (tests/_harness/aceAppraisal.ts).
+  return aceAppraisal({
     guid: 0x80000001, flags: 0,
     propertiesInt: m(ints), propertiesFloat: m(floats), propertiesBool: m(bools),
     propertiesString: m(strings), propertiesInt64: m(int64s), propertiesDataID: m(dids),
     ...rest,
-  };
+  });
 }
 
 // ─── Lilitha's Bow (examine-bow.jpg) ───────────────────────────────────

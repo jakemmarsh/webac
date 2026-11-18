@@ -1,17 +1,19 @@
 /**
- * FAITHFUL.267 — addSystemMessage caps the chat log at 100 entries.
+ * The chat log's cap, as end of retail kept it: ChatInterface::RecvNotice_DisplayFinalStringInfo
+ * @ 004f4640 truncates the log once it holds more than 10000 glyphs (TruncateChatLog(7500)
+ * @ 004f4290, beheading at a line break), so about the last 7500 glyphs remain. Every
+ * ChatInterface does it: the main chat and each floaty window (FAITHFUL.267 first capped it,
+ * at an invented 100 lines).
  *
- * Pre-fix addSystemMessage appended to chatMessages without a cap, so
- * server combat/spell/recall lines accumulated without bound. addChatMessage
- * already had the 100-entry cap; this brings them into parity.
- *
- * DEBT.test-harness-hygiene: converted from a GameUI.ts source pin — the real
- * addSystemMessage / addChatMessage append into a live chat-log element.
+ * Drives the real addSystemMessage / addChatMessage into a live chat-log element (happy-dom).
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { mountGameUI, type GameUIFixture } from './_harness/gameui.js';
+import { chatLineGlyphs, trimChatLog, EOR_WORLD_RULES, AC1999_WORLD_RULES } from '../packages/renderer/src/era/EraWorldRules.js';
 
-describe('FAITHFUL.267 — chat log cap (behavioural)', () => {
+const glyphs = (log: Element): number => Array.from(log.children).reduce((a, c) => a + chatLineGlyphs(c), 0);
+
+describe('chat log cap: end of retail counts glyphs (10000 → 7500)', () => {
   let H: GameUIFixture;
   let log: HTMLDivElement;
   beforeAll(async () => { H = await mountGameUI(); });
@@ -22,17 +24,37 @@ describe('FAITHFUL.267 — chat log cap (behavioural)', () => {
     H.ui.chatMessages = log;
   });
 
-  it('addSystemMessage caps the log at 100 entries, dropping the OLDEST', () => {
-    for (let i = 0; i < 130; i++) H.ui.addSystemMessage(`line ${i}`);
-    expect(log.children.length).toBe(100);
-    expect(log.children[0].textContent).toContain('line 30');
-    expect(log.children[99].textContent).toContain('line 129');
+  it('addSystemMessage keeps every message until the log passes 10000 glyphs', () => {
+    // "line NNNN" = 9 glyphs + the joining "\n" = 10 per message: 1000 messages = 10000 glyphs, no trim.
+    for (let i = 0; i < 1000; i++) H.ui.addSystemMessage(`line ${String(i).padStart(4, '0')}`);
+    expect(log.children.length).toBe(1000);
+    expect(glyphs(log)).toBe(10000);
   });
 
-  it('addChatMessage has the same cap (regression)', () => {
-    for (let i = 0; i < 105; i++) H.ui.addChatMessage('Bob', `msg ${i}`);
-    expect(log.children.length).toBe(100);
-    expect(log.children[0].textContent).toContain('msg 5');
+  it('past 10000 glyphs the OLDEST messages go until at most 7500 remain; the newest stay in order', () => {
+    for (let i = 0; i < 1001; i++) H.ui.addSystemMessage(`line ${String(i).padStart(4, '0')}`);
+    expect(glyphs(log)).toBeLessThanOrEqual(7500);
+    expect(log.children.length).toBe(750);
+    expect((log.children[0] as HTMLElement).dataset.chatText).toBe('line 0251');
+    expect((log.children[749] as HTMLElement).dataset.chatText).toBe('line 1000');
+  });
+
+  it('a long session stays bounded: 50k lines leave the log under the cap', () => {
+    for (let i = 0; i < 50_000; i++) H.ui.addSystemMessage(`You hit the Drudge Skulker for ${i % 97} points of slashing damage!`);
+    expect(glyphs(log)).toBeLessThanOrEqual(10000);
+    expect(log.children.length).toBeLessThan(200);
+  });
+
+  it('addChatMessage lines count their sender and body the same way', () => {
+    for (let i = 0; i < 2000; i++) H.ui.addChatMessage('Bob', `msg ${i}`);
+    expect(glyphs(log)).toBeLessThanOrEqual(10000);
+    const last = log.children[log.children.length - 1];
+    expect(last.textContent).toContain('msg 1999');
+  });
+
+  it('one message longer than the whole cap is kept (the newest is never trimmed away)', () => {
+    H.ui.addSystemMessage('x'.repeat(12000));
+    expect(log.children.length).toBe(1);
   });
 
   it('addSystemMessage still scrolls to the bottom when the reader was at the bottom (FAITHFUL.351 sticky-bottom)', () => {
@@ -42,5 +64,14 @@ describe('FAITHFUL.267 — chat log cap (behavioural)', () => {
     Object.defineProperty(log, 'scrollTop', { configurable: true, get: () => scrollTop, set: (v: number) => { scrollTop = v; } });
     for (let i = 0; i < 20; i++) H.ui.addSystemMessage(`line ${i}`);
     expect(scrollTop).toBe(400);
+  });
+
+  it('1999 still counts lines: past 300 the first 100 go', () => {
+    const d = H.win.document.createElement('div');
+    for (let i = 0; i < 301; i++) { const c = H.win.document.createElement('div'); c.textContent = `l${i}`; d.appendChild(c); }
+    trimChatLog(d, AC1999_WORLD_RULES.chatHistory);
+    expect(d.children.length).toBe(200);
+    expect(d.children[0].textContent).toBe('l101');
+    expect(EOR_WORLD_RULES.chatHistory.unit).toBe('glyphs');
   });
 });

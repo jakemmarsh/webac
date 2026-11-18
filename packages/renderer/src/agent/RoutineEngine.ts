@@ -1654,11 +1654,13 @@ export class RoutineEngine {
     if (g === null) return ['TestItem: select an item first.'];
     const carried = this.api.inventory().find((i) => i.guid === g);
     const o = this.api.look({ max: 60, radius: 200 }).nearby.find((x) => x.guid === g);
-    const name = carried?.name ?? o?.name;
+    // An item in an open corpse or chest is no world object: the open container's listing names it and its type.
+    const lying = carried || o ? null : this.api.openContainerItem(g);
+    const name = carried?.name ?? o?.name ?? lying?.name;
     if (!name) return ['TestItem: select an item first.'];
     const r = await this.api.appraise(g, { quiet: true });
     const facts = r.ok ? { ...appraisalFacts(r.message), ...(r.data ? { props: r.data as ItemProps } : {}) } : {};
-    const type = carried?.type ?? (carried?.itemType !== undefined ? itemTypeLabel(carried.itemType) : undefined);
+    const type = carried?.type ?? (carried?.itemType !== undefined ? itemTypeLabel(carried.itemType) : lying?.itemType ? itemTypeLabel(lying.itemType) : undefined);
     const rule = lootRuleFor(rules ?? this.profile?.loot ?? [], { name, ...(type ? { type } : {}), ...(carried?.value !== undefined ? { value: carried.value } : {}), ...(carried?.burden !== undefined ? { burden: carried.burden } : {}), palettes: this.api.itemPalettes(g), ...facts }, this.lootCharacter());
     return [testItemLine(name, rule && rule.action !== 'ignore' ? { action: rule.action, rule: rule.label ?? rule.action } : null)];
   }

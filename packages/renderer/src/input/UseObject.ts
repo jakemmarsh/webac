@@ -18,6 +18,8 @@
  * 0x7e2af8 door, 0x7e2aa0 dove, 0x7e2a70 cannot-be-used.
  */
 
+import { isRetailContainer } from '../inventory/RetailIsContainer.js';
+
 /** PublicWeenieDesc._bitfield (ACE ObjectDescriptionFlag) bits UseObject reads. */
 export const BF_STUCK = 0x4;
 export const BF_VENDOR = 0x200;
@@ -220,7 +222,7 @@ export function determineUseResult(o: UseSubject, ctx: UseContext, rules: UseObj
   }
   if (!general && o.wielderId !== 0 && o.wielderId !== ctx.playerGuid) general = true;
   if (!general) {
-    const containerLike = (o.bitfield & BF_REQUIRES_PACK_SLOT) !== 0 || o.itemsCapacity !== 0 || o.containersCapacity !== 0;
+    const containerLike = isContainerSubject(o);
     if (!containerLike || o.componentPack) return 2;
   }
   const t = o.itemType >>> 0;
@@ -369,7 +371,7 @@ export function isUseStatusNotice(text: string): boolean {
 
 /** ACCWeenieObject::IsContainer @ 004a4530: RequiresPackSlot, or any item / container capacity. */
 export function isContainerSubject(o: Pick<UseSubject, 'bitfield' | 'itemsCapacity' | 'containersCapacity'>): boolean {
-  return (o.bitfield & BF_REQUIRES_PACK_SLOT) !== 0 || o.itemsCapacity !== 0 || o.containersCapacity !== 0;
+  return isRetailContainer({ objectDescFlags: o.bitfield, itemsCapacity: o.itemsCapacity, containersCapacity: o.containersCapacity });
 }
 
 /**

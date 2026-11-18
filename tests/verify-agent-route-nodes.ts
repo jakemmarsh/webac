@@ -13,6 +13,7 @@ import {
 import { ALL_MODULES_OFF, emptyVtankData, exportNav, navToRoute, parseNav, validateRoutineDoc, emptyRoutineDoc, type Route, type RoutineProfile } from '../packages/shared/src/routines/index.ts';
 import type { AgentItem, AgentObject } from '../packages/renderer/src/agent/types.ts';
 import { FakeHost, HOLTBURG, run } from './_harness/agentFake.ts';
+import { aceRecord } from './_harness/aceAppraisal.ts';
 
 /** Map coordinates of a landblock-local point in HOLTBURG. */
 function M(x: number, y: number): string {
@@ -65,12 +66,14 @@ describe('route points (pure)', () => {
   it('a door\'s lock comes from its appraisal (ACE: Locked, ResistLockpick); the lockpick from Consumables, gated on skill', () => {
     expect(doorLock(null)).toEqual({ locked: false });
     expect(doorLock({ bool: { 3: false } })).toEqual({ locked: false });
-    expect(doorLock({ bool: { 3: true }, int: { 173: 120 } })).toEqual({ locked: true, difficulty: 120 });
+    // ACE: Locked, ResistLockpick 38 (the lock's difficulty) and your success percent 173, which is not the difficulty.
+    expect(doorLock({ bool: { 3: true }, int: { 38: 120, 173: 90 } })).toEqual({ locked: true, difficulty: 120 });
     const items: AgentItem[] = [
       { guid: 1, name: 'Plain Lockpick', where: 'main pack', objectDescFlags: 0x20000 },
       { guid: 2, name: 'Intricate Lockpick', where: 'main pack', objectDescFlags: 0x20000 },
       { guid: 3, name: 'Unlisted Lockpick', where: 'main pack', objectDescFlags: 0x20000 },
     ];
+    // LockpickMod 88: GDLE sends it; ACE never does (then every listed pick scores the same).
     const data = (g: number) => (g === 2 ? { int: { 88: 30 } } : null);
     const listed = ['Plain Lockpick', 'intricate lockpick'];
     expect(chooseLockpick(items, listed, 150, 120, -50, data)).toEqual({ item: items[1] });
@@ -274,7 +277,7 @@ describe('route points in the engine', () => {
   it('OpenDoors: a locked door is picked with a Consumables lockpick when your skill is up to it; else it is skipped and said', async () => {
     const door = 0x7a9b0201;
     host.add({ guid: door, name: 'Vault Door', objectDescFlags: 0x1000, x: 80, y: 30, physicsState: 0 });
-    host.appraisalDatas.set(door, { int: { 173: 120 }, float: {}, string: {}, bool: { 3: true }, did: {}, spells: [] });
+    host.appraisalDatas.set(door, aceRecord({ appraisal: { int: { 38: 120, 173: 97 }, bool: { 3: true } } }));
     const pick = { guid: 0x50000301, name: 'Intricate Lockpick', where: 'main pack', objectDescFlags: 0x20000 } as const;
     host.inv.push(pick);
     let skill = 150;

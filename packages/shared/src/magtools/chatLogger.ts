@@ -77,7 +77,16 @@ export interface MtChatLoggerOpts {
   store?: () => MtTextStore | null;
   now?: () => number;
   isIncantation?: (text: string) => boolean;
+  /**
+   * Run `fn` once after `ms` (default setTimeout). Logged lines reach the store at most once per
+   * MT_CHAT_LOG_WRITE_DELAY_MS: each write re-stores the whole log (up to 1 MiB), which on every
+   * line of a busy channel cost the main thread milliseconds a line (input delay over a long session).
+   */
+  schedule?: (fn: () => void, ms: number) => void;
 }
+
+/** How long logged lines wait to be written to the store together (flush() writes at once). */
+export const MT_CHAT_LOG_WRITE_DELAY_MS = 2000;
 
 const groupKey = (group: 1 | 2, channel: MtChatLoggerChannel) => `ChatLogger.Group${group}.${channel}`;
 
@@ -86,6 +95,13 @@ export class MtChatLogger {
   private readonly lists: Record<1 | 2, MtChatLogLine[]> = { 1: [], 2: [] };
   /** The stored log as text (cached so a line appends without a read). */
   private stored: string | null = null;
+  /** Lines logged since the last write, in file format, oldest first. */
+  private pending = '';
+  /** The store the pending lines go to (the character they were logged by, whatever logs in before the write). */
+  private pendingStore: MtTextStore | null = null;
+  /** The store `stored` is a copy of. */
+  private storedIn: MtTextStore | null = null;
+  private writeScheduled = false;
   private readonly now: () => number;
 
   constructor(private readonly opts: MtChatLoggerOpts) {
@@ -139,21 +155,43 @@ export class MtChatLogger {
   }
 
   private append(line: MtChatLogLine): void {
-    const s = this.store();
+    if (!this.pending) {
+      if (!this.storedIn) { this.storedIn = this.store(); this.stored = null; }
+      this.pendingStore = this.storedIn;
+    }
+    this.pending += mtChatLogFileLine(line);
+    if (this.writeScheduled) return;
+    this.writeScheduled = true;
+    const schedule = this.opts.schedule ?? ((fn, ms) => { setTimeout(fn, ms); });
+    schedule(() => this.flush(), MT_CHAT_LOG_WRITE_DELAY_MS);
+  }
+
+  /** Write the lines logged since the last write to the store now (logout, page hide). */
+  flush(): void {
+    this.writeScheduled = false;
+    if (!this.pending) return;
+    const add = this.pending;
+    const s = this.pendingStore;
+    this.pending = '';
+    this.pendingStore = null;
     if (!s) return;
-    if (this.stored === null) { try { this.stored = s.get() ?? ''; } catch { this.stored = ''; } }
-    let text = this.stored + mtChatLogFileLine(line);
+    const mine = s === this.storedIn;
+    let base: string;
+    if (mine && this.stored !== null) base = this.stored;
+    else { try { base = s.get() ?? ''; } catch { base = ''; } }
+    let text = base + add;
     if (text.length > MT_CHAT_LOG_STORE_MAX) {
       text = text.slice(text.length - MT_CHAT_LOG_STORE_MAX);
       const nl = text.indexOf('\n');
       text = nl >= 0 ? text.slice(nl + 1) : '';
     }
-    this.stored = text;
+    if (mine) this.stored = text;
     try { s.set(text); } catch { /* storage full or blocked */ }
   }
 
   /** At login: read the stored log back into both lists (each group keeps the channels it logs). */
   load(): void {
+    this.flush();
     this.lists[1] = [];
     this.lists[2] = [];
     this.stored = null;
@@ -161,6 +199,7 @@ export class MtChatLogger {
     let raw = '';
     try { raw = s?.get() ?? ''; } catch { raw = ''; }
     this.stored = s ? raw : null;
+    this.storedIn = s;
     for (const line of mtParseChatLog(raw)) {
       if (this.groupHas(1, line.channel)) this.push(1, line);
       if (this.groupHas(2, line.channel)) this.push(2, line);
@@ -172,6 +211,9 @@ export class MtChatLogger {
     this.lists[1] = [];
     this.lists[2] = [];
     this.stored = null;
+    this.storedIn = null;
+    this.pending = '';
+    this.pendingStore = null;
     try { this.store()?.remove(); } catch { /* storage blocked */ }
   }
 
@@ -181,6 +223,7 @@ export class MtChatLogger {
    */
   exportText(): string {
     if (this.opts.persistent()) {
+      this.flush();
       const s = this.store();
       if (s) { try { return this.stored ?? s.get() ?? ''; } catch { /* fall through */ } }
     }

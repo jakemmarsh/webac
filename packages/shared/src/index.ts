@@ -243,5 +243,6 @@ export * from './routines/index.js';
 export * from './goarrow/index.js';
 export * from './mapCoordsText.js';
 export * from './magtools/index.js';
+export * from './appraisal/aceDeliveredProperties.js';
 export * from './splitpea/index.js';
 export * from './vcs5/vcs5.js';

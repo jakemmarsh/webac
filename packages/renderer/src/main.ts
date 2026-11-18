@@ -30,7 +30,7 @@ import { DatReader } from '@ac/dat-parser/DatReader.js';
 import { parseMasterProperty, setMasterPropertyTypes, parseStringTable, registerStringTable, acStringHash, getStringFromTable, getString } from '@ac/dat-parser/file-types/LayoutDesc.js';
 import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, jumpSkillWithStamina, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyString, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken, characterCreateErrorFallbackText, playerText, PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatWeenieErrorWithString, weenieErrorWithStringText, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, POSTYPE_LAST_OUTSIDE_DEATH, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
 import type { PendingTieBind } from '@ac/shared';
-import { APPRAISAL_1999_STRING, inqSpellTargetType, appraisedMissileVelocity } from '@ac/shared';
+import { APPRAISAL_1999_STRING, inqSpellTargetType, appraisedMissileVelocity, foldAppraisalProfiles, mtWornItemOf } from '@ac/shared';
 import { OpenContainerTracker } from './world/OpenContainerTracker.js';
 import { routeViewContents } from './world/ViewContentsRouter.js';
 import { closeCurrentContainer, releaseGroundObject as releaseGroundObjectState } from './world/CloseCurrentContainer.js';
@@ -140,6 +140,7 @@ import { GameActions } from './network/GameActions.js';
 import { pageDebugToolsEnabled, harnessDegMulPin } from './utils/debugTools.js';
 import { AgentApi, agentApiEnabled, automationUiEnabled, doorFacing, fixtureReach, parseMapCoords, toGlobal as agentToGlobal, yawToCompass, type AgentHost, type AgentHostObject, type AgentPlacementSent } from './agent/AgentApi.js';
 import { createHostAttack } from './agent/hostAttack.js';
+import { withPublicDescription, type AgentAppraisal, type PublicDescription } from './agent/itemRecord.js';
 import { skillKey, skillSpellLines, spellSkillMod } from './agent/spellFamilies.js';
 import { pluginLootSets } from './agent/pluginLootSets.js';
 import { modeOfStance } from './agent/macro/modeGate.js';
@@ -345,6 +346,7 @@ import { ServerMessageHandler } from './network/ServerMessageHandler.js';
 import { applySetStackSize } from './network/applySetStackSize.js';
 import { getObjectSplitSize } from './inventory/dragSplit.js';
 import { applyContainIdOrder, applyContainOnCreate } from './inventory/applyContainIdOrder.js';
+import { isRetailContainer, joinsSidePackColumn, sideContainerFixedSlots } from './inventory/RetailIsContainer.js';
 import {
   attemptToPlaceInContainer, placeInBackpack as placeInBackpackDecision, acceptItemListDrop,
   type PlacementWorld, type PlacementObject, type PlacementResult,
@@ -494,7 +496,8 @@ const quietAppraisals = new Set<number>();
 const awaitedAppraisals = new Set<number>();
 /** Records a quiet appraisal's examine view for the agent (set when the agent starts). */
 let recordQuietExamine: ((view: Parameters<GameUI['showExaminationWindow']>[0]) => void) | null = null;
-const agentAppraisals = new Map<number, { int: Record<number, number>; float: Record<number, number>; string: Record<number, string>; bool: Record<number, boolean>; did: Record<number, number>; spells: string[]; spellIds: number[]; activeSpellIds: number[]; at?: number; maxVelocity?: number }>();
+/** The agent's examinations (agent/itemRecord.ts): automation reads them through agentItemRecord, which adds the public description. */
+const agentAppraisals = new Map<number, AgentAppraisal>();
 import { openStreamingDats, type StreamScope, type StreamingDats } from './dat/streaming/StreamingDats.js';
 import { FetchPriority, NetworkLink, fileKey, splitFileKey } from './dat/streaming/DatStore.js';
 import { PreviewBuildHold } from './ui/PreviewBuildHold.js';
@@ -3206,18 +3209,6 @@ async function main() {
   // update_times[8] check @ 00453340). -1 until the first own ObjDescEvent
   // lands; reset whenever the player model is (re)built from CreateObject.
   let playerLastVisualDescSeq = -1;
-  /**
-   * Cache of guid → setupId, populated opportunistically from any DataID
-   * properties that arrive in IdentifyResponse / appraisal data.
-   *
-   * IMPORTANT (UI.58 finding): ACE's appraisal flow does NOT include
-   * `PropertyDataId.Setup` (= 1) in the response — verified live by
-   * examining the equipped Sceptre and observing the appraisal contains
-   * only user-visible stats (Spellcraft, Mana, Bonus to Melee Defense)
-   * and no DataIDs. The wielded-item viz reads the item's own CreateObject
-   * setup instead (InventoryItem.visualDesc, RECON.wielded-item-objdesc).
-   */
-  const itemSetupIdCache = new Map<number, number>();
 
   /**
    * BUG.held-item-own-state — a held item is its own CPhysicsObj in retail
@@ -5308,8 +5299,7 @@ async function main() {
   // UIElement_ItemList::AcceptDragObject). Every pick-up, unwield and pack
   // drop decides here and sends through runPlacement.
   /** ACCWeenieObject::IsContainer @ 004a4530 for a held item. */
-  const heldIsContainer = (it: { itemType?: number; itemsCapacity?: number; objectDescFlags?: number }): boolean =>
-    ((it.objectDescFlags ?? 0) & 0x800000) !== 0 || (it.itemsCapacity ?? 0) !== 0 || ((it.itemType ?? 0) & ItemType.Container) !== 0;
+  const heldIsContainer = (it: { itemType?: number; itemsCapacity?: number; objectDescFlags?: number }): boolean => isRetailContainer(it);
   /**
    * The main pack's own items: the player's container (0 or the player id), worn and wielded items left out. They stay in
    * the inventory list beside the pack items and are in no pack (ACE EquippedObjects; agent/packCounts.ts).
@@ -7265,6 +7255,7 @@ async function main() {
     return {
       guid: item.id, name: item.name, pluralName: item.pluralName,
       weenieClassId: item.weenieClassId, stackSize: item.stackSize, itemType: item.itemType ?? 0,
+      objectDescFlags: item.objectDescFlags, itemsCapacity: item.itemsCapacity,
       ownedByPlayer: true, containerId: item.containerId,
       ...(contents.length > 0 ? { contents } : {}),
     };
@@ -10222,9 +10213,10 @@ async function main() {
 
         // Items belonging to the player (inventory, equipped, or in a side pack)
         if (route === 'own-inventory') {
-          // Track side pack containers: items with ItemType.Container directly in player
-          const isPlayerDirect = data.containerId === aceCharGuid || data.wielderId === aceCharGuid;
-          if (isPlayerDirect && (data.itemType & ItemType.Container) !== 0 && !data.wielderId) {
+          // The side-pack column: what AddContent @ 0058cce0 lists in the player's containers list —
+          // ACCWeenieObject::IsContainer (a pack, or a RequiresPackSlot object such as a focus;
+          // BUG.foci-in-main-pack), not the ItemType.Container bit (a focus is ItemType Misc).
+          if (joinsSidePackColumn(data, aceCharGuid)) {
             if (!sidePackGuids.includes(data.guid)) {
               sidePackGuids.push(data.guid);
               reorderSidePacks();
@@ -10470,7 +10462,7 @@ async function main() {
           if (worldRec) nonWorldRecords.carryFromWorld(worldRec, data.containerGuid);
           serverObjectManager?.deleteObject(data.itemGuid, 'pickup');
           playerState.inventory.addItem(picked, data.itemGuid);
-          if ((picked.itemType & ItemType.Container) !== 0 && data.containerGuid === aceCharGuid && !sidePackGuids.includes(data.itemGuid)) {
+          if (joinsSidePackColumn({ ...picked, containerId: data.containerGuid }, aceCharGuid) && !sidePackGuids.includes(data.itemGuid)) {
             sidePackGuids.push(data.itemGuid);
             gameUI.setSidePackGuids([...sidePackGuids]);
           }
@@ -10552,7 +10544,7 @@ async function main() {
           openContainer.trackStoredItem(data.itemGuid, {
             name: stored.name, pluralName: stored.pluralName,
             iconDid: stored.iconDid ?? 0, stackSize: stored.stackSize,
-            itemType: stored.itemType,
+            itemType: stored.itemType, objectDescFlags: stored.objectDescFlags,
             // CORE.17.o.b — a stored pack's tab keeps its own capacity.
             itemsCapacity: stored.itemsCapacity,
             // CORE.18.c.a — the cell's RenderIcons inputs.
@@ -12652,8 +12644,12 @@ async function main() {
         metaIdentifyAnswers.set(data.guid >>> 0, { success: data.success !== false, at: performance.now() });
         if (metaIdentifyAnswers.size > 500) metaIdentifyAnswers.delete(metaIdentifyAnswers.keys().next().value!);
         if (agentAppraisals.size > 500) agentAppraisals.delete(agentAppraisals.keys().next().value!);
+        // ACE sends a weapon's damage / variance / offense / damage mod and armor's resistances only in the
+        // Weapon / Armor profiles; Decal-keyed readers (Mag-Tools' item line, loot rules, the macro's ammo pick)
+        // look them up as properties (Damage 44, DamageVariance 22, ArmorModVs* 13–19 …), so they are written in.
+        const folded = foldAppraisalProfiles(Object.fromEntries(data.propertiesInt ?? []), Object.fromEntries(data.propertiesFloat ?? []), data.weaponProfile, data.armorProfile);
         agentAppraisals.set(data.guid >>> 0, {
-          int: Object.fromEntries(data.propertiesInt ?? []), float: Object.fromEntries(data.propertiesFloat ?? []),
+          int: folded.int, float: folded.float,
           string: Object.fromEntries(data.propertiesString ?? []), bool: Object.fromEntries(data.propertiesBool ?? []),
           did: Object.fromEntries(data.propertiesDataID ?? []),
           // A 1999 appraisal carries the spell names, not ids (APPRAISAL_1999_STRING.spellNames, ", "-joined by the server).
@@ -12665,11 +12661,6 @@ async function main() {
           // stored" placeholder is the 20 m/s those servers throw with (appraisedMissileVelocity), not a 0.1 m reach.
           ...(data.weaponProfile && data.weaponProfile.weaponTime >= 0 ? { maxVelocity: appraisedMissileVelocity(data.weaponProfile.maxVelocity, data.weaponProfile.maxVelocityEstimated ?? 0) } : {}),
         });
-        // Opportunistically cache the item's setupId — gives future
-        // equipped-item viz (UI.56 placeholder → real mesh) a path to
-        // resolve weenie meshes without extra round-trips.
-        const setupId = data.propertiesDataID?.get(1) ?? 0; // PropertyDataId.Setup = 1
-        if (setupId) itemSetupIdCache.set(data.guid, setupId);
         const obj = serverObjectManager?.getObject(data.guid);
         // FAITHFUL.385 — Mirror Level from IdentifyResponse onto the
         // ServerObject + live HUD target frame. Pre-fix the HUD target
@@ -12757,7 +12748,7 @@ async function main() {
         if (magTools && !quiet) {
           magTools.appraised({
             guid: data.guid >>> 0, name,
-            int: Object.fromEntries(data.propertiesInt ?? []), float: Object.fromEntries(data.propertiesFloat ?? []),
+            int: folded.int, float: folded.float,
             bool: Object.fromEntries(data.propertiesBool ?? []), string: Object.fromEntries(data.propertiesString ?? []),
             did: Object.fromEntries(data.propertiesDataID ?? []),
             spellIds: [...(data.spellBook ?? [])], activeSpellIds: [...(data.activeEnchantments ?? [])],
@@ -16817,17 +16808,6 @@ async function main() {
         return `attached ${equipped.name} (wcid ${equipped.weenieClassId}, setup 0x${setupId.toString(16)}) to part_${loc.partId}`;
       },
       /**
-       * Dump the opportunistic guid → setupId cache. Populated by
-       * onIdentifyResponse — i.e. any time the user has examined an item.
-       */
-      itemSetups: () => {
-        const out: any[] = [];
-        for (const [guid, setupId] of itemSetupIdCache) {
-          out.push({ guid: '0x' + guid.toString(16), setupId: '0x' + setupId.toString(16) });
-        }
-        return out;
-      },
-      /**
        * Attach a bright red placeholder cube to the player's right-hand
        * holdingLocation (or the given parentLocation enum value, default 1
        * = RightHand). Proves the SetupModel.holdingLocations[loc].partId+frame
@@ -18232,6 +18212,29 @@ async function main() {
       const agentPrimeMoveState = () => {
         if (movementSync && gameStarted && movementSync.moveToStatesSent === 0) movementSync.sendMovementEventNow(syncMovementStateNow(), syncPositionNow());
       };
+      // An examined object as the automation reads it: the examination's tables (profiles folded in), then its public
+      // description where they have nothing (agent/itemRecord.ts): a carried item's own record (worn: its slot), else
+      // the world object's. ACE sends ItemType, ValidLocations, StackSize, ItemUseable, Spell … only there.
+      const agentPublicDescription = (guid: number): PublicDescription | null => {
+        const worn = playerState.equipment.getAll().find((e) => e.id >>> 0 === guid);
+        const held = worn ?? playerState.inventory.getItem(guid);
+        if (held) return { ...held, ...(worn ? { currentWieldedLocation: Number(worn.slot) >>> 0 } : {}) };
+        // An item in an open corpse or chest: no world object, but its CreateObject is kept (the loot rules' Decal keys).
+        const lying = worldObjectRecords.entryOf(guid);
+        if (lying && !serverObjectManager?.getObject(guid)) return lying;
+        const o = serverObjectManager?.getObject(guid);
+        return o ? {
+          itemType: o.itemType, usable: o.usable, currentWieldedLocation: o.wieldedLocation, clothingPriority: o.clothingPriority,
+          stackSize: o.stackSize, maxStackSize: o.maxStackSize, itemsCapacity: o.itemsCapacity, containersCapacity: o.containersCapacity, ammoType: o.ammoType,
+          uiEffects: o.uiEffects, combatUse: o.combatUse, targetType: o.targetType, value: o.value, burden: o.burden, structure: o.structure,
+          maxStructure: o.maxStructure, cooldownId: o.cooldownId, cooldownDuration: o.cooldownDuration, iconDid: o.iconId, iconOverlayDid: o.iconOverlayId,
+          iconUnderlayDid: o.iconUnderlayId,
+        } : null;
+      };
+      const agentItemRecord = (guid: number): AgentAppraisal | null => {
+        const a = agentAppraisals.get(guid >>> 0);
+        return a ? withPublicDescription(a, agentPublicDescription(guid >>> 0)) : null;
+      };
       const agentHost: AgentHost = {
         now: () => performance.now(),
         wallClock: () => Date.now(),
@@ -18383,7 +18386,13 @@ async function main() {
         packs: () => packSlotCounts(playerState.inventory.getAll(), {
           playerGuid: aceCharGuid ?? 0, sidePackGuids, worn: new Set(playerState.equipment.getAll().map((e) => e.id >>> 0)),
           isPack: (i) => heldIsContainer(i),
-          capacityOf: (slot, guid) => (slot === 0 ? playerState.itemsCapacity : (serverObjectManager?.getObject(guid)?.itemsCapacity ?? 24)),
+          // A side-column object's own list (sideContainerFixedSlots): a focus holds nothing (0), not a pack's 24.
+          capacityOf: (slot, guid) => {
+            if (slot === 0) return playerState.itemsCapacity;
+            const held = playerState.inventory.getItem(guid);
+            const fixed = held ? sideContainerFixedSlots(held) : -1;
+            return fixed >= 0 ? fixed : (serverObjectManager?.getObject(guid)?.itemsCapacity ?? 24);
+          },
         }),
         itemSlots: () => {
           const worn = new Set(playerState.equipment.getAll().map((e) => e.id >>> 0));
@@ -18471,7 +18480,13 @@ async function main() {
           void worldStreamingDats?.pendingFor(() => appearanceManager.loadPaletteColors(paletteId));
           return null;
         },
-        openContainer: () => (openContainerGuid ? { guid: openContainerGuid >>> 0, items: openContainer.items().map((i) => ({ guid: i.guid >>> 0, name: i.name, ...(i.uiEffects ? { uiEffects: i.uiEffects } : {}), ...(i.stackSize ? { stack: i.stackSize } : {}) })) } : null),
+        // A corpse's or chest's item is kept with the open container, never in serverObjectManager: its ItemType and
+        // ObjectDescriptionFlags (its CreateObject, kept by worldObjectRecords) come with the listing for the loot rules
+        // (BUG.vtank-loot-wears-items: read as 0, every examined magic item passed for an unknown scroll).
+        openContainer: () => (openContainerGuid ? { guid: openContainerGuid >>> 0, items: openContainer.items().map((i) => {
+          const flags = (worldObjectRecords.sourceOf(i.guid) as { objectDescFlags?: number } | null)?.objectDescFlags;
+          return { guid: i.guid >>> 0, name: i.name, ...(i.uiEffects ? { uiEffects: i.uiEffects } : {}), ...(i.stackSize ? { stack: i.stackSize } : {}), ...(i.itemType ? { itemType: i.itemType } : {}), ...(flags ? { objectDescFlags: flags } : {}) };
+        }) } : null),
         dialogs: () => gameUI.agentDialogs(),
         book: () => gameUI.agentBook(),
         bookPage: (index) => gameUI.agentBookPage(index),
@@ -18567,7 +18582,7 @@ async function main() {
         // AGENT.idle-no-agent-work — an agent is attached: Claude on for this tab (the hosted connector), or the ?agent API.
         agentAttached: () => agentApiExposed || tabRelay.on,
         appraisal: (guid) => examined.get(guid) ?? null,
-        appraisalData: (guid) => agentAppraisals.get(guid >>> 0) ?? null,
+        appraisalData: (guid) => agentItemRecord(guid),
         playerOption: (code) => (currentCharacterOptions1 === null || currentCharacterOptions2 === null ? undefined : characterOptionIsSet(code, currentCharacterOptions1, currentCharacterOptions2)),
         raise: (stat, upTo) => gameUI.agentRaise(stat, upTo),
         trainSkill: (skill) => gameUI.agentTrainSkill(skill),
@@ -18954,28 +18969,21 @@ async function main() {
           const wl = 'slot' in it ? Number(it.slot) : undefined;
           return { ...(it.iconDid !== undefined ? { icon: it.iconDid } : {}), value: it.value, stackSize: it.stackSize, ...(wl !== undefined ? { wieldedLocation: wl } : {}) };
         },
-        appraisal: (guid) => { const a = agentAppraisals.get(guid >>> 0); return a ? { guid: guid >>> 0, int: a.int, float: a.float, bool: a.bool, string: a.string, did: a.did, spellIds: a.spellIds, activeSpellIds: a.activeSpellIds } : null; },
+        appraisal: (guid) => { const a = agentItemRecord(guid); return a ? { guid: guid >>> 0, int: a.int, float: a.float, bool: a.bool, string: a.string, did: a.did, spellIds: a.spellIds, activeSpellIds: a.activeSpellIds } : null; },
         // The era's power words (SpellComponentTable 0x0E00000F, each component's Text): the chat logger skips incantations.
         spellWords: () => mtSpellWords ??= new Set([...(spellComponentTable?.components.values() ?? [])].map((c) => c.text).filter((t) => t !== '')),
         writeClipboard: (text) => navigator.clipboard.writeText(text),
         appraiseWorn: () => { for (const e of playerState.equipment.getAll()) if (!agentAppraisals.has(e.id >>> 0)) void agentApi.appraise(e.id >>> 0, { quiet: true }); },
-        // The mana tracker: worn items from their appraisals (CurMana 107, MaxMana 108, ManaRate 5, Retained 91,
-        // ValidLocations 9, CurrentWieldedLocation 10, Spell 28) and your enchantments (Category, Power, time left).
+        // The mana tracker: worn items from their appraisals (CurMana 107, MaxMana 108, ManaRate 5, Retained 91) and
+        // their CreateObject fields (ValidLocations, worn slot, Spell: ACE never appraises those), and your
+        // enchantments (Category, Power, time left).
         manaReads: {
-          worn: () => playerState.equipment.getAll().map((e) => {
-            const a = agentAppraisals.get(e.id >>> 0);
+          worn: () => {
             const spell = (id: number) => { const sp = spellTable?.spells.get(id); return sp ? { id, name: sp.name, family: sp.category, difficulty: sp.power, offensive: (sp.bitfield & 0x4) === 0 } : null; };
-            return {
-              id: e.id >>> 0, name: e.name, icon: e.iconDid,
-              validLocations: a?.int[9] ?? 0, wieldedLocation: a?.int[10] ?? (e as { currentWieldedLocation?: number }).currentWieldedLocation ?? 1,
-              appraised: !!a,
-              spells: (a?.spellIds ?? []).map(spell).filter((x): x is NonNullable<ReturnType<typeof spell>> => !!x),
-              associatedSpellId: a?.did[28],
-              curMana: a?.int[107] ?? 0, maxMana: a?.int[108] ?? 0, manaRate: a?.float[5] ?? 0, retained: !!a?.bool[91],
-              enchantments: (a?.activeSpellIds ?? []).map((id) => spellTable?.spells.get(id)).filter((sp): sp is NonNullable<typeof sp> => !!sp).map((sp) => ({ family: sp.category, difficulty: sp.power })),
-              manaUpdatedAt: a?.at ?? performance.now(),
-            };
-          }),
+            const enchantment = (id: number) => { const sp = spellTable?.spells.get(id); return sp ? { family: sp.category, difficulty: sp.power } : null; };
+            const now = performance.now();
+            return playerState.equipment.getAll().map((e) => mtWornItemOf(e, agentAppraisals.get(e.id >>> 0), spell, enchantment, now));
+          },
           playerEnchantments: () => playerState.enchantments.getRegistryEntries().map((en) => ({ family: en.spellCategory, difficulty: en.powerLevel, timeRemaining: en.duration < 0 ? Infinity : en.duration + en.startTime })),
           now: () => performance.now(),
         },

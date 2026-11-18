@@ -1,4 +1,5 @@
-import { ContainerType, ItemType, ObjectDescriptionFlag } from '@ac/shared';
+import { ContainerType, ObjectDescriptionFlag } from '@ac/shared';
+import { isRetailContainer } from '../inventory/RetailIsContainer.js';
 
 /**
  * CORE.17.o.b — UIElement_ItemList::ItemList_UpdateContainerListSize @
@@ -66,7 +67,8 @@ export interface OpenContainerItem {
   /**
    * True for ContainerType.Container / ContainerType.Foci per the
    * authoritative ViewContents entry; falls back to the CreateObject
-   * ItemType.Container bit when no ViewContents entry was seen.
+   * IsContainer test (RetailIsContainer: RequiresPackSlot, a capacity, or
+   * the ItemType.Container bit) when no ViewContents entry was seen.
    */
   isContainer: boolean;
   /** CORE.18.c.a — what IconData::RenderIcons reads besides the icon DID
@@ -122,6 +124,8 @@ interface TrackedData {
   iconDid: number;
   stackSize: number;
   itemType: number;
+  /** ACCWeenieObject::IsContainer (RetailIsContainer): the fallback for a ContainerType no ViewContents gave. */
+  packSlot: boolean;
   uiEffects?: number;
   iconOverlayDid?: number;
   iconUnderlayDid?: number;
@@ -351,16 +355,16 @@ export class OpenContainerTracker {
     if (!belongs) return false;
     this.early.delete(d.guid);
     if (!this.parents.has(d.guid)) this.parents.set(d.guid, d.containerId);
-    this.data.set(d.guid, { name: d.name, pluralName: d.pluralName ?? '', iconDid: d.iconDid, stackSize: d.stackSize, itemType: d.itemType, ...iconLookOf(d) });
+    const packSlot = isRetailContainer({ objectDescFlags: d.objectDescFlags, itemsCapacity: d.itemsCapacity, itemType: d.itemType });
+    this.data.set(d.guid, { name: d.name, pluralName: d.pluralName ?? '', iconDid: d.iconDid, stackSize: d.stackSize, itemType: d.itemType, packSlot, ...iconLookOf(d) });
     // CORE.17.o.b — a nested container's own list capacity (its tab's grid).
     if (d.objectDescFlags !== undefined && d.itemsCapacity !== undefined) {
       this.setContainerCapacity(d.guid, d.objectDescFlags, d.itemsCapacity);
     }
     // Fallback for a container the ViewContents didn't mark (shouldn't
-    // happen against ACE, which always writes the ContainerType — but the
-    // ItemType.Container bit is the same signal the player-side pack
-    // tracking uses).
-    if (!this.types.has(d.guid) && (d.itemType & ItemType.Container) !== 0
+    // happen against ACE, which always writes the ContainerType): the same
+    // IsContainer test the player-side pack column uses (a focus too).
+    if (!this.types.has(d.guid) && packSlot
         && d.containerId === this.mainGuid && !this.subGuids.includes(d.guid)) {
       this.subGuids.push(d.guid);
     }
@@ -368,14 +372,16 @@ export class OpenContainerTracker {
   }
 
   /** Track an item the player stored into the open container (no CreateObject follows). */
-  trackStoredItem(guid: number, d: { name: string; pluralName?: string; iconDid: number; stackSize: number; itemType?: number; itemsCapacity?: number } & IconLook): void {
+  trackStoredItem(guid: number, d: { name: string; pluralName?: string; iconDid: number; stackSize: number; itemType?: number; itemsCapacity?: number; objectDescFlags?: number } & IconLook): void {
     if (this.mainGuid === 0) return;
     this.parents.set(guid, this.mainGuid);
-    this.data.set(guid, { name: d.name, pluralName: d.pluralName ?? '', iconDid: d.iconDid, stackSize: d.stackSize, itemType: d.itemType ?? 0, ...iconLookOf(d) });
+    // A stored focus (RequiresPackSlot) is a sub-container like a pack (BUG.foci-in-main-pack).
+    const packSlot = isRetailContainer({ objectDescFlags: d.objectDescFlags, itemsCapacity: d.itemsCapacity, itemType: d.itemType });
+    this.data.set(guid, { name: d.name, pluralName: d.pluralName ?? '', iconDid: d.iconDid, stackSize: d.stackSize, itemType: d.itemType ?? 0, packSlot, ...iconLookOf(d) });
     // CORE.17.o.b — a stored pack keeps the (already gated) InventoryItem
     // capacity; undefined (no Openable bit on its CreateObject) pads.
     if (d.itemsCapacity !== undefined) this.capacities.set(guid, d.itemsCapacity);
-    if ((d.itemType ?? 0) & ItemType.Container && !this.subGuids.includes(guid)) {
+    if (packSlot && !this.subGuids.includes(guid)) {
       this.subGuids.push(guid);
     }
   }
@@ -476,7 +482,7 @@ export class OpenContainerTracker {
       const type = this.types.get(guid);
       const isContainer = type !== undefined
         ? type !== ContainerType.NonContainer
-        : ((d?.itemType ?? 0) & ItemType.Container) !== 0;
+        : d?.packSlot ?? false;
       out.push({
         guid,
         name: d?.name ?? '???',

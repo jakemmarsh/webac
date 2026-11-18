@@ -348,8 +348,12 @@ export interface AgentHost {
   specialAmmoTable?(): Promise<Array<[string, number]> | null>;
   /** The era's spell table (the macro's planners build spell families from it). */
   spellTableData?(): { spells: Map<number, { name: string; desc: string; category: number; school: number; bitfield: number; power: number; duration?: number; baseMana?: number }> } | null;
-  /** The items in the currently open container (corpse/chest), or null when none is open. */
-  openContainer(): { guid: number; items: Array<{ guid: number; name: string; uiEffects?: number; stack?: number }> } | null;
+  /**
+   * The items in the currently open container (corpse/chest), or null when none is open. An item in a corpse or chest is
+   * no world object (the client keeps its CreateObject with the open container, not in the 3D world: object() has
+   * nothing for it), so its ItemType and ObjectDescriptionFlags come with the listing.
+   */
+  openContainer(): { guid: number; items: Array<{ guid: number; name: string; uiEffects?: number; stack?: number; itemType?: number; objectDescFlags?: number }> } | null;
   /** Open dialogs, oldest first. */
   dialogs(): AgentDialog[];
   /** The open book or note (gmBookUI): its object, title and pages; a page's text is null until the server has sent it. */
@@ -1232,8 +1236,18 @@ const GIVE_BUSY = /too busy to accept gifts|you can only move or use one item at
  * 0x3ccd04 / 0x3ccd38) or AutoSort's "You're already wearing …". Sent again unchanged, it is refused again
  * (BUG.autowield-full-pack-spam): AgentApi.equipHeld holds it until the packs or gear change.
  */
-const WIELD_REFUSED_BY_STATE = /cannot unwield the |is completely full!|already wearing/i;
-const INVENTORY_REFUSAL = /can't be|cannot|can not|you can only|too busy|too encumbered|unable to|not experienced enough|must unwield|already wearing|you need|you must/i;
+const WIELD_REFUSED_BY_STATE = /cannot unwield the |is completely full!/i;
+/**
+ * A wield refused for you, not your packs: the server's wield requirements (ACE Player_Inventory.CheckWieldRequirements:
+ * SkillTooLow 0x0468, LevelTooLow 0x0420, ArmorRequiresSpecificHeritage 0x0586). Looting more doesn't change the
+ * answer, nor does what you wear (the double-click takes the main weapon off before the server refuses, and the fight
+ * puts it back), so its hold (equipHeld) runs its full EQUIP_REFUSED_HOLD_MS: the pack-keyed hold let the macro ask
+ * again after every corpse (BUG.vtank-loot-wears-items).
+ */
+const WIELD_REFUSED_FOR_YOU = /not skilled enough to use that|not powerful enough to use that|created for another race/i;
+/** AutoSort's refusals over what you wear ("You must remove your Breeches to wear that", "You're already wearing a trinket."): held until what you wear changes. */
+const WEAR_REFUSED_BY_GEAR = /must remove your .* to wear that|already wearing/i;
+const INVENTORY_REFUSAL = /can't be|cannot|can not|you can only|too busy|too encumbered|unable to|not experienced enough|not skilled enough|not powerful enough|another race|must unwield|already wearing|you need|you must/i;
 /** A cast's outcome among its reply lines (AgentApi.castOnce waits for one): it landed, fizzled, was refused or resisted, did damage, restored or drained a vital, or the target died. */
 const CAST_OUTCOME = /you cast|fizzle|do not have|don't have|can't|cannot|not enough|unable|refuse|too busy|out of range|resists?|you fail to affect|invalid target|you are not|your spell|\bpoints? with\b|\byou (?:restore|drain) [\d,]+ points? of\b|hit the environment|you've earned [\d,]+ experience/i;
 /** ACE Player.OnExhausted's transient line: your stamina reached 0. Not a cast's outcome (it comes with the swings at you). */
@@ -1743,6 +1757,10 @@ export class AgentApi {
   selectedGuid(): number | null { return this.host.targetGuid(); }
   /** The container whose contents are open (a corpse or chest you opened), or null. */
   openContainerGuid(): number | null { return this.host.openContainer()?.guid ?? null; }
+  /** An item in the open corpse or chest (no world object: its name and type come with the listing), or null. */
+  openContainerItem(guid: number): { guid: number; name: string; itemType?: number } | null {
+    return this.host.openContainer()?.items.find((i) => (i.guid >>> 0) === (guid >>> 0)) ?? null;
+  }
   /** Every skill with its training (the macro's planners). */
   skillList(): Array<{ id: number; name: string; training: 'untrained' | 'trained' | 'specialized'; base: number; buffed: number }> { return this.host.skillList?.() ?? []; }
   spellTableData(): ReturnType<NonNullable<AgentHost['spellTableData']>> { return this.host.spellTableData?.() ?? null; }
@@ -8782,15 +8800,20 @@ export class AgentApi {
    * 7+ minutes (prod, end of retail, 2026-11-17 03:13Z). Retail's AutoWield answers each double-click once; a player
    * doesn't double-click twice a second for seven minutes.
    */
-  private equipRefused = new Map<number, { key: string; at: number; why: string }>();
+  private equipRefused = new Map<number, { key: string; at: number; why: string; kind: 'pack' | 'gear' | 'you' }>();
   /** A held wield is tried again after this long (ms) even when nothing seen changed, in case the change was one the key misses. */
   static readonly EQUIP_REFUSED_HOLD_MS = 60_000;
 
-  /** What a refused wield's answer depends on: free pack slots, what is worn, and how many things you carry. */
-  private wieldStateKey(): string {
+  /**
+   * What a refused wield's answer depends on: for a full pack, free pack slots, what is worn, and how many things you
+   * carry; for a wear refused over your gear (WEAR_REFUSED_BY_GEAR), what is worn alone; for your skill, level or
+   * heritage (WIELD_REFUSED_FOR_YOU), nothing seen here (the hold's time alone).
+   */
+  private wieldStateKey(kind: 'pack' | 'gear' | 'you' = 'pack'): string {
+    if (kind === 'you') return '';
     const inv = this.host.inventory();
     const worn = inv.filter((i) => i.where === 'equipped').map((i) => i.guid >>> 0).sort((a, b) => a - b).join(',');
-    return `${this.packSlots()?.free ?? '?'}|${worn}|${inv.length}`;
+    return kind === 'gear' ? worn : `${this.packSlots()?.free ?? '?'}|${worn}|${inv.length}`;
   }
 
   /**
@@ -8803,8 +8826,10 @@ export class AgentApi {
     const h = this.equipRefused.get(guid >>> 0);
     if (!h) return null;
     const secs = Math.round((this.host.now() - h.at) / 1000);
-    if (this.host.now() - h.at >= AgentApi.EQUIP_REFUSED_HOLD_MS || this.wieldStateKey() !== h.key) { this.equipRefused.delete(guid >>> 0); return null; }
-    return `${h.why} (${secs} s ago, and nothing in your packs or gear has changed since, so it was not asked again: ${/already wearing/i.test(h.why) ? 'take off what is there' : 'free a pack slot'} first)`;
+    if (this.host.now() - h.at >= AgentApi.EQUIP_REFUSED_HOLD_MS || this.wieldStateKey(h.kind) !== h.key) { this.equipRefused.delete(guid >>> 0); return null; }
+    if (h.kind === 'gear') return `${h.why} (${secs} s ago, and nothing you wear has changed since, so it was not asked again: take off what is there first)`;
+    if (h.kind === 'you') return `${h.why} (${secs} s ago, so it is not asked again for ${Math.round(AgentApi.EQUIP_REFUSED_HOLD_MS / 1000)} s: its wield requirements are more than you have)`;
+    return `${h.why} (${secs} s ago, and nothing in your packs or gear has changed since, so it was not asked again: free a pack slot first)`;
   }
 
   /** After an optimistic equip looks done, how long a host that can't say whether the server answered waits for a refusal (ms). */
@@ -9033,8 +9058,10 @@ export class AgentApi {
     }
     const r = await this.inventoryRequest(`equipped ${name}`, `not equipped: ${name}`, () => this.host.wield(g),
       () => this.host.inventory().find((i) => i.guid === g)?.where === 'equipped', 4000, { optimistic: g, item: name });
-    if (!r.ok && WIELD_REFUSED_BY_STATE.test(r.message)) {
-      this.equipRefused.set(g >>> 0, { key: this.wieldStateKey(), at: this.host.now(), why: r.message.slice(`not equipped: ${name}: `.length).split('\n')[0] });
+    const heldKind = r.ok ? null : WIELD_REFUSED_BY_STATE.test(r.message) ? 'pack' as const : WIELD_REFUSED_FOR_YOU.test(r.message) ? 'you' as const
+      : WEAR_REFUSED_BY_GEAR.test(r.message) ? 'gear' as const : null;
+    if (heldKind) {
+      this.equipRefused.set(g >>> 0, { key: this.wieldStateKey(heldKind), at: this.host.now(), why: r.message.slice(`not equipped: ${name}: `.length).split('\n')[0], kind: heldKind });
     } else this.equipRefused.delete(g >>> 0);
     if (!r.ok) {
       // What came off on the way (taken off here, or the double-click's own dequip of a blocker) is said: it is in the pack now.
@@ -9343,7 +9370,8 @@ export class AgentApi {
     const ps = this.host.packs?.() ?? [];
     if (!ps.length) return 'moving items between packs is not available in this client';
     const named = ps.map((p) => ({ ...p, name: p.slot === 0 ? 'main pack' : (this.host.inventory().find((i) => i.guid === p.guid)?.name ?? `side pack ${p.slot}`) }));
-    const side = named.filter((p) => p.slot > 0);
+    // A pack-slot object that holds nothing (a focus: RequiresPackSlot, no capacity) is no pack to move into.
+    const side = named.filter((p) => p.slot > 0 && p.capacity > 0);
     const list = (): string => named.map((p) => `${p.name}${p.slot ? ` #${p.guid.toString(16)}` : ''} (${p.count}/${p.capacity})`).join(', ');
     const s = to === null || to === undefined ? 'side' : String(to).trim().toLowerCase();
     // A side pack's own name first: Bulwark's side pack is called "Pack" (stream, 2026-10-17).
@@ -15476,7 +15504,7 @@ export class AgentApi {
     let useSeq = this.seqN;
     let reopens = 0;
     // Items still to try, and the one whose answer we're waiting for.
-    let queue: Array<{ guid: number; name: string; uiEffects?: number }> = [];
+    let queue: Array<{ guid: number; name: string; uiEffects?: number; itemType?: number; objectDescFlags?: number }> = [];
     let pending: { item: { guid: number; name: string }; at: number; seq: number; units: number; tries: number } | null = null;
     let lastAnswer = 0;
     // Names are resolved when reported, not when listed: on some servers (1999) a container lists its
@@ -15486,7 +15514,7 @@ export class AgentApi {
       const now = this.host.inventory().find((i) => i.guid === it.guid)?.name ?? this.host.object(it.guid)?.name;
       return now && !/^\?+$/.test(now) ? now : it.name;
     };
-    const failed = new Map<number, { item: { guid: number; name: string }; why: string; tries: number }>();
+    const failed = new Map<number, { item: { guid: number; name: string; itemType?: number; objectDescFlags?: number }; why: string; tries: number }>();
     /** Picks sent per item (a retried item keeps its count). */
     const picks = new Map<number, number>();
     const done = new Set<number>();
@@ -15617,8 +15645,11 @@ export class AgentApi {
       if (next === undefined) return finish(report(false));
       if (done.has(next.guid)) return null;
       if (decide) {
+        // A corpse's item is no world object: its type and flags come with the open container's listing. Before
+        // 2026-11-17 they were read from object() alone, so on every live server each corpse item had ItemType 0: the
+        // loot rules' types never matched, and an examined magic ring or sword passed for an unknown scroll (BUG.vtank-loot-wears-items).
         const o = this.host.object(next.guid);
-        const d = decide({ ...next, itemType: o?.itemType ?? 0, objectDescFlags: o?.objectDescFlags ?? 0, palettes: this.itemPalettes(next.guid), ...((o?.uiEffects ?? next.uiEffects) !== undefined ? { uiEffects: o?.uiEffects ?? next.uiEffects } : {}) });
+        const d = decide({ ...next, itemType: o?.itemType || next.itemType || 0, objectDescFlags: o?.objectDescFlags || next.objectDescFlags || 0, palettes: this.itemPalettes(next.guid), ...((o?.uiEffects ?? next.uiEffects) !== undefined ? { uiEffects: o?.uiEffects ?? next.uiEffects } : {}) });
         if (d === 'wait') { queue.unshift(next); return null; }
         if (d === 'skip') { left.push(named(next)); done.add(next.guid); return null; }
       }

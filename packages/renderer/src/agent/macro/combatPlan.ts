@@ -648,7 +648,10 @@ const rowOffhand = (input: CombatInput, row: VtMonsterRow, weapon: PlanItem | un
  */
 function rowWeapon(input: CombatInput, row: VtMonsterRow, m?: CombatMonster): PlanItem | undefined {
   if (row.weapon && row.weapon.toLowerCase() === 'any wand') {
-    const casters = input.items.filter((i) => weaponKind(i) === 'caster');
+    // A wand from the Items tab (or the one in hand): VTank wields nothing else. Any carried caster was taken before
+    // 2026-11-17, a looted one the server won't let you wield included (BUG.vtank-loot-wears-items).
+    const listed = new Set(input.itemNames.map((n) => n.toLowerCase()));
+    const casters = input.items.filter((i) => weaponKind(i) === 'caster' && (listed.has(i.name.toLowerCase()) || isWielded(input, i, 'weapon')));
     const w = casters.find((i) => isWielded(input, i, 'weapon')) ?? casters[0];
     if (w) return w;
   } else if (row.weapon) {

@@ -203,6 +203,8 @@ export class MagToolsRuntime {
       isIncantation: (text) => { const w = x.spellWords?.(); return !!w && mtIsIncantation(text, w); },
     });
     this.commandLists = new MtCommandLists(storage);
+    // The chat log's lines are written a moment after they arrive (MtChatLogger.flush): a closing tab writes them now.
+    if (typeof window !== 'undefined') window.addEventListener('pagehide', () => this.chatLogger.flush());
   }
 
   // ─── Trackers, chat logger, Tools tab ───
@@ -399,6 +401,7 @@ export class MagToolsRuntime {
     this.awaitingLoginComplete = false;
     this.loginCommands.logout();
     this.players.flush();
+    this.chatLogger.flush();
     this.autopacker.stop();
     this.tradeAdd.ended();
     this.trading = null;

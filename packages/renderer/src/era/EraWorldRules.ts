@@ -107,11 +107,14 @@ export interface EraWorldRules {
    */
   inventoryRequestBusy: boolean;
   /**
-   * The chat log's cap: past `max` entries the oldest go until `trimTo` remain. End of retail: ours,
-   * 100 / 100 (FAITHFUL.267). 1999: PanelUI_AddTextToScroll @ 0x4f9b70 deletes the first 100 once
-   * it holds more than 300.
+   * The chat log's cap: past `max` the oldest messages go until `trimTo` remain, counted in `unit`.
+   * End of retail counts glyphs: ChatInterface::RecvNotice_DisplayFinalStringInfo @ 004f4640 calls
+   * TruncateChatLog(7500) @ 004f4290 once the log holds more than 10000 glyphs, which beheads the
+   * text at a line break so about the last 7500 remain (the same in every ChatInterface: the main
+   * chat and each floaty window). 1999 counts lines: PanelUI_AddTextToScroll @ 0x4f9b70 deletes the
+   * first 100 once it holds more than 300.
    */
-  chatHistory: { max: number; trimTo: number };
+  chatHistory: { unit: 'glyphs' | 'lines'; max: number; trimTo: number };
   /**
    * The world textures' samplers (TextureSamplerPrefs.setSamplingRule). End of retail: 'prefs', the
    * Config page's Texture Filtering (RenderDeviceD3D::SetSamplerFilterMode, mipmapped). 1999:
@@ -250,7 +253,7 @@ export const EOR_WORLD_RULES: EraWorldRules = Object.freeze({
   skyObjectsOnTick: false,
   degradeDistanceShift: true,
   inventoryRequestBusy: false,
-  chatHistory: Object.freeze({ max: 100, trimTo: 100 }),
+  chatHistory: Object.freeze({ unit: 'glyphs' as const, max: 10000, trimTo: 7500 }),
   textureSampling: 'prefs' as const,
   lightColour: 'rgb' as const,
   pointLight: 'd3d' as const,
@@ -290,7 +293,7 @@ export const AC1999_WORLD_RULES: EraWorldRules = Object.freeze({
   skyObjectsOnTick: true,
   degradeDistanceShift: false,
   inventoryRequestBusy: true,
-  chatHistory: Object.freeze({ max: 300, trimTo: 200 }),
+  chatHistory: Object.freeze({ unit: 'lines' as const, max: 300, trimTo: 200 }),
   textureSampling: 'bilinearNoMips' as const,
   lightColour: 'intensityOnly' as const,
   pointLight: 'software1999' as const,
@@ -358,10 +361,52 @@ export function eraLandscapeRadius(rules: EraWorldRules, chosen: number): number
   return rules.fixedLandscapeRadius ?? chosen;
 }
 
-/** Trim a chat log's children to the era's history cap. */
+/**
+ * The glyphs one chat-log message counts toward the end-of-retail cap: the text of its rendered
+ * pieces (each carries `data-ac-chat-text`: timestamp, sender, every row of the body) and the "\n"
+ * that joins it to the next message. Cached on the element (`data-chat-glyphs`) so a trim reads each
+ * message once.
+ */
+export function chatLineGlyphs(line: Element): number {
+  const el = line as HTMLElement;
+  const cached = el.dataset?.chatGlyphs;
+  if (cached !== undefined) return Number(cached);
+  // A plain walk, not querySelectorAll: a selector query per message caches results in some DOMs
+  // (happy-dom kept every trimmed message alive that way).
+  let pieces = 0;
+  const walk = (node: Element): void => {
+    for (const c of node.children) {
+      const t = (c as HTMLElement).dataset?.acChatText;
+      if (t !== undefined) pieces += t.length;
+      else walk(c);
+    }
+  };
+  walk(el);
+  const n = 1 + (pieces > 0 ? pieces : (el.dataset?.chatText ?? el.textContent ?? '').length);
+  if (el.dataset) el.dataset.chatGlyphs = String(n);
+  return n;
+}
+
+/**
+ * Trim a chat log to the era's history cap (EraWorldRules.chatHistory). By glyphs (end of retail),
+ * whole messages go from the top until no more than `trimTo` glyphs remain, once the log passes
+ * `max`; retail beheads at the line break nearest the cut, which keeps whole lines the same way.
+ */
 export function trimChatLog(log: Element, cap: EraWorldRules['chatHistory']): void {
-  if (log.children.length <= cap.max) return;
-  while (log.children.length > cap.trimTo) log.removeChild(log.children[0]);
+  if (cap.unit === 'lines') {
+    if (log.children.length <= cap.max) return;
+    while (log.children.length > cap.trimTo) log.removeChild(log.children[0]);
+    return;
+  }
+  let total = 0;
+  for (const c of log.children) total += chatLineGlyphs(c);
+  if (total <= cap.max) return;
+  // Keep at least the newest message, however long.
+  while (total > cap.trimTo && log.children.length > 1) {
+    const first = log.children[0];
+    total -= chatLineGlyphs(first);
+    log.removeChild(first);
+  }
 }
 
 /**

@@ -713,12 +713,18 @@ const UTL_REQ_NAMES: Record<number, string> = {
 };
 /**
  * Decal's synthesized value keys (VTClassic Constants.cs) as the ACE property
- * an appraisal reports: IntValueKey StackCount → int StackSize 12, MaxDamage →
- * int Damage 44, IconUnderlay → DID IconUnderlay 52; DoubleValueKey SlashProt…
- * ColdProt → float ArmorModVs* 13–19, Variance → DamageVariance 22,
- * AttackBonus → WeaponOffense 62, DamageBonus → DamageMod 63,
- * SalvageWorkmanship → int ItemWorkmanship 105. Below 0x10000 a key is the
- * ACE property id itself.
+ * id the automation's item record holds them under (agent/itemRecord.ts):
+ * IntValueKey StackCount → int StackSize 12, MaxDamage → int Damage 44,
+ * IconUnderlay → DID IconUnderlay 52; DoubleValueKey SlashProt… ColdProt →
+ * float ArmorModVs* 13–19, Variance → DamageVariance 22, AttackBonus →
+ * WeaponOffense 62, DamageBonus → DamageMod 63, SalvageWorkmanship → int
+ * ItemWorkmanship 105. Below 0x10000 a key is the ACE property id itself.
+ * ACE's examination carries none of the synthesized ones: Damage, Variance,
+ * AttackBonus, DamageBonus and the *Prot floats come in its Weapon /
+ * ArmorProfile (main.ts folds them in, foldAppraisalProfiles), and Type,
+ * Coverage, EquipableSlots, StackCount and the icons only in CreateObject
+ * (withPublicDescription adds them); Decal's WorldObject merged the same
+ * sources. Before 2026-11-17 a rule on those CreateObject keys read 0 on ACE.
  */
 export const DECAL_INT_KEYS: Record<number, { kind: 'int' | 'did'; key: number }> = {
   218103814: { kind: 'int', key: 12 }, 218103842: { kind: 'int', key: 44 }, 218103850: { kind: 'did', key: 52 },

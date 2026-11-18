@@ -43,7 +43,9 @@ export function useRequirementProblem(item: Pick<PlanItem, 'name' | 'ints' | 'di
   const name = (id: number): string => skill(id)?.name ?? `skill ${id}`;
   const lore = ints[PropertyInt.ItemDifficulty];
   if (lore !== undefined && buffed(ARCANE_LORE) < lore) return `${item.name} needs ${lore} Arcane Lore`;
-  const limitSkill = item.dids?.[PropertyDataId.ItemSkillLimit];
+  // The skill an activation needs: ItemSkillLimit (data id 37) where the server sends it (GDLE, AC1999); ACE sends it
+  // only as AppraisalItemSkill (int 176, AppraiseInfo), never the data id.
+  const limitSkill = item.dids?.[PropertyDataId.ItemSkillLimit] ?? ints[PropertyInt.AppraisalItemSkill];
   const limitLevel = ints[PropertyInt.ItemSkillLevelLimit];
   if (limitSkill !== undefined && limitLevel !== undefined && buffed(limitSkill) < limitLevel) return `${item.name} needs ${limitLevel} ${name(limitSkill)}`;
   const reqLevel = ints[PropertyInt.UseRequiresSkillLevel];
@@ -78,3 +80,12 @@ export const itemSpellId = (item: Pick<PlanItem, 'dids'>): number | undefined =>
 
 /** An examined caster with no mana left can't cast its spell (ItemCurMana 0). */
 export const outOfMana = (item: Pick<PlanItem, 'ints'>): boolean => item.ints?.[PropertyInt.ItemCurMana] === 0;
+
+/**
+ * ItemType bits of things a plain Use of a carried item would put on rather than use: armor, clothing and jewelry
+ * (the client's UseObject: AutoSort, a wear) and weapons and casters (AutoWield, which takes the weapon in hand off
+ * first). The macro's "use this item" steps (dispel items, buff gems) skip them: a magic ring or a wand whose spell
+ * reads as a dispel or a buff is no consumable (BUG.vtank-loot-wears-items sweep).
+ */
+const PUTS_ON = 0x1 | 0x2 | 0x4 | 0x8 | 0x100 | 0x8000;
+export const useWouldPutOn = (itemType: number | undefined): boolean => ((itemType ?? 0) & PUTS_ON) !== 0;

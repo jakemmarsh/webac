@@ -9,7 +9,7 @@ import {
   ChatMessageType, MtChatLogger, MtCombatTracker, MtCommandLists, MtCorpseTracker, MtInventoryTracker, MtManaTracker,
   MtObjectClass, MtOptions, MtPlayerTracker, MtValueSeries, MT_COPY_DONE, MT_COPY_START, MT_INVENTORY_SEARCH_HINT,
   mtChatChannel, mtChatLogFileLine, mtCleanChat, mtCommandListKey, mtCoordsText, mtCopyInventoryInfo, mtDateTime, mtDayTime,
-  mtFileStamp, mtInventoryExportOrder, mtInventorySearch, mtIsIncantation, mtLine, mtParseChatLog,
+  MT_CHAT_LOG_WRITE_DELAY_MS, mtFileStamp, mtInventoryExportOrder, mtInventorySearch, mtIsIncantation, mtLine, mtParseChatLog,
   type MtInvItem, type MtInventoryExportItem, type MtOptionStorage, type MtTextStore,
 } from '@ac/shared';
 import { MagToolsWindow, MT_EXPORT_LOG_LABEL, type MagToolsHost } from '../packages/renderer/src/ui/magtools/MagToolsWindow.ts';
@@ -280,7 +280,8 @@ describe('Mag-Tools chat logger (spec §6.1)', () => {
     const settings = memStore();
     const store = textStore();
     let persistent = true;
-    const log = new MtChatLogger({ settings, persistent: () => persistent, store: () => store, now: () => now, isIncantation: incant });
+    const due: Array<() => void> = [];
+    const log = new MtChatLogger({ settings, persistent: () => persistent, store: () => store, now: () => now, isIncantation: incant, schedule: (fn) => { due.push(fn); } });
     expect(log.add({ text: 'Bob tells you, "hi"', type: ChatMessageType.Tell, fromPlayer: true })).toBe('Tells');
     expect(log.add({ text: 'Bob says, "yo"', type: ChatMessageType.Speech, fromPlayer: true })).toBeNull();
     expect(log.rows(1)).toEqual([[mtDateTime(T0), 'Bob tells you, "hi"']]);
@@ -290,6 +291,10 @@ describe('Mag-Tools chat logger (spec §6.1)', () => {
     now += MIN;
     log.add({ text: 'Bob says, "yo"', type: ChatMessageType.Speech, fromPlayer: true });
     expect(log.rows(2).map((r) => r[1])).toEqual(['Bob says, "yo"']);
+    // The lines are written together a moment later (one write, MT_CHAT_LOG_WRITE_DELAY_MS).
+    expect(store.value).toBeNull();
+    expect(due).toHaveLength(1);
+    due.shift()!();
     // The store holds the file's own lines.
     expect(store.value).toBe(`${mtFileStamp(T0)},2,Bob tells you, "hi"\n${mtFileStamp(T0 + MIN)},1,Bob says, "yo"\n`);
     expect(log.exportText()).toBe(store.value);
@@ -311,6 +316,46 @@ describe('Mag-Tools chat logger (spec §6.1)', () => {
     mem.add({ text: 'Ann says, "b"', type: ChatMessageType.Speech, fromPlayer: true });
     expect(s2.value).toBeNull();
     expect(mem.exportText()).toBe(mtChatLogFileLine({ time: now - MIN, channel: 'Tells', text: 'Ann tells you, "a"' }) + mtChatLogFileLine({ time: now, channel: 'Area', text: 'Ann says, "b"' }));
+  });
+
+  it('a busy log writes the store once per delay, not once per line (PERF: each write re-stores up to 1 MiB)', () => {
+    const settings = memStore();
+    let writes = 0;
+    const store = textStore();
+    const counted: MtTextStore = { get: store.get, set: (v) => { writes++; store.set(v); }, remove: store.remove };
+    const due: Array<{ fn: () => void; ms: number }> = [];
+    const log = new MtChatLogger({ settings, persistent: () => true, store: () => counted, now: () => T0, schedule: (fn, ms) => { due.push({ fn, ms }); } });
+    for (let i = 0; i < 500; i++) log.add({ text: `Bob tells you, "${i}"`, type: ChatMessageType.Tell, fromPlayer: true });
+    expect(writes).toBe(0);
+    expect(due.map((d) => d.ms)).toEqual([MT_CHAT_LOG_WRITE_DELAY_MS]);
+    due.shift()!.fn();
+    expect(writes).toBe(1);
+    expect(mtParseChatLog(store.value!)).toHaveLength(500);
+    // The next line schedules the next write; flush() (logout, page hide) writes at once.
+    log.add({ text: 'Bob tells you, "last"', type: ChatMessageType.Tell, fromPlayer: true });
+    expect(due).toHaveLength(1);
+    log.flush();
+    expect(writes).toBe(2);
+    expect(mtParseChatLog(store.value!).at(-1)!.text).toBe('Bob tells you, "last"');
+    due.shift()!.fn(); // the timer finding nothing pending writes nothing
+    expect(writes).toBe(2);
+  });
+
+  it('lines pending at a character switch go to the character who logged them', () => {
+    const settings = memStore();
+    const a = textStore(), b = textStore();
+    let cur = a;
+    const log = new MtChatLogger({ settings, persistent: () => true, store: () => cur, now: () => T0, schedule: () => {} });
+    log.load();
+    log.add({ text: 'Ann tells you, "for A"', type: ChatMessageType.Tell, fromPlayer: true });
+    cur = b;
+    log.load(); // the next character logs in before the write
+    expect(mtParseChatLog(a.value!).map((l) => l.text)).toEqual(['Ann tells you, "for A"']);
+    expect(b.value).toBeNull();
+    log.add({ text: 'Ann tells you, "for B"', type: ChatMessageType.Tell, fromPlayer: true });
+    log.flush();
+    expect(mtParseChatLog(b.value!).map((l) => l.text)).toEqual(['Ann tells you, "for B"']);
+    expect(mtParseChatLog(a.value!)).toHaveLength(1);
   });
 
   it('trims a list past 10,000 rows to 9,000', () => {

@@ -41,7 +41,14 @@ export const DOOR_CORRIDOR_M = 1;
 export const LOCKPICK_SKILL = 23;
 export const LOCKPICK_FLAG = 0x20000;
 const PROP_BOOL_LOCKED = 3;
-const PROP_INT_RESIST_LOCKPICK = 173;
+/** ResistLockpick: the lock's difficulty (ACE sends it only while the door or chest is locked, AppraiseInfo). */
+const PROP_INT_RESIST_LOCKPICK = 38;
+/** AppraisalLockpickSuccessPercent: your chance, sent only for a locked one (and on GDLE only with Lockpick trained). */
+const PROP_INT_LOCKPICK_SUCCESS_PERCENT = 173;
+/**
+ * A lockpick's LockpickMod (float multiplier, int bonus; ACE Lock.cs). ACE never sends either (not an
+ * [AssessmentProperty]); GDLE sends the int. Where it isn't sent every listed pick scores the same.
+ */
 const PROP_FLOAT_LOCKPICK_MOD = 40;
 const PROP_INT_LOCKPICK_MOD = 88;
 
@@ -299,11 +306,18 @@ export function doorOnRoute(door: { x: number; y: number; dz: number }, me: { x:
   return ox * ox + oy * oy <= DOOR_CORRIDOR_M * DOOR_CORRIDOR_M && Math.abs(door.dz - f * (goal.dz ?? 0)) <= DOOR_CORRIDOR_M;
 }
 
-/** What the door's appraisal says about its lock: locked, and the lock's difficulty when known. */
+/**
+ * What the door's appraisal says about its lock: locked (Locked, or a success chance, which only a locked one has),
+ * and the lock's difficulty (ResistLockpick) when known. Before 2026-11-17 the difficulty was read from 173, the
+ * success percent, so VTank's skill-versus-difficulty test compared your skill with your own chance; and GDLE,
+ * which sends ResistLockpick on unlocked doors too, would have read every such door as locked.
+ */
 export function doorLock(data: { int?: Record<number, number>; bool?: Record<number, boolean> } | null): { locked: boolean; difficulty?: number } {
   if (!data) return { locked: false };
-  const difficulty = data.int?.[PROP_INT_RESIST_LOCKPICK];
-  return { locked: data.bool?.[PROP_BOOL_LOCKED] === true || difficulty !== undefined, ...(difficulty !== undefined ? { difficulty } : {}) };
+  const flag = data.bool?.[PROP_BOOL_LOCKED];
+  const locked = flag === true || (flag === undefined && data.int?.[PROP_INT_LOCKPICK_SUCCESS_PERCENT] !== undefined);
+  const difficulty = locked ? data.int?.[PROP_INT_RESIST_LOCKPICK] : undefined;
+  return { locked, ...(difficulty !== undefined ? { difficulty } : {}) };
 }
 
 /**

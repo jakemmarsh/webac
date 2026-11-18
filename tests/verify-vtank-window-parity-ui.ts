@@ -19,6 +19,7 @@ import type { VTankDialogs, VTankKit, VTankSource } from '../packages/renderer/s
 import { buildCombatFamilies, isTwoHanded, planCombat, type CombatInput } from '../packages/renderer/src/agent/macro/combatPlan.js';
 import { gatherLoadout, generateLoadout, type LoadoutInput, type LoadoutItem } from '../packages/renderer/src/agent/macro/defaultLoadout.js';
 import { VT_LOG_TYPES, VtActivity, vtLogType, vtStatusText } from '../packages/renderer/src/ui/automation/vtActivity.js';
+import { historyRowSync, renderVTankHistory } from '../packages/renderer/src/ui/automation/VTankRemote.js';
 import { VT_ACTION_HELP, VT_CONDITION_HELP } from '../packages/renderer/src/ui/automation/metaHelp.js';
 import { NAV_CURRENT_COLOR, NAV_LINE_COLOR, NavLinesOverlay, navLineSegments, routeNavPoints } from '../packages/renderer/src/scene/NavLines.js';
 import { parseMapCoords } from '../packages/renderer/src/agent/AgentApi.js';
@@ -468,6 +469,48 @@ describe('§9.6 the status line, the Action History and /vt log', () => {
     expect(a.lines.at(-1)).toBe('[09:05:07] status 1099');
     a.clear();
     expect(a.lines).toEqual([]);
+  });
+
+  it('historyRowSync: rows drop from the top and add at the bottom; anything else redraws', () => {
+    expect(historyRowSync([], ['a'])).toEqual({ drop: 0, append: 1 });
+    expect(historyRowSync(['a', 'b'], ['a', 'b', 'c'])).toEqual({ drop: 0, append: 1 });
+    expect(historyRowSync(['a', 'b', 'c'], ['b', 'c', 'd', 'e'])).toEqual({ drop: 1, append: 2 });
+    expect(historyRowSync(['a', 'b'], ['c', 'd'])).toEqual({ drop: 2, append: 2 });
+    expect(historyRowSync(['a', 'b'], [])).toEqual({ drop: 2, append: 0 });
+    expect(historyRowSync(['a', 'b'], ['a', 'b'])).toEqual({ drop: 0, append: 0 });
+  });
+
+  it('PERF: the Action History redraw keeps the drawn rows and draws only the new lines (1000 rows, a line a second)', () => {
+    let made = 0;
+    const kit = fakeKit();
+    const text = kit.text;
+    kit.text = (t, o) => { made++; return text(t, o); };
+    const a = new VtActivity(() => new Date(2026, 9, 11, 9, 5, 7));
+    for (let i = 0; i < 1000; i++) a.record(`status ${i}`);
+    const body = document.createElement('div');
+    document.body.appendChild(body);
+    const draw = () => renderVTankHistory(body, kit, a, 'Macro: Running.', draw);
+    draw();
+    const firstRow = body.querySelector('[data-vtank="history-rows"]')!.firstElementChild;
+    made = 0;
+    for (let s = 0; s < 60; s++) { a.record(`more ${s}`); draw(); } // a minute of the macro logging
+    expect(made).toBe(60); // one canvas per new line, not 1000 a second
+    const rows = Array.from(body.querySelector('[data-vtank="history-rows"]')!.children).map((r) => (r.firstElementChild as HTMLElement).dataset.text);
+    expect(rows).toEqual(a.lines);
+    expect(rows).toHaveLength(1000);
+    expect(body.contains(firstRow)).toBe(false); // the oldest rows went from the top
+    // A new Current status replaces only that text.
+    made = 0;
+    renderVTankHistory(body, kit, a, 'Macro: Paused.', draw);
+    expect(made).toBe(1);
+    expect((body.querySelector('[data-vtank="history-current"]') as HTMLElement).textContent).toBe('Macro: Paused.');
+    // Clear empties the list.
+    (body.querySelector('[data-vtank="history-clear"]') as HTMLElement).click();
+    expect(body.querySelector('[data-vtank="history-rows"]')!.children).toHaveLength(0);
+    a.record('after clear');
+    draw();
+    expect(Array.from(body.querySelector('[data-vtank="history-rows"]')!.children).map((r) => (r.firstElementChild as HTMLElement).dataset.text)).toEqual(a.lines);
+    body.remove();
   });
 
   it('the window: the Options tab\'s status line, History opens the Action History (Current, the list, Clear), /vt log answers', async () => {

@@ -55,6 +55,7 @@ import type { CombatModeName } from '../AgentApi.ts';
 import { isQuickBuff, itemCooldown, planBuffItem, rebuffThreshold, VT_GEM_FOOD_ITEMS } from './buffItems.ts';
 import type { DrainRow } from './drainPlan.ts';
 import { itemCastLine } from './itemDebuffs.ts';
+import { useWouldPutOn } from './itemUse.ts';
 import { isSummoningEssence, petRefusal, planPetRefill, SUMMONING_SKILL } from './petRefill.ts';
 import { wieldedWeapon, wornShield } from './wieldedWeapon.ts';
 
@@ -354,17 +355,19 @@ export class VtMacro {
   private noMagicUntil = 0;
 
   /**
-   * A step into magic mode, VTank's way: wield a caster first (an Items-tab one, else any carried), as
-   * ACE refuses magic mode without one. If the server still turns it back three times in 15 s, spells
-   * are left out for a minute (and said so) instead of asking forever.
+   * A step into magic mode, VTank's way: wield a caster from the Items tab first, as ACE refuses magic mode
+   * without one. Only a listed one: VTank wields nothing else ("Add at least one wand to your profile first").
+   * Before 2026-11-17 any carried caster was the fallback, so a looted wand the server refused ("You are not
+   * skilled enough to use that.") was asked for at every buff step, taking the main weapon off each time
+   * (BUG.vtank-loot-wears-items). If the server still turns magic mode back three times in 15 s, spells are
+   * left out for a minute (and said so) instead of asking forever.
    */
   private toMagic(p: RoutineProfile & { vtank: VtankProfileData }, label: string, before?: () => void): VtStep {
     // A wand whose wield was just refused for the packs or gear as they are is not asked for again (AgentApi.equipHeld).
     const inv = this.api.inventory().filter((i) => i.where === 'equipped' || !this.api.equipHeld(i.guid));
     const isCaster = (i: { itemType?: number }) => ((i.itemType ?? 0) & 0x8000) !== 0;
     if (!inv.some((i) => i.where === 'equipped' && isCaster(i))) {
-      const listed = new Set(p.vtank.items.map((x) => x.name.toLowerCase()));
-      const wand = inv.find((i) => isCaster(i) && listed.has(i.name.toLowerCase())) ?? inv.find((i) => isCaster(i));
+      const wand = inv.find((i) => isCaster(i) && p.vtank.items.some((x) => vtItemIs(x, i)));
       if (wand) return { label: `${label}: wielding ${wand.name} to cast`, run: async () => this.api.equip(wand.guid) };
     }
     return { label, run: async () => {
@@ -374,7 +377,8 @@ export class VtMacro {
       if (this.magicTries.length > 3) {
         this.noMagicUntil = t + 60_000;
         this.magicTries = [];
-        return { ok: false, message: 'the server keeps refusing magic mode (no wand to cast with?): leaving spells out for a minute' };
+        const unlisted = !inv.some((i) => isCaster(i) && p.vtank.items.some((x) => vtItemIs(x, i)));
+        return { ok: false, message: `the server keeps refusing magic mode (no wand to cast with?): leaving spells out for a minute${unlisted ? '. Add at least one wand to your profile first: VTank wields only the casters on the Items tab' : ''}` };
       }
       return this.switchMode(p, 'magic');
     } };
@@ -962,7 +966,8 @@ export class VtMacro {
     }
     if (useItems) {
       for (const i of this.api.inventory()) {
-        if (i.where === 'equipped') continue;
+        // A ring, a wand or a coat whose own spell is a dispel would be put on by a Use (useWouldPutOn), not used.
+        if (i.where === 'equipped' || useWouldPutOn(i.itemType)) continue;
         const d = this.api.itemData(i.guid);
         if (!d) { if (/gem|food|potion|misc/i.test(i.type ?? '') && !this.asked.has(i.guid)) { this.asked.add(i.guid); void this.api.appraise(i.guid, { quiet: true }); } continue; }
         const sid = d.did?.[28];
