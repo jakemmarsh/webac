@@ -254,3 +254,107 @@ describe('quests, motions, equipanywand and spell ids in the game host (§0.10)'
     expect(run('listgetitem[wobjectgetactivespellids[wobjectfindininventorybyname[Long Sword]],0]')).toBe(2);
   });
 });
+
+describe('actiontry* actions keep one call out per lane (AUTO.vtank-expr-action-pileup)', () => {
+  /** Each stubbed AgentApi call: how often it was started, and a resolver per start. */
+  function stubs(api: AgentApi) {
+    const calls: Record<string, number> = {};
+    const pending: Record<string, Array<() => void>> = {};
+    const a = api as unknown as Record<string, unknown>;
+    for (const k of ['give', 'use', 'drop', 'cast', 'equip', 'appraise']) {
+      calls[k] = 0; pending[k] = [];
+      a[k] = () => { calls[k]!++; return new Promise((res) => pending[k]!.push(() => res({ ok: true, message: 'done' }))); };
+    }
+    const finish = async (k: string) => { pending[k]!.shift()!(); for (let i = 0; i < 5; i++) await Promise.resolve(); };
+    return { calls, finish };
+  }
+  const STONE = 'wobjectfindininventorybyname[Mana Stone]';
+  const SCARAB = 'wobjectfindininventorybyname[Lead Scarab]';
+
+  it('give: a second try while the first is out is not attempted (0); once it ends the next one goes', async () => {
+    const { run, api } = setup();
+    const { calls, finish } = stubs(api);
+    expect(run(`actiontrygiveitem[${STONE},wobjectgetplayer[]]`)).toBe(1);
+    expect(run(`actiontrygiveitem[${STONE},wobjectgetplayer[]]`)).toBe(0);
+    expect(calls.give).toBe(1);
+    await finish('give');
+    expect(run(`actiontrygiveitem[${STONE},wobjectgetplayer[]]`)).toBe(1);
+    expect(calls.give).toBe(2);
+  });
+  it('use, give, drop and wield share the one-item-at-a-time lane', async () => {
+    const { run, api } = setup();
+    const { calls, finish } = stubs(api);
+    expect(run(`actiontryuseitem[${STONE}]`)).toBe(1);
+    expect(run(`actiontryuseitem[${STONE}]`)).toBe(0);
+    expect(run(`actiontrydrop[${SCARAB}]`)).toBe(0);
+    expect(run(`actiontrygiveitem[${SCARAB},wobjectgetplayer[]]`)).toBe(0);
+    expect([calls.use, calls.drop, calls.give]).toEqual([1, 0, 0]);
+    await finish('use');
+    expect(run(`actiontrydrop[${SCARAB}]`)).toBe(1);
+    expect(run(`actiontrydrop[${SCARAB}]`)).toBe(0);
+    expect(calls.drop).toBe(1);
+    await finish('drop');
+    expect(run(`actiontrydrop[${SCARAB}]`)).toBe(1);
+    expect(calls.drop).toBe(2);
+  });
+  it('a cast has its own lane: it goes while a give is out, and only one cast at a time', async () => {
+    const { run, api } = setup();
+    const { calls, finish } = stubs(api);
+    expect(run(`actiontrygiveitem[${STONE},wobjectgetplayer[]]`)).toBe(1);
+    expect(run('actiontrycastbyid[27]')).toBe(1);
+    expect(run('actiontrycastbyid[27]')).toBe(0);
+    expect(run('actiontrycastbyidontarget[27,wobjectgetplayer[]]')).toBe(0);
+    expect(calls.cast).toBe(1);
+    await finish('cast');
+    expect(run('actiontrycastbyid[27]')).toBe(1);
+    expect(calls.cast).toBe(2);
+  });
+  it('a failed or throwing call frees its lane', async () => {
+    const { run, api } = setup();
+    const a = api as unknown as Record<string, unknown>;
+    let n = 0;
+    a.use = () => { n++; return Promise.reject(new Error('boom')); };
+    expect(run(`actiontryuseitem[${STONE}]`)).toBe(1);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(run(`actiontryuseitem[${STONE}]`)).toBe(1);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    a.use = () => { n++; throw new Error('sync boom'); };
+    expect(run(`actiontryuseitem[${STONE}]`)).toBe(0);
+    a.use = () => { n++; return Promise.resolve({ ok: true, message: '' }); };
+    expect(run(`actiontryuseitem[${STONE}]`)).toBe(1);
+    expect(n).toBe(4);
+  });
+  it('an inventory request waiting on the server (MetaGame.busy) closes the item lane, not the cast lane', () => {
+    let busy = true;
+    const { run, api } = setup({ busy: () => busy });
+    const { calls } = stubs(api);
+    expect(run(`actiontryuseitem[${STONE}]`)).toBe(0);
+    expect(run('actiontrycastbyid[27]')).toBe(1);
+    busy = false;
+    expect(run(`actiontryuseitem[${STONE}]`)).toBe(1);
+    expect([calls.use, calls.cast]).toEqual([1, 1]);
+  });
+  it('actiontryequipanywand asks for one wield at a time', async () => {
+    const { run, api, host } = setup();
+    const { calls, finish } = stubs(api);
+    (api.routine as unknown as { current: () => unknown }).current = () => ({ vtank: { items: [{ name: 'Wand of Frost' }] } });
+    host.inv.push({ guid: 0x8000_0200, name: 'Wand of Frost', where: 'pack', itemType: 0x8000 } as (typeof host.inv)[number]);
+    expect(run('actiontryequipanywand[]')).toBe(0);
+    expect(run('actiontryequipanywand[]')).toBe(0);
+    expect(calls.equip).toBe(1);
+    await finish('equip');
+    run('actiontryequipanywand[]');
+    expect(calls.equip).toBe(2);
+  });
+  it('wobjectrequestdata asks once per object until the answer comes', async () => {
+    const { run, api } = setup();
+    const { calls, finish } = stubs(api);
+    run(`wobjectrequestdata[${STONE}]`);
+    run(`wobjectrequestdata[${STONE}]`);
+    run(`wobjectrequestdata[${SCARAB}]`);
+    expect(calls.appraise).toBe(2);
+    await finish('appraise');
+    run(`wobjectrequestdata[${STONE}]`);
+    expect(calls.appraise).toBe(3);
+  });
+});

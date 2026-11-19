@@ -597,6 +597,25 @@ describe('VirindiTank meta features (AGENT.vtank-engine-support)', () => {
     expect(api.routine.dryRun()[0].why[0]).toMatch(/^✗ expression failed: unknown function notafunction/);
   });
 
+  it('an always-true actiontrygiveitem rule keeps one give out at a time, and none start once stopped (AUTO.vtank-expr-action-pileup)', async () => {
+    host.inv = [{ guid: 0x50000030, name: 'Mana Stone', where: 'main pack' }];
+    const pending: Array<() => void> = [];
+    let out = 0, most = 0;
+    const give = vi.fn(() => { out++; most = Math.max(most, out); return new Promise<{ ok: boolean; message: string }>((res) => pending.push(() => { out--; res({ ok: true, message: 'given' }); })); });
+    (api as unknown as { give: typeof give }).give = give;
+    api.routine.start(profile({ states: [{ name: 'Hunt', rules: [{ when: [{ kind: 'always' }], do: [{ kind: 'expression', expr: 'actiontrygiveitem[wobjectfindininventorybyname[Mana Stone],wobjectgetplayer[]]' }] }] }] }));
+    await step(5000); // ten routine steps while the first give is still walking / waiting
+    expect(give).toHaveBeenCalledTimes(1);
+    pending.shift()!();
+    await step(1000);
+    expect(give).toHaveBeenCalledTimes(2);
+    expect(most).toBe(1);
+    api.routine.stop();
+    pending.shift()!();
+    await step(3000);
+    expect(give).toHaveBeenCalledTimes(2);
+  });
+
   it('load-loot switches the active loot rules; combat-mode, give and selling to the open vendor', async () => {
     host.inv = [{ guid: 0x50000020, name: 'Pyreal', where: 'main pack', stack: 10 }];
     host.add({ guid: 0x80003301, name: 'Arbiter', itemType: 0x10, x: 81, y: 21 });

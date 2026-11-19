@@ -143,6 +143,24 @@ export function vtankExprHost(api: AgentApi, engine: RoutineEngine, print: (text
     return typeof x === 'number' && x > 0 ? { xp: x, lum: Number(charProp('quad', 6) ?? 0) } : null;
   }, () => Date.now()) : null;
   const motions = new Set<string>();
+  // VTank's actiontry* is one instant send that answers whether it was attempted; ours are AgentApi calls that walk,
+  // wait for the server and retry (a give up to ~17 s). A rule whose condition stays true runs its expression every
+  // routine step (500 ms), so starting one each time stacked them: overlapping gives / uses that the server refused
+  // ("You can only move or use one item at a time"), still firing after the routine stopped (AUTO.vtank-expr-action-pileup).
+  // At most one call per lane is out: use, give, drop and wield share the client's one-item-at-a-time lane (also closed
+  // while an inventory request waits on the server, MetaGame.busy); a cast has its own. While a lane is out the action
+  // is not attempted (false), as VTank's would not be while busy; the lane frees when the call ends, however it ends.
+  const lanes = new Set<'item' | 'cast'>();
+  const attempt = (lane: 'item' | 'cast', start: () => Promise<unknown>): boolean => {
+    if (lanes.has(lane) || (lane === 'item' && game.busy?.())) return false;
+    let p: Promise<unknown>;
+    try { p = start(); } catch { return false; }
+    lanes.add(lane);
+    void Promise.resolve(p).catch(() => undefined).finally(() => { lanes.delete(lane); });
+    return true;
+  };
+  /** Appraisals asked for and not yet answered: one per object (requestObjectData every step asked again each time). */
+  const appraising = new Set<number>();
   const vitalOf = (s: ReturnType<typeof me>, v: number) => (s ? (v === 1 ? s.health : v === 2 ? s.stamina : v === 3 ? s.mana : null) : null);
   return {
     getVar: scopeGet,
@@ -207,11 +225,11 @@ export function vtankExprHost(api: AgentApi, engine: RoutineEngine, print: (text
     },
     selectionId: () => api.selectedGuid(),
     select: (id) => api.select(id).ok,
-    useItem: (id) => { void api.use(id); return true; },
+    useItem: (id) => attempt('item', () => api.use(id)),
     applyItem: (use, target) => api.useOn(use, target).ok,
-    giveItem: (item, target) => { void api.give(item, target, null); return true; },
-    dropItem: (id) => { void api.drop(id); return true; },
-    castSpell: (id, target) => { void api.cast(id, target ?? null); return true; },
+    giveItem: (item, target) => attempt('item', () => api.give(item, target, null)),
+    dropItem: (id) => attempt('item', () => api.drop(id)),
+    castSpell: (id, target) => attempt('cast', () => api.cast(id, target ?? null)),
     spellName: (id) => api.spellTableData()?.spells.get(id)?.name ?? api.spells('', 100000).find((s) => s.id === id)?.name ?? '',
     knownSpells: () => api.spells('', 100000).map((s) => s.id),
     spellKnown: (id) => api.spells('', 100000).some((s) => s.id === id),
@@ -227,7 +245,11 @@ export function vtankExprHost(api: AgentApi, engine: RoutineEngine, print: (text
       return typeof v === 'boolean' ? (v ? 1 : 0) : v;
     },
     objectHasData: (id) => api.itemData(id) !== null,
-    requestObjectData: (id) => { void api.appraise(id, { quiet: true }); },
+    requestObjectData: (id) => {
+      if (appraising.has(id)) return;
+      appraising.add(id);
+      void api.appraise(id, { quiet: true }).catch(() => undefined).finally(() => { appraising.delete(id); });
+    },
     objectHealth: (id) => {
       const s = me();
       if (id === s?.guid) return s.health.max ? s.health.cur / s.health.max : 0;
@@ -258,7 +280,7 @@ export function vtankExprHost(api: AgentApi, engine: RoutineEngine, print: (text
       if (wands.some((w) => w.where === 'equipped')) return true;
       // One whose wield the client just refused for the packs or gear as they are is passed over (AgentApi.equipHeld).
       const next = wands.find((w) => !api.equipHeld(w.guid));
-      if (next) void api.equip(next.guid);
+      if (next) attempt('item', () => api.equip(next.guid));
       return false;
     },
     busyState: () => (game.busy?.() ? 1 : 0),

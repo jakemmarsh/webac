@@ -709,8 +709,12 @@ export class UbRuntime {
     const v = this.findName(name, partial, ['vendor']);
     const think = this.store.bool('AutoVendor.Think');
     if (!v) return this.thinkOrWrite('AutoVendor failed to open vendor', think);
+    // A new open replaces one under way (AUTO.vtank-expr-action-pileup sweep): before, a second /ub vendor open (a meta's
+    // chatbox[] every routine step) started a second use-loop beside the first, and the first's end dropped the second's job.
+    this.stopJob('vendor-open');
     const job = { cancelled: false };
     this.jobs.set('vendor-open', job);
+    const release = () => { if (this.jobs.get('vendor-open') === job) this.jobs.delete('vendor-open'); };
     void (async () => {
       const tries = this.store.num('AutoVendor.Tries');
       const wait = this.store.num('AutoVendor.TriesTime');
@@ -719,13 +723,14 @@ export class UbRuntime {
         await this.host.use(v.guid);
         const end = this.host.now() + wait;
         while (this.host.now() < end && !job.cancelled) {
-          if (this.host.vendor()?.guid === v.guid) { this.jobs.delete('vendor-open'); return; }
+          if (this.host.vendor()?.guid === v.guid) { release(); return; }
           await this.host.sleep(200);
         }
       }
-      this.jobs.delete('vendor-open');
+      release();
+      if (job.cancelled) return;
       this.host.holdNav(0);
-      if (!job.cancelled) for (const l of this.thinkOrWrite('AutoVendor failed to open vendor', think)) this.host.print(l);
+      for (const l of this.thinkOrWrite('AutoVendor failed to open vendor', think)) this.host.print(l);
     })();
     return [];
   }

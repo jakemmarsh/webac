@@ -411,6 +411,24 @@ describe('AutoVendor (UB AutoVendor.cs)', () => {
     await settle();
     expect(h.log).toEqual(['use 500']);
   });
+
+  it('a second /ub vendor open replaces the first instead of running a second use-loop beside it (AUTO.vtank-expr-action-pileup sweep)', async () => {
+    const { ub, h } = setup();
+    h.world = [obj(500, 'Aun Shaman', 'vendor', 4)];
+    const pending: Array<() => void> = [];
+    h.use = (g) => { h.log.push(`use ${g}`); return new Promise((res) => pending.push(() => res({ ok: true, message: '' }))); };
+    await ub.command('/ub vendor openp aun');
+    await ub.command('/ub vendor openp aun');
+    expect(h.log).toEqual(['use 500', 'use 500']);
+    // The first ends: it was replaced, so it neither uses again nor says it failed.
+    pending.shift()!();
+    await settle();
+    expect(h.log).toEqual(['use 500', 'use 500']);
+    expect(h.printed.filter((l) => /failed to open vendor/.test(l))).toEqual([]);
+    // The second runs its tries out alone, then says so once.
+    for (let i = 0; i < 50 && pending.length; i++) { pending.shift()!(); await settle(); }
+    expect(h.printed.filter((l) => /failed to open vendor/.test(l)).length).toBe(1);
+  });
 });
 
 describe('equipment profiles (UB EquipmentManager)', () => {
