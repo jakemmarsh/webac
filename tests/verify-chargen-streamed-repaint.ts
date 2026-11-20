@@ -34,6 +34,7 @@ describe('chargen repaints after streamed files arrive', () => {
     const container = domWindow.document.createElement('div');
     domWindow.document.body.appendChild(container);
     const ui = new GameUICtor(container);
+    ui.uiManager.setScreen('character-create');
     const state = { paints: 0, missing: true };
     ui.renderCharacterCreatePage = () => {
       state.paints++;
@@ -80,5 +81,43 @@ describe('chargen repaints after streamed files arrive', () => {
     domWindow.document.getElementById('chargen-root').remove();
     ui.onStreamedFilesArrived();
     expect(state.paints).toBe(2);
+  });
+
+  // BUG.chargen-repaint-over-world (prod trace 0a14402a939ed3cd, 2026-11-19): showGame hides the
+  // container but leaves #chargen-root in the document; a streamed batch in the world redrew chargen
+  // over it, and its FINISH sent a second CharacterCreate from the world.
+  it('a repaint owed when the world opens never redraws chargen over the world', () => {
+    const { ui, state } = makeUI();
+    ui.renderCharacterCreate(); // missed: a repaint is owed
+    expect(state.paints).toBe(1);
+    ui.renderHUD = () => {};
+    ui.renderViewportFrame = () => {};
+    ui.applyAllConfigConsumers = () => {};
+    ui.showGame();
+    expect(domWindow.document.getElementById('chargen-root')).not.toBeNull(); // still in the document, hidden
+    state.missing = false;
+    ui.onStreamedFilesArrived();
+    ui.onStreamedFilesArrived();
+    expect(state.paints).toBe(1);
+    expect(ui.uiManager.currentScreen).toBe('game');
+    expect(ui.screenContainer.style.display).toBe('none');
+  });
+
+  it('a repaint held for a mouse release is dropped if the world opened meanwhile', async () => {
+    const { ui, state } = makeUI();
+    ui.renderCharacterCreate();
+    ui.pointerButtonsDown = 1; // a button held when the files land
+    state.missing = false;
+    ui.onStreamedFilesArrived();
+    expect(state.paints).toBe(1);
+    ui.renderHUD = () => {};
+    ui.renderViewportFrame = () => {};
+    ui.applyAllConfigConsumers = () => {};
+    ui.showGame();
+    ui.pointerButtonsDown = 0;
+    domWindow.dispatchEvent(new domWindow.Event('pointerup'));
+    await new Promise((r) => setTimeout(r, 5));
+    expect(state.paints).toBe(1);
+    expect(ui.screenContainer.style.display).toBe('none');
   });
 });

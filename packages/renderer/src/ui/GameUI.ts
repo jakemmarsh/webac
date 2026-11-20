@@ -4490,7 +4490,7 @@ export class GameUI {
    */
   private repaintChargenAfterArrival(): void {
     const repaint = (): void => {
-      if (!document.getElementById('chargen-root')) return;
+      if (!this.chargenScreenOpen()) return;
       try { this.renderCharacterCreate(); } catch (e) { console.warn('[GameUI] chargen repaint after streamed files failed', e); }
     };
     if (!this.pointerHeld()) { repaint(); return; }
@@ -4500,6 +4500,18 @@ export class GameUI {
       // The click follows the pointerup in the same input task; repaint after it.
       setTimeout(() => { this.chargenRepaintOnRelease = false; repaint(); }, 0);
     }, { once: true, capture: true });
+  }
+
+  /**
+   * BUG.chargen-repaint-over-world — character creation is the screen in force.
+   * showGame only hides the screen container, so #chargen-root stays in the
+   * document under the world; a streamed-file repaint keyed on it alone redrew
+   * chargen over the world (renderCharacterCreatePage shows the container and
+   * hides the HUD), and its FINISH sent a second CharacterCreate from the world
+   * (prod trace 0a14402a939ed3cd, 2026-11-19).
+   */
+  private chargenScreenOpen(): boolean {
+    return this.uiManager.currentScreen === 'character-create' && document.getElementById('chargen-root') !== null;
   }
 
   /** A mouse button is down right now (tracked from window pointer events). */
@@ -4549,7 +4561,7 @@ export class GameUI {
     // packs): re-render it now they're here. A re-render keeps the camera.
     if (this.chargenMissedDats) {
       this.chargenMissedDats = false;
-      if (document.getElementById('chargen-root')) this.repaintChargenAfterArrival();
+      if (this.chargenScreenOpen()) this.repaintChargenAfterArrival();
     }
     if (!this.iconMissedSinceRepaint) {
       // The paperdoll portrait is a 3D render of the player's parts: it redraws with whatever just landed.
@@ -8344,6 +8356,8 @@ export class GameUI {
     this.chargenPreviewModel = null;
     this.chargenVerificationPending = false;
     this.chargenAwaitingLogin = false;
+    // BUG.chargen-repaint-over-world — a repaint owed to this page dies with it.
+    this.chargenMissedDats = false;
     this.clearChargenReplyTimer();
     // The hover tooltip's check timer goes with the page too.
     this.resetChargenTooltip();
