@@ -466,6 +466,22 @@ export class MovementSync {
   private lastMoveToState: { payload: Uint8Array; at: number; repeats: number; seq: number } | null = null;
   /** Identical MoveToStates past the cap, not sent (this session). */
   moveToStateRepeatsDropped = 0;
+  /** The last MoveToState sent carried no forward, sidestep or turn command (and no held substate): a standing stop. */
+  private lastMoveToStateStanding = false;
+
+  /**
+   * BUG.agent-stop-moving-repeat — the server already has you standing: the last MoveToState sent was a standing stop
+   * (no forward / sidestep / turn command, no held substate such as Sit), none is held back by the budget, and no other
+   * game action (a Use, an attack, a CancelAttack, a Jump, an AutonomousPosition, a soul emote) went out since, so there
+   * is no server MoveTo or swing a new stop would end. Another standing stop would carry nothing new. Without the action
+   * counter's peek it can't tell: false. The agent API's stop_moving reads it (main.ts stopMovingNeeded) and sends
+   * nothing then; a player's own Stop Moving press always sends, as retail's does (ACCmdInterp::OnAction case 0x2b).
+   */
+  get standingStopSent(): boolean {
+    const last = this.lastMoveToState;
+    if (!last || !this.lastMoveToStateStanding || this.heldMoveToState || !this.peekActionSequence) return false;
+    return this.peekActionSequence() === last.seq;
+  }
 
   /** The same MoveToState again, with nothing else sent between, inside the window: the run it continues; else null. */
   private repeatRunOf(payload: Uint8Array, now: number): { payload: Uint8Array; at: number; repeats: number; seq: number } | null {
@@ -676,6 +692,7 @@ export class MovementSync {
     this.moveToStatesSent++;
     const seq = this.actionSequence();
     this.lastMoveToState = run ? { ...run, repeats: run.repeats + 1, seq } : { payload, at: now, repeats: 0, seq };
+    this.lastMoveToStateStanding = motion.forwardCommand === 0 && motion.sidestepCommand === 0 && motion.turnCommand === 0;
     const msg = serializeGameAction(seq, GameActionType.MoveToState, payload);
     this.connection.sendMessage(msg, GameMessageGroup.SmartboxQueue);
     this.onMoveToStateSent?.();

@@ -138,7 +138,7 @@ import { rangedSpeechInRange } from './chat/RangedSpeechGate.js';
 import { PingLatencyTracker } from './network/PingLatencyTracker.js';
 import { GameActions } from './network/GameActions.js';
 import { pageDebugToolsEnabled, harnessDegMulPin } from './utils/debugTools.js';
-import { AgentApi, agentApiEnabled, automationUiEnabled, doorFacing, fixtureReach, parseMapCoords, toGlobal as agentToGlobal, yawToCompass, type AgentHost, type AgentHostObject, type AgentPlacementSent } from './agent/AgentApi.js';
+import { AgentApi, agentApiEnabled, agentStopMovingNeeded, automationUiEnabled, doorFacing, fixtureReach, parseMapCoords, toGlobal as agentToGlobal, yawToCompass, type AgentHost, type AgentHostObject, type AgentPlacementSent } from './agent/AgentApi.js';
 import { createHostAttack } from './agent/hostAttack.js';
 import { withPublicDescription, type AgentAppraisal, type PublicDescription } from './agent/itemRecord.js';
 import { skillKey, skillSpellLines, spellSkillMod } from './agent/spellFamilies.js';
@@ -18604,6 +18604,14 @@ async function main() {
         // Retail's Stop Moving action (ACT.StopMoving → CameraController.stopMoving: TakeControlFromServer, which
         // aborts an automatic attack and stops a server MoveTo where the body is): the agent's stop_moving.
         stopMovingAction: () => cameraController.stopMoving(),
+        // BUG.agent-stop-moving-repeat: an agent's stop with nothing moving sends no further standing MoveToState.
+        stopMovingNeeded: () => agentStopMovingNeeded({
+          standingStopSent: movementSync?.standingStopSent ?? false,
+          autoRun: cameraController.autoRun,
+          controlledByServer: cameraController.controlledByServer,
+          attackPending: attackRequest?.attackChainPending() ?? false,
+          heldSubstate: animController?.heldSubstate ?? 0,
+        }),
         press: (input) => {
           // A key code is pressed as given; an action name (any of the forms findKeybindAction takes) as its first bound key.
           const r = resolvePress(keybinds.actions(), (id) => keybinds.getMappings(id), input);

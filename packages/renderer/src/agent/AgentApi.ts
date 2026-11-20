@@ -528,6 +528,12 @@ export interface AgentHost {
    * to a melee target. Absent: keys are all stop_moving lets go of.
    */
   stopMovingAction?(): void;
+  /**
+   * BUG.agent-stop-moving-repeat — whether a Stop Moving would change anything: false only when you stand still as the
+   * server last heard it (the last MoveToState a standing stop, nothing sent since: MovementSync.standingStopSent), with
+   * no autorun, no server MoveTo (controlled by the server), no attack running and no held posture. Absent: always true.
+   */
+  stopMovingNeeded?(): boolean;
   /** Keymap actions matching `filter`, with their bound keys. */
   keyBindings(filter: string): Array<{ name: string; keys: string[] }>;
   /** The open vendor window, or null. */
@@ -7440,12 +7446,18 @@ export class AgentApi {
 
   stopMoving(): AgentResult {
     const attacking = /^attacking /.test(this.task?.label ?? '') || this.attackTarget !== 0;
+    // Something of the agent's own under way: a task (a walk, a use's approach, a follow), keys it holds, an attack order.
+    const own = !!this.task || this.agentKeys.size > 0 || attacking || this.chain !== null;
     this.cancelTask('stopped');
     for (const k of ['KeyW', 'KeyS', 'KeyA', 'KeyD', 'KeyZ', 'KeyC']) this.key(k, false);
     // The server's approach to a melee target (its MoveTo after the attack request) runs on with no key held: letting go
     // of keys stopped nothing, and Bulwark ran on 16–19 m after stop_moving (Mountain Keep, 2026-10-16 16:57Z). Retail's
     // Stop Moving takes control back from the server: the MoveTo stops where you are and the attack is cancelled.
-    this.host.stopMovingAction?.();
+    // BUG.agent-stop-moving-repeat (Classic Dereth, 2026-11-20 09:48Z): with nothing moving, the stop is not sent again.
+    // The agent's stops come from many places at once (a takeover's stop + its routine pause's, a routine's stop rule,
+    // a recall's, Claude's own ac_stop_moving), and five identical standing MoveToStates went out in 500 ms until the
+    // outgoing repeat cap dropped the copies. A player's Stop Moving press is not this path and always sends.
+    if (own || this.host.stopMovingNeeded?.() !== false) this.host.stopMovingAction?.();
     this.attackTarget = 0;
     this.chain = null;
     return { ok: true, message: attacking ? 'stopped (the attack and its run-up too)' : 'stopped' };
@@ -16310,6 +16322,16 @@ export class AgentApi {
     }
     return s;
   }
+}
+
+/**
+ * BUG.agent-stop-moving-repeat — main.ts's AgentHost.stopMovingNeeded: a Stop Moving changes something unless the server
+ * last heard a standing stop with nothing sent since (MovementSync.standingStopSent) and none of autorun, a server MoveTo
+ * (control lost to the server), an attack of ours still running or a held posture (Sit, Crouch, Sleep) is on now. The same
+ * in every era: the MoveToState, CancelAttack and the command interpreter are shared by end of retail, Dark Majesty and 1999.
+ */
+export function agentStopMovingNeeded(s: { standingStopSent: boolean; autoRun: boolean; controlledByServer: boolean; attackPending: boolean; heldSubstate: number }): boolean {
+  return !s.standingStopSent || s.autoRun || s.controlledByServer || s.attackPending || s.heldSubstate !== 0;
 }
 
 /** The agent surface's commands that move, fight, use or trade: a running routine holds while one runs (handOver). */
