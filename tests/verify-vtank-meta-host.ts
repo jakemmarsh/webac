@@ -248,6 +248,15 @@ describe('quests, motions, equipanywand and spell ids in the game host (§0.10)'
     host.inv.find((i) => i.guid === 0x8000_0200)!.where = 'equipped';
     expect(run('actiontryequipanywand[]')).toBe(1);
   });
+  it('actiontryequipanywand: an Items-tab entry with an object id is that wand, not a same-named twin (BUG.vtank-same-name-weapon-swap)', () => {
+    const { run, host, api } = setup();
+    (api.routine as unknown as { current: () => unknown }).current = () => ({ vtank: { items: [{ name: 'Wand', id: 0x8000_0302 }] } });
+    host.inv.push({ guid: 0x8000_0301, name: 'Wand', where: 'equipped', itemType: 0x8000 } as (typeof host.inv)[number]);
+    host.inv.push({ guid: 0x8000_0302, name: 'Wand', where: 'pack', itemType: 0x8000 } as (typeof host.inv)[number]);
+    expect(run('actiontryequipanywand[]')).toBe(0);
+    expect(host.sent).toContain('wield 80000302');
+    expect(host.sent).not.toContain('wield 80000301');
+  });
   it('wobjectgetspellids / wobjectgetactivespellids read the appraisal', () => {
     const { run } = setup({ objectSpellIds: (id, active) => (id === 0x8000_0103 ? (active ? [2] : [1, 2]) : []) });
     expect(run('listcount[wobjectgetspellids[wobjectfindininventorybyname[Long Sword]]]')).toBe(2);

@@ -20,6 +20,7 @@
 
 import { ObjectDescriptionFlag } from '@ac/shared';
 import { itemVisualDescOf, type ItemVisualDesc, type ItemVisualSource } from '../models/WieldedItemVisual.js';
+import { forgetContainedRecords, setBounded } from '../world/BoundedRecords.js';
 
 /** The minimal slice of CreateObjectData the routing decision reads. */
 export interface ObjectSubjectIds {
@@ -261,17 +262,40 @@ export function buildInventoryEntry(data: InventoryEntrySource): {
  * it in one of the player's packs.
  */
 export class WorldObjectRecords {
+  /**
+   * PERF.long-session-record-caps — the most records kept. Every item on every corpse opened is
+   * remembered (an open container's contents), and the server never deletes a rotting corpse's
+   * contents one by one: forgetContainedIn drops them with their corpse, and this cap (oldest
+   * first) bounds whatever is let go without a delete (a corpse left behind out of sight).
+   */
+  static readonly CAP = 4096;
   private readonly records = new Map<number, InventoryEntrySource>();
+
+  constructor(private readonly cap = WorldObjectRecords.CAP) {}
 
   /** Keep the record of a world object that could be picked up. */
   remember(guid: number, data: InventoryEntrySource & { objectDescFlags?: number }): void {
     const movable = (data.itemType & 0x10) === 0 && ((data.objectDescFlags ?? 0) & 0x4) === 0;
-    if (movable) this.records.set(guid >>> 0, data);
+    if (movable) setBounded(this.records, guid >>> 0, data, this.cap);
     else this.records.delete(guid >>> 0);
   }
 
   forget(guid: number): void {
     this.records.delete(guid >>> 0);
+  }
+
+  /**
+   * PERF.long-session-record-caps — a container (a corpse, a chest) was deleted: the records of
+   * what it held, nested packs included, go with it (retail's CObjectMaint drops contained weenies
+   * with their container; ACE's WorldObject.Destroy, GDLE's and the AC1999 server's RemoveEntity
+   * send no DeleteObject for a contained item, which has no landblock). Returns the forgotten guids.
+   */
+  forgetContainedIn(containerGuid: number): number[] {
+    return forgetContainedRecords(this.records, containerGuid);
+  }
+
+  get size(): number {
+    return this.records.size;
   }
 
   has(guid: number): boolean {

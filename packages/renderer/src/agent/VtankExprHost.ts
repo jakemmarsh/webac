@@ -11,7 +11,7 @@
  * no-cheating rule); what it can't provide stays unset, so those functions
  * answer "unsupported function".
  */
-import { XpMeter, exprToString, runExpr, truthy, vtFromVTank, vtToVTank, type ExprCoords, type ExprHost, type ExprValue, type HostObject, type HostQuest, type PropKind, type VarScope } from '@ac/shared';
+import { XpMeter, exprToString, runExpr, truthy, vtFromVTank, vtItemIs, vtToVTank, type ExprCoords, type ExprHost, type ExprValue, type HostObject, type HostQuest, type PropKind, type VarScope } from '@ac/shared';
 import type { AgentApi } from './AgentApi.ts';
 import { decalObjectClass } from './decalObjectClass.ts';
 import { checkSpell } from './metaSpellCheck.ts';
@@ -275,8 +275,9 @@ export function vtankExprHost(api: AgentApi, engine: RoutineEngine, print: (text
     clearMotion: () => { for (const m of motions) api.holdMotion(m, false); motions.clear(); },
     // VTank: true when a wand from the profile's Items tab is wielded; otherwise one step towards wielding one.
     equipAnyWand: () => {
-      const listed = new Set((engine.current()?.vtank?.items ?? []).map((x) => x.name.toLowerCase()));
-      const wands = api.inventory().filter((i) => ((i.itemType ?? 0) & CASTER) !== 0 && listed.has(i.name.toLowerCase()));
+      // An entry with an object id is that wand only (vtItemIs), never a same-named twin (BUG.vtank-same-name-weapon-swap).
+      const entries = engine.current()?.vtank?.items ?? [];
+      const wands = api.inventory().filter((i) => ((i.itemType ?? 0) & CASTER) !== 0 && entries.some((x) => vtItemIs(x, i)));
       if (wands.some((w) => w.where === 'equipped')) return true;
       // One whose wield the client just refused for the packs or gear as they are is passed over (AgentApi.equipHeld).
       const next = wands.find((w) => !api.equipHeld(w.guid));

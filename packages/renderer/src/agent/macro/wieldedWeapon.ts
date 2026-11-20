@@ -43,6 +43,15 @@ export function weaponKind(i: AgentItem): WieldedKind | null {
   return null;
 }
 
+/**
+ * The kind of a weapon you carry, worn or in a pack: a pack item has no worn slots (`mask`), so its ValidLocations
+ * (`validLocations`, or the `fits` names) stand in for them. Null for no weapon (armor, a shield, ammunition).
+ */
+export function carriedWeaponKind(i: AgentItem): WieldedKind | null {
+  if (i.where === 'equipped') return weaponKind(i);
+  return weaponKind({ ...i, mask: i.validLocations ?? 0, slot: i.fits ?? i.slot });
+}
+
 /** The weapon you wield (a caster, launcher or melee weapon), or null with none in hand. */
 export function wieldedWeapon(items: AgentItem[]): { item: AgentItem; kind: WieldedKind } | null {
   for (const i of items) {

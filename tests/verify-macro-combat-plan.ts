@@ -619,3 +619,73 @@ describe.skipIf(!existsSync(EOL) || !existsSync(DM) || !existsSync(Y1999))('Rand
     }
   });
 });
+
+describe('BUG.vtank-same-name-weapon-swap: several carried items of one name (live, end of retail, 2026-11-20)', () => {
+  // Three wands of one weenie, all "Wand". Before the fix the <AUTO> row's ladder read the Items tab by name, so all
+  // three were "listed", and of equals the ladder keeps the last: whichever twin was not in hand was wielded, the hand
+  // moved, the inventory order with it, and the next step picked another ("taking off Wand #8000115f…", "#800011d5"…).
+  const wand = (guid: number, equipped = false): PlanItem => ({ guid, name: 'Wand', itemType: 0x8000, ints: { 45: 0x10 }, ...(equipped ? { equipped: true } : {}) });
+  const sword = (guid: number, equipped = false): PlanItem => ({ guid, name: 'Iron Sword', itemType: 0x1, ints: { 45: 0x1 }, ...(equipped ? { equipped: true } : {}) });
+  const W1 = 0x8000115f, W2 = 0x800011d5, W3 = 0x800011eb;
+  const S1 = 0x80002001, S2 = 0x80002002, S3 = 0x80002003;
+  const equips = (over: Partial<CombatInput>): number[] => {
+    const a = planCombat(input({ rows: [row('<DEFAULT>', { on: ['A'], damage: VT_DAMAGE.Fire })], ...over }));
+    return a?.kind === 'equip' ? [a.item.guid] : [];
+  };
+
+  it('the Items tab names the second wand by id and it is in hand: nothing is equipped', () => {
+    for (const order of [[1, 2, 3], [2, 1, 3], [3, 1, 2], [1, 3, 2]]) {
+      const items = order.map((n) => wand([W1, W2, W3][n - 1], n === 2));
+      expect(equips({ items, itemNames: ['Wand'], itemEntries: [{ name: 'Wand', id: W2 }], wielded: { weapon: 'Wand' } }), order.join()).toEqual([]);
+    }
+  });
+
+  it('the first wand in hand: the listed second one is equipped once, and with it in hand the plan stays put', () => {
+    const entries = [{ name: 'Wand', id: W2 }];
+    expect(equips({ items: [wand(W1, true), wand(W2), wand(W3)], itemNames: ['Wand'], itemEntries: entries, wielded: { weapon: 'Wand' } })).toEqual([W2]);
+    // After the swap, in any inventory order (the client lists what is in hand first, the one taken off last).
+    for (const items of [[wand(W2, true), wand(W3), wand(W1)], [wand(W1), wand(W3), wand(W2, true)]]) {
+      expect(equips({ items, itemNames: ['Wand'], itemEntries: entries, wielded: { weapon: 'Wand' } })).toEqual([]);
+    }
+  });
+
+  it('an entry without an id (an older profile): any wand of that name in hand is the listed one, nothing equipped', () => {
+    for (const inHand of [W1, W2, W3]) {
+      const items = [W1, W2, W3].map((g) => wand(g, g === inHand));
+      expect(equips({ items, itemNames: ['Wand'], wielded: { weapon: 'Wand' } }), inHand.toString(16)).toEqual([]);
+      expect(equips({ items, itemNames: ['Wand'], itemEntries: [{ name: 'Wand' }], wielded: { weapon: 'Wand' } }), inHand.toString(16)).toEqual([]);
+    }
+    // Nothing in hand: one of them, the first carried.
+    expect(equips({ items: [wand(W1), wand(W2), wand(W3)], itemNames: ['Wand'], wielded: {} })).toEqual([W1]);
+  });
+
+  it('the same for a melee weapon pair (and a triple)', () => {
+    const base = { stance: 'melee' as const, rows: [row('<DEFAULT>', { on: ['A'], damage: VT_DAMAGE.Slash })], wielded: { weapon: 'Iron Sword' } };
+    const plan = (items: PlanItem[], itemEntries?: Array<{ name: string; id?: number }>): number[] => {
+      const a = planCombat(input({ ...base, items, itemNames: ['Iron Sword'], ...(itemEntries ? { itemEntries } : {}) }));
+      return a?.kind === 'equip' ? [a.item.guid] : [];
+    };
+    expect(plan([sword(S1), sword(S2, true), sword(S3)], [{ name: 'Iron Sword', id: S2 }])).toEqual([]);
+    expect(plan([sword(S1, true), sword(S2)], [{ name: 'Iron Sword', id: S2 }])).toEqual([S2]);
+    expect(plan([sword(S2, true), sword(S1)], [{ name: 'Iron Sword', id: S2 }])).toEqual([]);
+    expect(plan([sword(S1, true), sword(S2)])).toEqual([]);
+    expect(plan([sword(S1), sword(S2, true)])).toEqual([]);
+  });
+
+  it('a Monsters-tab row naming the weapon without an id keeps the same-named one in hand; with its id, that one', () => {
+    const r = row('<DEFAULT>', { on: ['A'], damage: VT_DAMAGE.Fire, weapon: 'Wand' });
+    const a = planCombat(input({ rows: [r], items: [wand(W1), wand(W2, true), wand(W3)], itemNames: ['Wand'], wielded: { weapon: 'Wand' } }));
+    expect(a?.kind).not.toBe('equip');
+    const b = planCombat(input({ rows: [{ ...r, weaponId: W3 }], items: [wand(W1), wand(W2, true), wand(W3)], itemNames: ['Wand'], wielded: { weapon: 'Wand' } }));
+    expect(b?.kind === 'equip' ? b.item.guid : null).toBe(W3);
+  });
+
+  it('ammunition: two equal stacks of one name, the one in the quiver stays', () => {
+    const bow: PlanItem = { guid: 7001, name: 'Yumi', itemType: 0x100, equipped: true, ammoType: 1, ints: { 45: 0x2 } };
+    const arrows = (guid: number, equipped = false): PlanItem => ({ guid, name: 'Arrow', itemType: 0x100, fits: 'MissileAmmo', ammoType: 1, stack: 50, ints: { 45: 0x2, 44: 5 }, ...(equipped ? { equipped: true, slot: 'MissileAmmo' } : {}) });
+    for (const items of [[bow, arrows(7002), arrows(7003, true)], [bow, arrows(7003, true), arrows(7002)]]) {
+      const a = planCombat(input({ stance: 'missile', rows: [row('<DEFAULT>', { on: ['A'], damage: VT_DAMAGE.Pierce })], items, itemNames: ['Yumi'], wielded: { weapon: 'Yumi' } }));
+      expect(a?.kind === 'equip' ? a.item.guid : null, items.map((i) => i.guid).join()).toBe(null);
+    }
+  });
+});

@@ -22,6 +22,7 @@
  */
 import { PropertyFloat, PropertyInt, type PlanEnchantment, type PlanItem, type PlanSkill } from '@ac/shared';
 import { itemSpellId, useRequirementProblem, useWouldPutOn } from './itemUse.ts';
+import { dueThreshold } from './buffPlan.ts';
 
 /** VirindiTank's default GemFoodItems table (its default settings profile; the ids are the end-of-retail spells 3810 / 3811). */
 export const VT_GEM_FOOD_ITEMS = ["Asheron's Benediction", "Blackmoor's Favor"];
@@ -79,7 +80,8 @@ export function planBuffItem(input: BuffItemInput): BuffItemPick | null {
     const cooldown = item.ints[PropertyInt.SharedCooldown] ?? 0;
     if (cooldown > 0 && input.cooldownLeft(cooldown) > 0) continue;
     const left = familyLeft(input.active, spell.category, spell.power);
-    if (left !== null && left >= input.threshold) continue;
+    // A spell no longer than the threshold would be due again (and another item eaten) the moment it lands.
+    if (left !== null && left >= dueThreshold(input.threshold, spell.duration ?? 0)) continue;
     return { item, spellId, spell, why: `${spell.name} ${left === null ? 'is not on you' : `has ${Math.round(left)} s left`}: using ${item.name}` };
   }
   return null;

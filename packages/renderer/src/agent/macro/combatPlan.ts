@@ -26,7 +26,7 @@
  * milliseconds; spell and castLog `duration` in seconds; DebuffPrecastSeconds
  * in seconds.
  */
-import { PropertyInt, VT_DAMAGE, VT_DEFAULT_MONSTER, VT_PET_AUTO, vtOption, type PlanItem, type PlanSkill, type PlanSpell, type Stance, type VtMonsterColumn, type VtMonsterRow } from '@ac/shared';
+import { PropertyInt, VT_DAMAGE, VT_DEFAULT_MONSTER, VT_PET_AUTO, vtItemIs, vtOption, type PlanItem, type PlanSkill, type PlanSpell, type Stance, type VtMonsterColumn, type VtMonsterRow } from '@ac/shared';
 import { pickLadderWeapon, weaponElement } from './weaponLadder.ts';
 import { debuffSources, type DebuffSource, type DebuffSpellInfo } from './itemDebuffs.ts';
 import { planDrain, type DrainRow } from './drainPlan.ts';
@@ -84,6 +84,11 @@ export interface CombatInput {
   /** What you carry; the Items-tab list (names). */
   items: PlanItem[];
   itemNames: string[];
+  /**
+   * The Items-tab entries, in the tab's order, with the object id an entry added from the pack carries (vtItemIs: an
+   * id means THAT object; without one, the name). Absent: `itemNames`, by name.
+   */
+  itemEntries?: Array<{ name: string; id?: number }>;
   wielded: { weapon?: string; offhand?: string };
   stance: Stance;
   /** VTank names, our units (ranges in metres). Missing names take VTank's defaults. */
@@ -111,6 +116,11 @@ export interface CombatInput {
   spellInfo?: (id: number) => DebuffSpellInfo | undefined;
   /** The Consumables tab (names): grenades are thrown from it. */
   consumableNames?: string[];
+  /**
+   * An item whose own debuff was just used and didn't go on (a refusal, no answer): left out as a debuff source for a
+   * while, so a caster isn't wielded and used at every step (the macro's item hold). Absent: none held.
+   */
+  debuffItemHeld?: (guid: number) => boolean;
   /** Your health now and at most (Drain Auto's plan). */
   vitals?: { health: number; maxHealth: number };
   /** The era's drains and martyrs (tools/build-drain-tables.ts); absent: Drain Auto casts the best drain. */
@@ -621,7 +631,25 @@ const isWeapon = (item: PlanItem): boolean => ((item.itemType ?? 0) & (IT_MELEE 
  */
 const findItem = (input: CombatInput, name: string | undefined, id?: number): PlanItem | undefined =>
   (id !== undefined ? input.items.find((i) => (i.guid >>> 0) === (id >>> 0)) : undefined)
-  ?? (name ? input.items.find((i) => i.name.toLowerCase() === name.toLowerCase()) : undefined);
+  ?? (name ? inHandFirst(input.items.filter((i) => i.name.toLowerCase() === name.toLowerCase())) : undefined);
+/** Of same-named carried items, the one in hand, else the first: never "the first by inventory order" while a twin is held. */
+const inHandFirst = (twins: PlanItem[]): PlanItem | undefined => twins.find((i) => i.equipped) ?? twins[0];
+/**
+ * The carried items the Items tab lists, one per entry in the tab's order (`keep` filters first). An entry with an object
+ * id is that object only (vtItemIs); one without (an older profile, or a name typed in) is its name, and of several
+ * carried items of that name the one in hand stands for it, else the first. Read by name alone, three "Wand"s were all
+ * listed, the <AUTO> ladder kept the last of equals, and each wield moved the hand and the inventory order, so the next
+ * step wielded another: "taking off Wand #8000115f", "#800011d5", "#800011eb"... every 1-2 s while it fought
+ * (BUG.vtank-same-name-weapon-swap, live 2026-11-20).
+ */
+function listedItems(input: CombatInput, keep: (i: PlanItem) => boolean = () => true): PlanItem[] {
+  const out: PlanItem[] = [];
+  for (const e of input.itemEntries ?? input.itemNames.map((name) => ({ name }))) {
+    const pick = inHandFirst(input.items.filter((i) => keep(i) && vtItemIs(e, i) && !out.includes(i)));
+    if (pick) out.push(pick);
+  }
+  return out;
+}
 /** In hand: equipped, or named as wielded, unless its same-named twin is the one equipped. */
 const isWielded = (input: CombatInput, item: PlanItem, slot: 'weapon' | 'offhand'): boolean =>
   item.equipped === true || (input.wielded[slot]?.toLowerCase() === item.name.toLowerCase()
@@ -650,8 +678,8 @@ function rowWeapon(input: CombatInput, row: VtMonsterRow, m?: CombatMonster): Pl
   if (row.weapon && row.weapon.toLowerCase() === 'any wand') {
     // A wand from the Items tab (or the one in hand): VTank wields nothing else. Any carried caster was taken before
     // 2026-11-17, a looted one the server won't let you wield included (BUG.vtank-loot-wears-items).
-    const listed = new Set(input.itemNames.map((n) => n.toLowerCase()));
-    const casters = input.items.filter((i) => weaponKind(i) === 'caster' && (listed.has(i.name.toLowerCase()) || isWielded(input, i, 'weapon')));
+    const listed = listedItems(input, (i) => weaponKind(i) === 'caster');
+    const casters = input.items.filter((i) => weaponKind(i) === 'caster' && (listed.includes(i) || isWielded(input, i, 'weapon')));
     const w = casters.find((i) => isWielded(input, i, 'weapon')) ?? casters[0];
     if (w) return w;
   } else if (row.weapon) {
@@ -664,19 +692,17 @@ function rowWeapon(input: CombatInput, row: VtMonsterRow, m?: CombatMonster): Pl
   const wieldedName = input.wielded.weapon?.toLowerCase();
   const current = input.items.find((i) => i.equipped && i.name.toLowerCase() === wieldedName) ?? findItem(input, input.wielded.weapon) ?? input.items.find((i) => i.equipped && isWeapon(i));
   if (current) return current;
-  for (const n of input.itemNames) { const it = findItem(input, n); if (it && isWeapon(it)) return it; }
-  return undefined;
+  return listedItems(input, isWeapon)[0];
 }
 
 /** VTank's weapon ladder for an <AUTO> row (weaponLadder.ts), over the Items-tab weapons you carry. */
 function ladderWeapon(input: CombatInput, row: VtMonsterRow, m: CombatMonster): PlanItem | undefined {
-  const listed: PlanItem[] = [];
-  for (const n of input.itemNames) for (const it of input.items) if (it.name.toLowerCase() === n.toLowerCase() && !listed.includes(it)) listed.push(it);
+  const listed = listedItems(input);
   if (!listed.some(isWeapon)) return undefined;
   const fixed = VT_TO_ELEMENT[row.damage];
   const facts = input.monsterFacts?.(m.name);
   const wanted: CombatElement[] = fixed ? [fixed] : row.damage === VT_DAMAGE.Auto || row.damage === VT_DAMAGE.Prismatic ? (facts?.weak.length ? facts.weak : UNLISTED_ORDER) : [];
-  const off = findItem(input, row.offhand ?? undefined);
+  const off = findItem(input, row.offhand ?? undefined, row.offhandId);
   return pickLadderWeapon({
     items: listed, wanted, ...(facts?.species ? { species: facts.species } : {}),
     // Only a launcher can fail to deliver an element: for want of ammunition of it (MOSS CanDeliverElement).
@@ -873,7 +899,8 @@ function ammoOf(input: CombatInput, launcher: PlanItem | undefined, wanted: Comb
       if (el !== 'prismatic') continue;
       if (policy === 'none') score -= 1000;
     }
-    if (score > bestScore) { bestScore = score; best = a; }
+    // Of equals (two stacks of one arrow), the one already in the quiver: by order alone they could swap at every step.
+    if (score > bestScore || (score === bestScore && a.equipped && !best?.equipped)) { bestScore = score; best = a; }
   }
   return best;
 }
@@ -913,7 +940,7 @@ function nextDebuff(input: CombatInput, c: Candidate, weapon: PlanItem | undefin
   const fallback = boolSetting(input.settings, 'AllowDebuffFallback');
   const method = numSetting(input.settings, 'DebuffSelectionMethod');
   const consumables = input.consumableNames?.length ? input.items.filter((i) => input.consumableNames!.some((n) => n.toLowerCase() === i.name.toLowerCase())) : [];
-  const listed = input.items.filter((i) => input.itemNames.some((n) => n.toLowerCase() === i.name.toLowerCase()));
+  const listed = listedItems(input, (i) => !input.debuffItemHeld?.(i.guid));
   const element = resolveElement(input, c.row.damage, weapon, c.m);
   const exElement = c.row.exVuln === VT_DAMAGE.None ? null : resolveElement(input, c.row.exVuln, weapon, c.m);
   const done = new Set<number>();

@@ -12,6 +12,15 @@
  * here and again on the bridge). One report per distinct error; repeats only
  * bump a count sent with the next distinct report, and a page sends at most
  * MAX_REPORTS.
+ *
+ * TELEMETRY.extension-errors — an uncaught error whose every URL (its source
+ * and each stack frame that names one) is a browser extension's script is
+ * not ours: it does not count toward reportCount (the first minute's
+ * `errors`), and a page sends at most one, as kind `extension_error` with the
+ * extension's id and its first frame, so we still see which extensions break
+ * the page without alerting (2026-11-20 06:17Z, trace 88ff0efc576013bb: an
+ * extension's executors/200.js rejected 121 times from the boot screen on).
+ * Any other URL in the stack (our bundle, a blob: worker) keeps it ours.
  */
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 import { BROWSER_ID_PATTERN } from './LoginTags.js';
@@ -19,7 +28,7 @@ import { BROWSER_ID_PATTERN } from './LoginTags.js';
 /** The page trace's shape (PreworldReporter's trace; the bridge's TRACE_PATTERN). */
 const TRACE_PATTERN = /^[a-z0-9]{8,32}$/;
 
-export type ErrorKind = 'error' | 'unhandledrejection' | 'webglcontextlost' | 'boot';
+export type ErrorKind = 'error' | 'unhandledrejection' | 'webglcontextlost' | 'boot' | 'extension_error';
 
 export interface ErrorReport {
   kind: ErrorKind;
@@ -44,6 +53,8 @@ export interface ErrorReport {
   webglCause?: string;
   /** The browser's creation-error statusMessage, clipped to plain characters. */
   webglStatus?: string;
+  /** TELEMETRY.extension-errors — on an extension_error: the extension's id (its URL's host). */
+  extensionId?: string;
 }
 
 export interface ErrorReporterOptions {
@@ -70,6 +81,39 @@ export const MAX_REPORTS = 20;
 /** Browser warnings delivered as window errors that are not failures (see install()). */
 export const BENIGN_ERROR = /^ResizeObserver loop (completed with undelivered notifications|limit exceeded)/;
 
+/**
+ * A browser extension's script URL (Chromium + new Edge, Firefox, Safari old and new, legacy Edge); group 1 is the
+ * extension id. Safari 16.4+ masks an extension's frames as webkit-masked-url://hidden/ (id "hidden"; TrackJS's
+ * extension-error filter drops the same three: trackjs.com/javascript-errors/chrome-extension/).
+ */
+const EXTENSION_URL = /^(?:(?:chrome|moz|safari|safari-web|ms-browser)-extension|webkit-masked-url):\/\/([^/\s)'"`:]*)/i;
+
+/** Every URL-shaped token (scheme://…) in `text`; `<anonymous>` and native frames name none. */
+function urlsIn(text: string): string[] {
+  return text.match(/\b[a-z][a-z0-9+.-]*:\/\/[^\s)'"`]*/gi) ?? [];
+}
+
+export interface ExtensionOrigin {
+  /** The extension's id (its URL's host). */
+  extensionId: string;
+  /** The first stack line naming a URL, else the source URL. */
+  firstFrame: string;
+}
+
+/**
+ * TELEMETRY.extension-errors — the extension an uncaught error came from, or
+ * null when it may be ours: it needs at least one URL (source or stack) and
+ * every URL an extension's. Any other URL (http(s), blob:, …) is ours.
+ */
+export function extensionOrigin(stack: string | null | undefined, source: string | null | undefined): ExtensionOrigin | null {
+  const urls = [...urlsIn(source ?? ''), ...urlsIn(stack ?? '')];
+  if (urls.length === 0) return null;
+  const ids = urls.map(u => EXTENSION_URL.exec(u)?.[1]);
+  if (ids.some(id => id === undefined)) return null;
+  const frame = (stack ?? '').split('\n').find(l => urlsIn(l).length > 0)?.trim() ?? source ?? '';
+  return { extensionId: ids[0] ?? '', firstFrame: frame };
+}
+
 /** Drop query strings and fragments from URLs (they carried ?account=&password= in dev links). */
 export function stripUrlQueries(text: string): string {
   return text.replace(/(\b[a-z][a-z0-9+.-]*:\/\/[^\s?#'"`)]*)[?#][^\s'"`)]*?(?=(?::\d+){1,2}(?=[\s)'"`]|$)|[\s'"`)]|$)/gi, '$1');
@@ -79,6 +123,7 @@ export class ErrorReporter {
   private readonly seen = new Map<string, number>();
   private sent = 0;
   private reports = 0;
+  private extensionSent = false;
   private readonly outbox: TelemetryOutbox;
 
   constructor(private readonly opts: ErrorReporterOptions) {
@@ -106,6 +151,32 @@ export class ErrorReporter {
     webglCause?: string | null; webglStatus?: string | null;
   } = {}): void {
     this.reports++;
+    this.post(kind, message, detail);
+  }
+
+  /**
+   * An uncaught error or rejection (install()'s listeners): one from a browser
+   * extension's own script goes to reportExtension, everything else to report.
+   */
+  reportUncaught(kind: 'error' | 'unhandledrejection', message: string, detail: {
+    stack?: string | null; source?: string | null; line?: number | null; column?: number | null;
+  } = {}): void {
+    const ext = extensionOrigin(detail.stack, detail.source);
+    if (ext) this.reportExtension(message, ext, detail);
+    else this.report(kind, message, detail);
+  }
+
+  /** TELEMETRY.extension-errors — not counted in reportCount; the page's first one is sent, later ones are dropped. */
+  private reportExtension(message: string, ext: ExtensionOrigin, detail: { source?: string | null; line?: number | null; column?: number | null }): void {
+    if (this.extensionSent) return;
+    this.extensionSent = true;
+    this.post('extension_error', message, { ...detail, stack: ext.firstFrame || null }, ext.extensionId || undefined);
+  }
+
+  private post(kind: ErrorKind, message: string, detail: {
+    stack?: string | null; source?: string | null; line?: number | null; column?: number | null;
+    webglCause?: string | null; webglStatus?: string | null;
+  }, extensionId?: string): void {
     if (!this.opts.endpoint) return;
     const msg = stripUrlQueries(String(message || 'Unknown error')).slice(0, 500);
     const source = detail.source ? stripUrlQueries(detail.source) : null;
@@ -132,6 +203,7 @@ export class ErrorReporter {
       count: 1,
       ...(detail.webglCause ? { webglCause: detail.webglCause.slice(0, 32) } : {}),
       ...(detail.webglStatus ? { webglStatus: stripUrlQueries(detail.webglStatus).slice(0, 120) } : {}),
+      ...(extensionId ? { extensionId: extensionId.slice(0, 80) } : {}),
     };
     this.outbox.retry();
     this.outbox.post(this.opts.endpoint, JSON.stringify(body));
@@ -160,7 +232,7 @@ export class ErrorReporter {
       // layout within one frame; nothing failed (the first report from a real
       // player, 2026-10-12, was this). Not a crash: don't report it.
       if (BENIGN_ERROR.test(e.message ?? '')) return;
-      this.report('error', e.message || String(e.error), {
+      this.reportUncaught('error', e.message || String(e.error), {
         stack: e.error instanceof Error ? e.error.stack ?? null : null,
         source: e.filename || null, line: e.lineno || null, column: e.colno || null,
       });
@@ -168,7 +240,7 @@ export class ErrorReporter {
     win.addEventListener('unhandledrejection', (ev: Event) => {
       const reason = (ev as PromiseRejectionEvent).reason;
       const message = reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason);
-      this.report('unhandledrejection', message, { stack: reason instanceof Error ? reason.stack ?? null : null });
+      this.reportUncaught('unhandledrejection', message, { stack: reason instanceof Error ? reason.stack ?? null : null });
     });
   }
 

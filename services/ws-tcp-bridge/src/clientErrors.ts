@@ -18,7 +18,7 @@ import { TRACE_PATTERN } from './clientPreworld.js';
 /** A browser profile's random id (renderer LoginTags.browserId; clientPreworld identityFields). */
 const BID_PATTERN = /^[0-9a-f]{8}$/;
 
-export type ClientErrorKind = 'error' | 'unhandledrejection' | 'webglcontextlost' | 'boot';
+export type ClientErrorKind = 'error' | 'unhandledrejection' | 'webglcontextlost' | 'boot' | 'extension_error';
 
 export interface ClientErrorReport {
   kind: ClientErrorKind;
@@ -43,6 +43,12 @@ export interface ClientErrorReport {
   webglCause?: WebGlFailureCause;
   /** The browser's creation-error statusMessage: plain characters only, at most WEBGL_STATUS_MAX. */
   webglStatus?: string;
+  /**
+   * TELEMETRY.extension-errors — on an extension_error (an uncaught error from a browser extension's own
+   * script, at most one per page, not counted in the page's error count): the extension's id. Anything
+   * not id-shaped is dropped.
+   */
+  extensionId?: string;
   /** The page's id for this report, the same on every resend (eventIds.ts): the bridge logs each once. */
   eid?: string;
 }
@@ -63,8 +69,11 @@ function webglStatus(v: unknown): string | null {
   return s.length > 0 ? scrubText(s) : null;
 }
 
+/** An extension id: Chrome's 32 a-p letters, Firefox's UUID / {UUID} / name@host, Safari's bundle-style ids. */
+const EXTENSION_ID_PATTERN = /^[A-Za-z0-9@._{}-]{1,80}$/;
+
 export const CLIENT_ERROR_MAX_BODY = 16 * 1024;
-const KINDS: readonly ClientErrorKind[] = ['error', 'unhandledrejection', 'webglcontextlost', 'boot'];
+const KINDS: readonly ClientErrorKind[] = ['error', 'unhandledrejection', 'webglcontextlost', 'boot', 'extension_error'];
 
 /** Remove query strings / fragments from URLs and redact credential-shaped pairs. */
 export function scrubText(text: string): string {
@@ -111,6 +120,8 @@ export function sanitizeClientError(body: unknown): ClientErrorReport | null {
       const status = cause ? webglStatus(b.webglStatus) : null;
       return { ...(cause ? { webglCause: cause } : {}), ...(status ? { webglStatus: status } : {}) };
     })(),
+    ...(kind === 'extension_error' && typeof b.extensionId === 'string' && EXTENSION_ID_PATTERN.test(b.extensionId)
+      ? { extensionId: b.extensionId } : {}),
     ...eidField(b.eid),
   };
 }

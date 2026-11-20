@@ -1930,7 +1930,7 @@ export class AgentApi {
         const out = this.deliverable(this.events.filter((x) => x.seq > w.since && this.matches(x, w.filter)));
         if (!out.length) continue;
         clearTimeout(w.timer);
-        this.waiters.splice(this.waiters.indexOf(w), 1);
+        this.dropWaiter(w);
         w.resolve(out);
       }
     }
@@ -4218,13 +4218,24 @@ export class AgentApi {
     };
   }
 
+  /**
+   * PERF.long-session-record-caps — a wait leaves with its vital / fellow start marks, however it ends (an event or
+   * its timeout): resolved-by-event waits kept theirs, one or two per ac_wait for a whole session.
+   */
+  private dropWaiter(w: AgentApi['waiters'][number]): void {
+    const i = this.waiters.indexOf(w);
+    if (i >= 0) this.waiters.splice(i, 1);
+    this.vitalWaitStart.delete(w);
+    this.fellowWaitStart.delete(w);
+  }
+
   /** Resolve with the matching events as soon as one arrives (or [] after timeoutMs). */
   waitFor(filter: AgentWaitFilter = {}, timeoutMs = 20_000): Promise<AgentEvent[]> {
     const since = filter.sinceSeq ?? this.seqN;
     const already = this.deliverable(this.events.filter((e) => e.seq > since && this.matches(e, filter)));
     if (already.length) return Promise.resolve(already);
     return new Promise((resolve) => {
-      const w = { filter, since, resolve, timer: setTimeout(() => { this.waiters.splice(this.waiters.indexOf(w), 1); this.vitalWaitStart.delete(w); this.fellowWaitStart.delete(w); resolve([]); }, timeoutMs) };
+      const w = { filter, since, resolve, timer: setTimeout(() => { this.dropWaiter(w); resolve([]); }, timeoutMs) };
       this.waiters.push(w);
       const s = this.host.self();
       if (s && (filter.healthBelow != null || filter.manaBelow != null || filter.staminaBelow != null)) { this.vitalWaitStart.set(w, this.vitalFracs(s)); this.checkVitalWaits(s); }
@@ -7756,6 +7767,11 @@ export class AgentApi {
     const me = this.host.self()?.guid;
     const gone = (g: number): string | null => {
       if (g === me) return null;
+      // Your own carried items are no world objects (main.ts keeps them out of the object manager), but a spell goes on
+      // one in a pack as on one wielded: the client selects it from the inventory (selectGuid) and ACE / GDLE take it
+      // (Player_Magic GetInventoryItem; GDLE g_pWorld->FindObject). A weapon buff cast on an item (classic, 1999 Blood
+      // Drinker) goes on the listed sword while the wand that casts it is in hand (BUG.vtank-melee-aura-wand-loop).
+      if (this.host.inventory().some((i) => i.guid >>> 0 === g >>> 0)) return null;
       const o = this.host.object(g);
       // A fellow out of the client's world is far more often through a portal or a recall than dead.
       const fellow = o ? undefined : (this.host.fellows?.() ?? []).find((f) => f.guid >>> 0 === g >>> 0);

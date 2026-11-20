@@ -404,6 +404,7 @@ import { buildContractRows, applyContractTracker, applyContractTrackerTable, typ
 import { harDumpText } from './chat/HouseAccessText.js';
 import { routeObjectSubject, buildInventoryEntry, WorldObjectRecords, PendingContainIds } from './network/objectSubjectRouting.js';
 import { NonWorldObjectRecords, placeKnownObjectByPosition } from './world/NonWorldObjectRecords.js';
+import { setBounded } from './world/BoundedRecords.js';
 import { placementObjectFromRecords } from './inventory/PlacementObjectOf.js';
 import { packSlotCounts } from './agent/packCounts.js';
 import { ItemShortcutRestorer, toolbarObjectMoved as toolbarObjectMovedOnBar, isShortcutEligible, shortcutDropRefusal1999, shortcutDropIntoContainer1999, type ShortcutTarget, type ShortcutItemInfo } from './network/itemShortcutRestore.js';
@@ -5660,7 +5661,10 @@ async function main() {
   // external container this session, so a take-back (which produces NO
   // fresh CreateObject for an already-known object) can restore them
   // losslessly into local inventory.
+  // PERF.long-session-record-caps — bounded (newest kept): each item SOLD lands here too (ACE's
+  // sell is a ContainId into the vendor, no delete), so a macro session's sales piled up.
   const storedItemStash: Map<number, import('@ac/shared').InventoryItem> = new Map();
+  const STORED_ITEM_STASH_CAP = 512;
   /**
    * BUG.ac1999-drop-not-shown — the CreateObject of each object created without a world record
    * (our own pack, worn, an open container's contents; createdNonWorldGuids below), and of each
@@ -5670,7 +5674,10 @@ async function main() {
    * BUG.ac1999-placement-item-not-valid — with the world records it is the client's object table:
    * the placement and UseObject read an object from it (inventory/PlacementObjectOf.ts).
    */
-  const nonWorldRecords = new NonWorldObjectRecords();
+  // PERF.long-session-record-caps — what the player carries or wears is never evicted by the cap.
+  const nonWorldRecords = new NonWorldObjectRecords(
+    (guid) => !!playerState.inventory.getItem(guid) || playerState.equipment.isEquipped(guid),
+  );
 
   // ── Vendor system ──────────────────────────────────────────────
   let activeVendorGuid = 0;
@@ -10178,7 +10185,7 @@ async function main() {
       handleObjectCreateOrUpdateInner(data, isUpdate);
       if (data.guid !== aceCharGuid) {
         if (serverObjectManager?.getObject(data.guid)) { createdNonWorldGuids.delete(data.guid); nonWorldRecords.forget(data.guid); }
-        else { createdNonWorldGuids.add(data.guid); nonWorldRecords.remember(data); }
+        else { createdNonWorldGuids.add(data.guid); for (const g of nonWorldRecords.remember(data)) createdNonWorldGuids.delete(g); }
       }
       // SmartBox::ProcessObjectNetBlobs @ 00454b20 — the queued messages now.
       pendingPlayScripts.replayFor(data.guid, performance.now());
@@ -10459,7 +10466,7 @@ async function main() {
         if (picked) {
           // BUG.ac1999-drop-not-shown — kept for a later drop (its world record goes now).
           const worldRec = serverObjectManager?.getObject(data.itemGuid)?.createData;
-          if (worldRec) nonWorldRecords.carryFromWorld(worldRec, data.containerGuid);
+          if (worldRec) for (const g of nonWorldRecords.carryFromWorld(worldRec, data.containerGuid)) createdNonWorldGuids.delete(g);
           serverObjectManager?.deleteObject(data.itemGuid, 'pickup');
           playerState.inventory.addItem(picked, data.itemGuid);
           if (joinsSidePackColumn({ ...picked, containerId: data.containerGuid }, aceCharGuid) && !sidePackGuids.includes(data.itemGuid)) {
@@ -10534,7 +10541,7 @@ async function main() {
       if (openContainerGuid && data.containerGuid === openContainerGuid) {
         const stored = playerState.inventory.getItem(data.itemGuid);
         if (stored) {
-          storedItemStash.set(data.itemGuid, { ...stored, containerId: data.containerGuid });
+          setBounded(storedItemStash, data.itemGuid, { ...stored, containerId: data.containerGuid }, STORED_ITEM_STASH_CAP);
           // BUG.death-items-stay-equipped — a worn item dropped straight into
           // the chest (ACE DequipToOffPlayerContainer, Player_Inventory.cs:1288)
           // leaves the equipment too.
@@ -10568,7 +10575,7 @@ async function main() {
           // RecvNotice_ServerSaysMoveItem @ 00563260: moved somewhere the
           // player no longer sees (a vendor, an NPC) → no longer selected.
           deselectIfSelected(left.id);
-          storedItemStash.set(left.id, left.id === data.itemGuid ? { ...left, containerId: data.containerGuid } : { ...left });
+          setBounded(storedItemStash, left.id, left.id === data.itemGuid ? { ...left, containerId: data.containerGuid } : { ...left }, STORED_ITEM_STASH_CAP);
           const packIdx = sidePackGuids.indexOf(left.id);
           if (packIdx > 0) { sidePackGuids.splice(packIdx, 1); gameUI.setSidePackGuids([...sidePackGuids]); }
           gameUI.onInventoryItemLeftPlayer(left.id);
@@ -10671,6 +10678,12 @@ async function main() {
         deselectIfSelected(data.guid);
         createdNonWorldGuids.delete(data.guid);
         nonWorldRecords.forget(data.guid);
+        // PERF.long-session-record-caps — what a deleted container held goes with it (retail's
+        // CObjectMaint drops contained weenies with their container). No server deletes a rotting
+        // corpse's contents one by one (ACE WorldObject.Destroy, GDLE / AC1999 RemoveEntity: a
+        // contained item has no landblock), so every looted corpse's items stayed for the session.
+        worldObjectRecords.forgetContainedIn(data.guid);
+        for (const g of nonWorldRecords.forgetContainedIn(data.guid)) createdNonWorldGuids.delete(g);
       },
 
       // ── Position & Movement ──
@@ -13992,7 +14005,7 @@ async function main() {
           removeWorldObject: (guid) => {
             // BUG.ac1999-drop-not-shown — kept for a later drop (its world record goes now).
             const worldRec = serverObjectManager?.getObject(guid)?.createData;
-            if (worldRec && aceCharGuid !== null) nonWorldRecords.carryFromWorld(worldRec, 0, aceCharGuid);
+            if (worldRec && aceCharGuid !== null) for (const g of nonWorldRecords.carryFromWorld(worldRec, 0, aceCharGuid)) createdNonWorldGuids.delete(g);
             serverObjectManager?.deleteObject(guid, 'wield');
           },
           equip: (it, location) => { playerState.equipment.equipItem(it, location as EquipMask, false); },
@@ -18095,6 +18108,7 @@ async function main() {
       if (agentStarted) return;
       agentStarted = true;
       const examined = new Map<number, string>();
+      const EXAMINED_CAP = 500;
       const agentCellGraphs = new Map<number, CellGraph>();
       // A landblock's cell graph for the agent's routes and map coordinates. One read while a streamed file was still in
       // flight may lack doors or floors: kept only when complete. The region's LandHeightTable: the terrain under each
@@ -18106,8 +18120,9 @@ async function main() {
         return g;
       };
       const showExamination = gameUI.showExaminationWindow.bind(gameUI);
-      gameUI.showExaminationWindow = (view) => { examined.set(view.guid, examineText(view)); showExamination(view); };
-      recordQuietExamine = (view) => { examined.set(view.guid, examineText(view)); };
+      // PERF.long-session-record-caps — the newest EXAMINED_CAP examinations (2-5 quiet ones a kill in a macro session).
+      gameUI.showExaminationWindow = (view) => { setBounded(examined, view.guid, examineText(view), EXAMINED_CAP); showExamination(view); };
+      recordQuietExamine = (view) => { setBounded(examined, view.guid, examineText(view), EXAMINED_CAP); };
       const schoolName = (s: MagicSchool): string => ({ [MagicSchool.WarMagic]: 'War', [MagicSchool.LifeMagic]: 'Life', [MagicSchool.ItemEnchantment]: 'Item', [MagicSchool.CreatureEnchantment]: 'Creature', [MagicSchool.VoidMagic]: 'Void' } as Record<number, string>)[s] ?? 'Other';
       const modeName = (): AgentSelf['combatMode'] => ({ [CombatMode.NonCombat]: 'peace', [CombatMode.Melee]: 'melee', [CombatMode.Missile]: 'missile', [CombatMode.Magic]: 'magic' } as Record<number, AgentSelf['combatMode']>)[combatController.mode] ?? 'unknown';
       // Where the object is now (its physics body / render position), not the last UpdatePosition (agent/livePlace.ts).

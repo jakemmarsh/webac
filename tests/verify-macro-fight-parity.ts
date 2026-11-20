@@ -161,6 +161,9 @@ describe('debuffs from items (§1.6; MOSS CombatItemDebuffPlanner)', () => {
     // A wand out of mana, or one whose Arcane Lore you lack, is no source.
     expect(planCombat({ ...byLevel, items: [WAND, { ...imperilWand, ints: { 106: 300, 107: 0 } }] })).toMatchObject({ kind: 'cast', spell: { id: 25 } });
     expect(planCombat({ ...byLevel, items: [WAND, { ...imperilWand, ints: { 106: 300, 109: 999 } }] })).toMatchObject({ kind: 'cast', spell: { id: 25 } });
+    // A wand whose last debuff use didn't go on is held (the macro's item hold): your own spell meanwhile, no wield.
+    expect(planCombat({ ...byLevel, debuffItemHeld: (g) => g === 830 })).toMatchObject({ kind: 'cast', spell: { id: 25 } });
+    expect(planCombat({ ...byLevel, debuffItemHeld: (g) => g === 999 })).toMatchObject({ kind: 'equip', item: { guid: 830 } });
   });
   it('a cast-on-strike weapon on the Items tab is wielded and swung until its debuff lands; the swing carries it', () => {
     const procSword: PlanItem = { guid: 831, name: 'Imperiling Sword', itemType: 0x1, ints: { 45: 0x1, 106: 350 }, spells: [1326], equipped: true };

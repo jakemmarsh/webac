@@ -25,6 +25,7 @@
  * names it.
  */
 import { PhysicsTimestamp, type CreateObjectData } from '@ac/network';
+import { forgetContainedRecords, setBounded } from './BoundedRecords.js';
 
 /** The 0xF748 fields placing the object (ServerMessageHandler UpdatePositionData). */
 export interface PlacingPosition {
@@ -39,23 +40,45 @@ export interface PlacingPosition {
 }
 
 export class NonWorldObjectRecords {
+  /**
+   * PERF.long-session-record-caps — the most records kept. Every opened corpse's contents and
+   * every item sold to a vendor (ACE's sell sends only a ContainId into the vendor, no delete)
+   * would otherwise stay for the session. `pinned` (what the player carries or wears) is never
+   * evicted, whatever its age.
+   */
+  static readonly CAP = 2048;
   private readonly records = new Map<number, CreateObjectData>();
 
-  /** A CreateObject / UpdateObject that made no world record (own pack, worn, an open container's contents). */
-  remember(data: CreateObjectData): void {
-    this.records.set(data.guid >>> 0, data);
+  constructor(private readonly pinned?: (guid: number) => boolean, private readonly cap = NonWorldObjectRecords.CAP) {}
+
+  /**
+   * A CreateObject / UpdateObject that made no world record (own pack, worn, an open container's
+   * contents). Returns the guids the cap evicted (oldest first).
+   */
+  remember(data: CreateObjectData): number[] {
+    return setBounded(this.records, data.guid >>> 0, data, this.cap, this.pinned);
   }
 
   /**
    * A world object taken into one of our containers (a pick-up, a loot, a wield off the ground):
-   * its world record leaves, and this keeps it for a later drop.
+   * its world record leaves, and this keeps it for a later drop. Returns the guids the cap evicted.
    */
-  carryFromWorld(data: CreateObjectData, containerGuid: number, wielderGuid = 0): void {
-    this.records.set(data.guid >>> 0, { ...data, containerId: containerGuid >>> 0, wielderId: wielderGuid >>> 0, position: null });
+  carryFromWorld(data: CreateObjectData, containerGuid: number, wielderGuid = 0): number[] {
+    return setBounded(this.records, data.guid >>> 0, { ...data, containerId: containerGuid >>> 0, wielderId: wielderGuid >>> 0, position: null }, this.cap, this.pinned);
   }
 
   forget(guid: number): void {
     this.records.delete(guid >>> 0);
+  }
+
+  /**
+   * PERF.long-session-record-caps — a container was deleted: what it held (nested packs included)
+   * goes with it, as retail's CObjectMaint drops contained weenies with their container. A pinned
+   * object (carried now; a record's containerId can be stale after a move between our packs)
+   * stays. Returns the forgotten guids.
+   */
+  forgetContainedIn(containerGuid: number): number[] {
+    return forgetContainedRecords(this.records, containerGuid, this.pinned);
   }
 
   /** A SetStackSize (0x197) for a known object: its record carries the new count and value. */

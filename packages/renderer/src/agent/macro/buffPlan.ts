@@ -27,7 +27,7 @@
  * Inference (marked INF in the behaviour doc, §11 item 5): which non-skill
  * creature/life buffs VTank counts as "always" (here: all six attributes,
  * natural armor and the three regeneration buffs; not max-vital buffs), and
- * which weapon auras it keeps (here: by the wielded weapon's kind).
+ * which weapon auras it keeps (here: by the kinds of the weapons the profile fights and casts with).
  */
 import { vtOption } from '@ac/shared';
 import type { PlanEnchantment, PlanSkill, PlanSpell } from '@ac/shared';
@@ -67,6 +67,14 @@ export interface BuffFamily {
   target: BuffTarget;
   /** Members whose own description names a different target (e.g. a quest spell filed in the family's category): never chosen for it. */
   exclude: Set<number>;
+  /**
+   * Another category raises the same thing with more spells (its ladder, I to VIII): this one is a layer
+   * over it, such as the item cantrips (Minor … Legendary Sprint, category 369 at end of retail, "Additional
+   * spells can be layered over this"), a ring's Night Runner filed with them, or a Prodigal spell in a category
+   * of its own. VTank keeps one spell per skill or attribute, the ladder's, so a layer is kept up only when
+   * Extra Buff Spells names it.
+   */
+  layer?: boolean;
 }
 
 export interface BuffFamilies {
@@ -216,6 +224,21 @@ export function buildBuffFamilies(
     const school = [...schools].sort((a, b) => b[1] - a[1])[0][0];
     byCategory.set(category, { category, school, target, exclude });
   }
+  // One family per target: the category with the most spells is the ladder, the others layer over it.
+  // Ties go to the lower category id. (Night Runner, 3849, a 60 s ring spell the only self spell of end of
+  // retail's Sprint cantrip category, was wanted beside Sprint Self and recast every 3 s, 2026-11-19.)
+  const ladder = new Map<string, number>();
+  for (const f of byCategory.values()) {
+    if (f.target.kind === 'other') continue;
+    const k = targetKey(f.target);
+    const cur = ladder.get(k);
+    const n = groups.get(f.category)!.length;
+    const curN = cur === undefined ? -1 : groups.get(cur)!.length;
+    if (n > curN || (n === curN && f.category < cur!)) ladder.set(k, f.category);
+  }
+  for (const f of byCategory.values()) {
+    if (f.target.kind !== 'other' && ladder.get(targetKey(f.target)) !== f.category) f.layer = true;
+  }
   return { byCategory, byName };
 }
 
@@ -232,8 +255,15 @@ export interface BuffPlanInput {
   families: BuffFamilies;
   /** Your character level, for BuffWithUntrained-* (untrained schools stop buffing above it). Unknown: untrained schools are used. */
   level?: number;
-  /** The wielded weapon's kind, for the weapon auras; none or unknown: no auras. */
-  wielded?: 'melee' | 'missile' | 'caster' | null;
+  /**
+   * The kinds of weapon you fight and cast with, for the weapon auras: an aura is wanted when any of them takes it
+   * (VTank buffs each Items-tab weapon not added "no buffs", docs/vtank-macro-behavior.md §5). One kind, or none / unknown:
+   * no auras. The caller passes every listed weapon's kind, not only the one in hand: keyed on the hand alone, a melee
+   * routine that buffs with a wand wanted Blood Drinker with the sword in hand, wielded the wand to cast it, then no longer
+   * wanted it (a wand takes caster auras), so combat wielded the sword back and it went round for ever, Blood Drinker never
+   * cast (BUG.vtank-melee-aura-wand-loop, 2026-11-19).
+   */
+  wielded?: WeaponKindName | readonly WeaponKindName[] | null;
   /**
    * Seconds left on a buff that goes on items (a bane or impenetrability on your armor, a weapon spell
    * cast on the weapon), from the macro's own timers (itemBuffLedger.ts: VTank's BuffedItems), or null
@@ -241,7 +271,7 @@ export interface BuffPlanInput {
    * buff always looks missing and is cast again and again. Not called for a weapon aura cast on
    * yourself (end of retail's Aura spells sit on you and show in `active`).
    */
-  itemRemaining?: (target: 'weapon' | 'armor', spell: PlanSpell) => number | null;
+  itemRemaining?: (target: 'weapon' | 'armor', spell: PlanSpell, aura?: WeaponAura) => number | null;
   /**
    * BuffCastRecast: seconds added to both rebuff thresholds because a buff was cast within
    * BuffCastRecastReset_Seconds (the caller keeps that clock); 0 or absent otherwise.
@@ -266,6 +296,8 @@ export interface BuffPlanInput {
 
 export interface PlannedBuff {
   spell: PlanSpell; target: 'self' | 'weapon' | 'shield' | 'armor'; why: string; remaining: number | null;
+  /** A weapon buff's aura (what it raises): which of your weapons it goes on when it is cast on an item (not an Aura on you). */
+  aura?: WeaponAura;
   /**
    * A stronger spell of the family you know but can't reliably land: your buffed skill in its school is under its power +
    * SpellDiffExcessThreshold-Buff (VTank's rule), so `spell` is the best castable level. Said in the routine's log.
@@ -284,12 +316,17 @@ export interface UntrainedBuff { category: number; skill: string; spell: PlanSpe
 /** A family you want up whose only spells you know go on someone else (Other spells): never cast as a self buff. */
 export interface NoSelfBuff { category: number; why: string; /** The best Other spell of it you know. */ other: PlanSpell }
 
-/** Weapon auras by wielded kind (INF): melee and missile weapons take damage, speed, attack and defense; casters mana conversion, elemental damage and defense. */
-const AURAS: Record<'melee' | 'missile' | 'caster', WeaponAura[]> = {
+export type WeaponKindName = 'melee' | 'missile' | 'caster';
+
+/** Weapon auras by weapon kind (INF): melee and missile weapons take damage, speed, attack and defense; casters mana conversion, elemental damage and defense. */
+export const WEAPON_AURAS: Record<WeaponKindName, readonly WeaponAura[]> = {
   melee: ['damage', 'speed', 'attack', 'defense'],
   missile: ['damage', 'speed', 'attack', 'defense'],
   caster: ['manaConversion', 'elemental', 'defense'],
 };
+
+/** ACE ItemType MeleeWeapon 0x1 | MissileWeapon 0x100 | Caster 0x8000: a spell whose target type has one goes on a weapon. */
+const WEAPON_ITEM_TYPES = 0x1 | 0x100 | 0x8000;
 
 /** The plan's order: creature first, then life, then item (attributes, skills, vitals, armor, prots, banes, weapon). */
 const KIND_ORDER: BuffTarget['kind'][] = ['attribute', 'skill', 'vitalRegen', 'vitalMax', 'naturalArmor', 'protection', 'bane', 'armorValue', 'weapon', 'other'];
@@ -333,6 +370,7 @@ export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: P
   const threshold = num(setting(settings, 'SpellDiffExcessThreshold-Buff'), 5);
   // BuffCastRecast raises both thresholds for a while after a buff; VTank never goes below 10 s.
   const recast = Math.max(0, input.recastExtra ?? 0);
+  const rebuffBase = Math.max(10, num(setting(settings, 'RebuffTimeRemainingSeconds'), 300));
   const rebuffAt = Math.max(10, num(setting(settings, 'RebuffTimeRemainingSeconds'), 300) + recast);
   const topoffAt = Math.max(10, num(setting(settings, 'IdleBuffTopoffTimeSeconds'), 1200) + recast);
   const topoff = input.idle && bool(setting(settings, 'IdleBuffTopoff'));
@@ -344,6 +382,7 @@ export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: P
     4: num(setting(settings, 'BuffWithUntrained-Creature'), 80),
   };
 
+  const weaponKinds: readonly WeaponKindName[] = input.wielded == null ? [] : typeof input.wielded === 'string' ? [input.wielded] : input.wielded;
   const skillById = new Map(input.skills.map((s) => [s.id, s]));
   const skillByName = new Map(input.skills.map((s) => [normSkill(s.name), s]));
   const skillFor = (t: { skill: string; skillId?: number }): PlanSkill | undefined =>
@@ -365,6 +404,7 @@ export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: P
   const wantFamily = (f: BuffFamily): string | null => {
     if (blacklisted.has(f.category)) return null;
     if (extra.has(f.category)) return 'Extra Buff Spells';
+    if (f.layer) return null;
     const t = f.target;
     switch (t.kind) {
       case 'attribute': return `attribute ${t.attribute}`;
@@ -374,7 +414,7 @@ export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: P
       case 'protection': return prots.has(t.element) ? `protection ${t.element}` : null;
       case 'bane': return banes.has(t.element) ? `bane ${t.element}` : null;
       case 'armorValue': return banes.size > 0 ? 'armor value' : null;
-      case 'weapon': return input.wielded && AURAS[input.wielded].includes(t.aura) ? `weapon aura ${t.aura}` : null;
+      case 'weapon': return weaponKinds.some((k) => WEAPON_AURAS[k].includes(t.aura)) ? `weapon aura ${t.aura}` : null;
       default: return null;
     }
   };
@@ -409,23 +449,30 @@ export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: P
     const why = wantFamily(f);
     if (!why) {
       // An untrained skill's family you could cast on yourself: not VTank's to keep up (said once by the macro).
-      if (f.target.kind === 'skill' && !blacklisted.has(f.category)) {
+      if (f.target.kind === 'skill' && !f.layer && !blacklisted.has(f.category)) {
         const sk = skillFor(f.target);
         const self = known.filter((s) => !f.exclude.has(s.id) && onYou(s));
-        if (self.length && sk && !trained(sk)) untrained.push({ category, skill: sk.name, spell: self.reduce((a, b) => (b.power > a.power ? b : a)) });
+        const lasting = self.filter((s) => !(s.duration > 0 && s.duration <= rebuffBase));
+        if (self.length && sk && !trained(sk)) untrained.push({ category, skill: sk.name, spell: (lasting.length ? lasting : self).reduce((a, b) => (b.power > a.power ? b : a)) });
       }
       continue;
     }
     // VTank buffs only itself (its BuffSelfNormal / BuffSelfIdle rules): a Self and an Other spell share a family
     // (the category), but the Other one can't target you. Knowing only Shield Mastery Other IV, the macro picked it
     // for trained Shield and the client refused it every buff cycle (Claude Arcanist, 2026-10-17 00:02:32Z).
+    // A weapon spell that goes on a weapon item (Blood Drinker in 1999, whose client refuses every non-Self spell at you,
+    // @ 0x4d20c0) is yours too: it is cast at your own weapon (the macro picks which), not at you.
     const mine = known.filter((s) => !f.exclude.has(s.id));
-    const selfable = mine.filter(onYou);
+    const selfable = mine.filter((s) => onYou(s) || (f.target.kind === 'weapon' && !s.self && ((s.targetType ?? 0) & WEAPON_ITEM_TYPES) !== 0));
     if (mine.length && !selfable.length) {
       noSelf.push({ category, why, other: mine.reduce((a, b) => (b.power > a.power ? b : a)) });
       continue;
     }
+    // A level that lasts no longer than the rebuff threshold would be due again the moment it lands (Tusker
+    // Sprint, 60 s at power 401, outranks Incantation of Sprint Self's 400; Aerbax's Melee Shield, 180 s at 800):
+    // the best lasting level is kept, a short one only when nothing lasting is castable.
     let best: PlanSpell | undefined;
+    let bestShort: PlanSpell | undefined;
     let over: { spell: PlanSpell; skill: number; need: number; chance?: number; bar?: number } | undefined;
     for (const s of selfable) {
       const skill = schoolSkill(s.school);
@@ -435,18 +482,21 @@ export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: P
         continue;
       }
       if (skill === null) continue;
-      if (!best || s.power > best.power || (s.power === best.power && s.self && !best.self)) best = s;
+      const better = (cur: PlanSpell | undefined): boolean => !cur || s.power > cur.power || (s.power === cur.power && s.self && !cur.self);
+      if (s.duration > 0 && s.duration <= rebuffBase) { if (better(bestShort)) bestShort = s; continue; }
+      if (better(best)) best = s;
     }
+    best ??= bestShort;
     if (!best) continue;
     const stronger = over && over.spell.power > best.power ? over : undefined;
     const t = f.target.kind;
     const target: PlannedBuff['target'] = t === 'bane' || t === 'armorValue' ? 'armor' : t === 'weapon' ? 'weapon' : 'self';
     let remaining = remainingFor(input.active, category, input.spells, best);
     if (input.itemRemaining && (target === 'armor' || (target === 'weapon' && !best.self))) {
-      const onItem = input.itemRemaining(target, best);
+      const onItem = input.itemRemaining(target, best, f.target.kind === 'weapon' ? f.target.aura : undefined);
       if (onItem !== null && (remaining === null || onItem > remaining)) remaining = onItem;
     }
-    wanted.push({ spell: best, target, why, remaining, order: KIND_ORDER.indexOf(t), ...(stronger ? { stronger } : {}) });
+    wanted.push({ spell: best, target, why, remaining, order: KIND_ORDER.indexOf(t), ...(f.target.kind === 'weapon' ? { aura: f.target.aura } : {}), ...(stronger ? { stronger } : {}) });
   }
   wanted.sort((a, b) => a.order - b.order || a.spell.category - b.spell.category);
   const out: PlannedBuff[] = wanted.map(({ order: _o, ...b }) => b);
@@ -454,8 +504,19 @@ export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: P
   noSelf.sort((a, b) => a.category - b.category);
   untrained.sort((a, b) => a.category - b.category);
   if (!bool(setting(settings, 'EnableBuffing'))) return { wanted: out, due: [], noSelf, untrained };
-  const due = out.filter((b) => b.remaining === null || b.remaining < rebuffAt || (topoff && b.remaining < topoffAt));
+  const under = (b: PlannedBuff, at: number): boolean => b.remaining! < dueThreshold(at, b.spell.duration);
+  const due = out.filter((b) => b.remaining === null || under(b, rebuffAt) || (topoff && under(b, topoffAt)));
   return { wanted: out, due, noSelf, untrained };
+}
+
+/**
+ * The seconds-left line under which a buff of `duration` seconds is due, for a rebuff threshold of `at`. A
+ * threshold at or over the spell's whole duration would make it due the moment it lands (every AC1999 self
+ * buff lasts 150 to 300 s against VTank's default 300 s; Night Runner, 60 s), so such a buff is due at half
+ * its duration instead. A duration of 0 or less (unknown, permanent) leaves the threshold as it is.
+ */
+export function dueThreshold(at: number, duration: number): number {
+  return duration > 0 && at >= duration ? duration / 2 : at;
 }
 
 /**

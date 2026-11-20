@@ -255,6 +255,42 @@ describe('planBuffs: which spell of each family', () => {
     expect(pick(caster, 'Aura of Thirst')).toBeUndefined();
     expect(BLOOD.length + HERM.length).toBe(16);
   });
+
+  it('BUG.vtank-melee-aura-wand-loop: the auras follow every weapon the profile fights and casts with, not the one in hand', () => {
+    // A melee character that buffs with an Items-tab wand: both kinds, so both sets of auras, whatever is in hand.
+    const both = planBuffs(baseInput({ wielded: ['melee', 'caster'] })).wanted;
+    expect(pick(both, 'Aura of Thirst')!.target).toBe('weapon');
+    expect(pick(both, 'Aura of Focus')!.target).toBe('weapon');
+    // The wand listed "Add (no buffs)": the caller passes the sword's kind alone, so with the wand in hand to cast it,
+    // Blood Drinker is still wanted (keyed on the hand it was not, and the macro wielded the sword back unbuffed).
+    const melee = planBuffs(baseInput({ wielded: ['melee'] }));
+    expect(pick(melee.wanted, 'Aura of Thirst')).toBeDefined();
+    expect(pick(melee.due, 'Aura of Thirst')).toBeDefined();
+    expect(pick(melee.wanted, 'Aura of Focus')).toBeUndefined();
+    // The inverse: a pure caster keeps caster auras only, a missile character missile ones, none without a weapon.
+    expect(pick(planBuffs(baseInput({ wielded: ['caster'] })).wanted, 'Aura of Thirst')).toBeUndefined();
+    expect(pick(planBuffs(baseInput({ wielded: ['caster'] })).wanted, 'Aura of Focus')).toBeDefined();
+    expect(pick(planBuffs(baseInput({ wielded: ['missile'] })).wanted, 'Aura of Thirst')).toBeDefined();
+    expect(pick(planBuffs(baseInput({ wielded: [] })).wanted, 'Aura of')).toBeUndefined();
+    // Each weapon buff says its aura (which weapon a buff cast on an item goes on).
+    expect(pick(both, 'Aura of Thirst')!.aura).toBe('damage');
+    expect(pick(both, 'Aura of Focus')!.aura).toBe('manaConversion');
+  });
+
+  it('a weapon spell cast on an item (1999 Blood Drinker: the client refuses it at you) is still planned, for the weapon; its timer is asked with the aura', () => {
+    // 1999: the item spells are not Self and target items (0xa090f); the era's client refuses every non-Self spell at you.
+    const spells = knowAll().map((s) => (s.category === 154 ? { ...s, self: false, targetType: 0xa090f } : s));
+    const asked: Array<string | undefined> = [];
+    const itemRemaining = (_t: 'weapon' | 'armor', _s: PlanSpell, aura?: string): number | null => { asked.push(aura); return null; };
+    const r = planBuffs(baseInput({ spells, wielded: ['melee', 'caster'], castsOnYou: (s) => s.self, itemRemaining }));
+    expect(pick(r.due, 'Aura of Thirst')!.target).toBe('weapon');
+    expect(r.noSelf.some((x) => x.category === 154)).toBe(false);
+    expect(asked).toContain('damage');
+    // A creature-only Other spell (Shield Mastery Other) is still never cast on you.
+    const other = knowAll().map((s) => (s.category === 31 ? { ...s, self: false, targetType: 0x10 } : s));
+    const r2 = planBuffs(baseInput({ spells: other, castsOnYou: (s) => s.self || ((s.targetType ?? 0) & 0x8107) !== 0 }));
+    expect(r2.noSelf.some((x) => x.category === 31)).toBe(true);
+  });
 });
 
 describe('planBuffs: what is due', () => {
@@ -299,6 +335,90 @@ describe('planBuffs: what is due', () => {
   });
 });
 
+// ── BUG.vtank-buff-recast-loop (2026-11-19): one spell per skill, and no level that is due the moment it lands ──
+
+describe('a buff the plan would want again the moment it lands (BUG.vtank-buff-recast-loop)', () => {
+  // End of retail's Run skill, in the table's own shape: the Sprint ladder (category 77) with Tusker Sprint, a 60 s
+  // quest spell at power 401, filed in it; the item cantrips (369, "Additional spells can be layered over this") with
+  // Night Runner, a ring's 60 s self spell at power 350; and Prodigal Sprint, 900 s, alone in its category (500).
+  const RUN = 24;
+  const rr: Array<[number, Row]> = [];
+  const row = (id: number, name: string, category: number, power: number, duration: number, desc: string, self = true): number => {
+    rr.push([id, { name, category, school: CREATURE, bitfield: BENEFICIAL | (self ? SELF : 0), power, duration, desc }]);
+    return id;
+  };
+  const SPRINT = [1, 50, 100, 150, 200, 250].map((pw, i) => row(982 + i, `Sprint Self ${['I', 'II', 'III', 'IV', 'V', 'VI'][i]}`, 77, pw, i === 5 ? 2700 : 1800, `Increases the caster's Run skill by ${10 + 5 * i} points.`));
+  for (let i = 0; i < 6; i++) row(988 + i, `Sprint Other ${i + 1}`, 77, LEVELS[i], 1800, `Increases the target's Run skill by ${10 + 5 * i} points.`, false);
+  const INCANTATION = row(4616, 'Incantation of Sprint Self', 77, 400, 5400, "Increases the caster's Run skill by 45 points.");
+  const TUSKER = row(2933, 'Tusker Sprint', 77, 401, 60, 'Boosts casters run skill by 100 for a short time.');
+  for (const [cid, n, pw] of [[2564, 'Minor Sprint', 1], [2529, 'Major Sprint', 2], [4710, 'Epic Sprint', 25], [6071, 'Legendary Sprint', 35]] as const) {
+    row(cid, n, 369, pw, 780, `Increases the target's Run skill by ${pw} points. Additional spells can be layered over this.`, false);
+  }
+  const NIGHT_RUNNER = row(3849, 'Night Runner', 369, 350, 60, 'The energies imbued upon this ring surge through you, increasing your run skill by 40. Additional effects can be layered on top of this.');
+  row(3736, 'Prodigal Sprint', 500, 600, 900, "Increases the caster's Run skill by 250 points.");
+  const T = { spells: new Map(rr) };
+  const fams = buildBuffFamilies(T, [[RUN, 'Run'], [31, 'Creature Enchantment']]);
+  const p = (sid: number): PlanSpell => {
+    const r = T.spells.get(sid)!;
+    return { id: sid, name: r.name, school: 'Creature Enchantment', category: r.category, power: r.power, self: !!(r.bitfield & SELF), buff: true, duration: r.duration ?? 0 };
+  };
+  // An admin who knows every one of them, Run trained and skill enough for all.
+  const input = (over: Partial<BuffPlanInput> = {}): BuffPlanInput => ({
+    spells: [...T.spells.keys()].map(p), skills: [sk(RUN, 'Run', 'trained', 300), sk(31, 'Creature Enchantment', 'specialized', 900)],
+    active: [], settings: {}, extraBuffs: [], blacklistedBuffs: [], idle: false, families: fams, castsOnYou: (s) => s.self, ...over,
+  });
+  const on = (sid: number, remaining: number) => ({ spellId: sid, name: T.spells.get(sid)!.name, category: T.spells.get(sid)!.category, power: T.spells.get(sid)!.power, remaining });
+
+  it('Run is one family, the Sprint ladder: the cantrip category and Prodigal Sprint layer over it', () => {
+    expect(fams.byCategory.get(77)!.layer).toBeFalsy();
+    expect(fams.byCategory.get(369)).toMatchObject({ target: { kind: 'skill', skillId: RUN }, layer: true });
+    expect(fams.byCategory.get(500)).toMatchObject({ layer: true });
+  });
+
+  it('Night Runner is never planned: not with nothing up, not with a stronger Run buff up, not with itself up', () => {
+    for (const active of [[], [on(INCANTATION, 5000)], [on(NIGHT_RUNNER, 58)], [on(NIGHT_RUNNER, 58), on(INCANTATION, 5000)]]) {
+      const r = planBuffs(input({ active }));
+      expect(names(r.wanted)).toEqual(['Incantation of Sprint Self']);
+      expect(names(r.due)).not.toContain('Night Runner');
+      expect(names(r.due)).not.toContain('Prodigal Sprint');
+      expect(r.untrained).toEqual([]);
+    }
+    // Incantation up: nothing about Run is due.
+    expect(planBuffs(input({ active: [on(NIGHT_RUNNER, 58), on(INCANTATION, 5000)] })).due).toEqual([]);
+    // Run untrained: the "not kept up" note names the ladder's spell, no layer's.
+    expect(planBuffs(input({ skills: [sk(RUN, 'Run', 'untrained', 50), sk(31, 'Creature Enchantment', 'specialized', 900)] })).untrained.map((u) => u.spell.name)).toEqual(['Incantation of Sprint Self']);
+  });
+
+  it('Extra Buff Spells naming Night Runner keeps it; with 58 of its 60 s left it is not due, at 20 s it is', () => {
+    const extra = (active: ReturnType<typeof on>[]) => planBuffs(input({ extraBuffs: ['Night Runner'], active }));
+    expect(names(extra([]).wanted)).toContain('Night Runner');
+    expect(names(extra([on(NIGHT_RUNNER, 58)]).due)).not.toContain('Night Runner');
+    expect(names(extra([on(NIGHT_RUNNER, 20)]).due)).toContain('Night Runner');
+  });
+
+  it('a level shorter than the rebuff threshold is passed over for a lasting one (Tusker Sprint, 401 for 60 s, below Incantation, 400)', () => {
+    expect(names(planBuffs(input({ spells: [TUSKER, INCANTATION, ...SPRINT].map(p) })).wanted)).toEqual(['Incantation of Sprint Self']);
+    // Knowing only the short one, it is used, and due only once half of it has run.
+    const short = (left: number | null) => names(planBuffs(input({ spells: [p(TUSKER)], active: left === null ? [] : [on(TUSKER, left)] })).due);
+    expect(short(55)).toEqual([]);
+    expect(short(29)).toEqual(['Tusker Sprint']);
+    expect(short(null)).toEqual(['Tusker Sprint']);
+  });
+
+  it('AC1999-length buffs (300 s against the default 300 s threshold) are not due on landing; half gone or expired, they are', () => {
+    const t = { spells: new Map<number, Row>([[2, { name: 'Strength Self I', category: 1, school: CREATURE, bitfield: BENEFICIAL | SELF, power: 1, duration: 300, desc: "Increases the caster's Strength by 10 points." }]]) };
+    const f = buildBuffFamilies(t, []);
+    const s: PlanSpell = { id: 2, name: 'Strength Self I', school: 'Creature Enchantment', category: 1, power: 1, self: true, buff: true, duration: 300 };
+    const due = (left: number | null, spell = s) => names(planBuffs({ ...input(), families: f, spells: [spell], active: left === null ? [] : [{ spellId: 2, name: s.name, remaining: left }] }).due);
+    expect(due(299)).toEqual([]);
+    expect(due(149)).toEqual(['Strength Self I']);
+    expect(due(null)).toEqual(['Strength Self I']);
+    // A lasting buff keeps the plain rule: 299 of 1800 s left is due, 301 is not.
+    expect(due(299, { ...s, duration: 1800 })).toEqual(['Strength Self I']);
+    expect(due(301, { ...s, duration: 1800 })).toEqual([]);
+  });
+});
+
 // ── the real tables ──
 
 const REPO = resolve(__dirname, '..');
@@ -319,6 +439,27 @@ const categoryOf = (t: SpellTable, name: string): number => {
   const hit = [...t.spells.values()].find((s) => s.name === name);
   if (!hit) throw new Error(`no spell ${name}`);
   return hit.category;
+};
+
+/**
+ * BUG.vtank-buff-recast-loop sweep over an era's real table: an admin who knows every spell, every skill
+ * specialized at 2000, every element and aura wanted. Each skill / attribute / element gets one buff, and no
+ * planned buff is due again once it has landed (its whole duration left, less the 3 s a cast takes).
+ */
+const adminSweep = (t: SpellTable, f: BuffFamilies) => {
+  const SCHOOL: Record<number, string> = { 1: 'War Magic', 2: 'Life Magic', 3: 'Item Enchantment', 4: 'Creature Enchantment', 5: 'Void Magic' };
+  const spells: PlanSpell[] = [...t.spells].filter(([, s]) => s.bitfield & 0x4).map(([id, s]) => ({ id, name: s.name, school: SCHOOL[s.school], category: s.category, power: s.power, self: !!(s.bitfield & 8), buff: (s.duration ?? 0) > 0, duration: s.duration ?? 0 }));
+  const skillNames = new Map<string, number>(Object.values(SCHOOL).map((n, i) => [n, 1000 + i]));
+  for (const fam of f.byCategory.values()) if (fam.target.kind === 'skill') skillNames.set(fam.target.skill, fam.target.skillId ?? 2000 + skillNames.size);
+  const skills = [...skillNames].map(([n, id]) => sk(id, n, 'specialized', 2000));
+  const base: BuffPlanInput = { spells, skills, active: [], settings: {}, extraBuffs: [], blacklistedBuffs: [], idle: false, families: f, wielded: 'melee', castsOnYou: (s) => s.self };
+  const { wanted } = planBuffs(base);
+  const keys = wanted.map((b) => JSON.stringify({ ...f.byCategory.get(b.spell.category)!.target, skillId: undefined }));
+  const twice = keys.filter((k, i) => keys.indexOf(k) !== i);
+  const self = wanted.filter((b) => b.target === 'self');
+  const landed = self.map((b) => ({ spellId: b.spell.id, name: b.spell.name, category: b.spell.category, power: b.spell.power, remaining: b.spell.duration - 3 }));
+  const dueAfter = names(planBuffs({ ...base, active: landed }).due.filter((b) => b.target === 'self'));
+  return { wanted, twice, dueAfter, self };
 };
 
 describe.skipIf(!existsSync(PORTAL))('end-of-retail SpellTable families', () => {
@@ -361,6 +502,18 @@ describe.skipIf(!existsSync(PORTAL))('end-of-retail SpellTable families', () => 
     expect(names(run(300))).toEqual(['Strength Self VI', 'Heavy Weapon Mastery Self VI', 'Acid Bane VI']); // 300 + 5 > 300
     expect(names(run(305))).toEqual(['Might of the Lugians', 'Heavy Weapon Mastery Self VII', 'Acid Bane VI']); // the EoL table names this VII "Self VII"
     expect(names(run(405))[0]).toBe('Incantation of Strength Self');
+  });
+
+  it('an admin who knows every spell: one buff per skill, never Night Runner, none due again once it landed (BUG.vtank-buff-recast-loop)', () => {
+    expect(t.spells.get(3849)).toMatchObject({ name: 'Night Runner', duration: 60 });
+    expect(f.byCategory.get(t.spells.get(3849)!.category)!.layer).toBe(true);
+    const r = adminSweep(t, f);
+    expect(r.twice).toEqual([]);
+    expect(names(r.wanted)).not.toContain('Night Runner');
+    expect(names(r.wanted)).toContain('Incantation of Sprint Self');
+    for (const short of ['Night Runner', 'Tusker Sprint', "Aerbax's Melee Shield", 'Harbinger Melee Defense', "Master's Innervation", 'Licorice Leap']) expect(names(r.wanted)).not.toContain(short);
+    expect(r.self.length).toBeGreaterThan(40);
+    expect(r.dueAfter).toEqual([]);
   });
 });
 
@@ -412,6 +565,14 @@ describe.skipIf(!existsSync(DM_PORTAL))('Dark Majesty-era SpellTable families', 
     expect(f.byCategory.get(categoryOf(r.spells, 'Sword Mastery Self I'))!.target).toEqual({ kind: 'skill', skill: 'Sword', skillId: 11 });
     expect(f.byCategory.get(categoryOf(r.spells, 'Strength Self I'))!.target).toEqual({ kind: 'attribute', attribute: 'Strength' });
   });
+
+  it('an admin who knows every spell: one buff per skill, none due again once it landed (BUG.vtank-buff-recast-loop)', () => {
+    const r = readTables(DM_PORTAL);
+    const sw = adminSweep(r.spells, buildBuffFamilies(r.spells, r.skills));
+    expect(sw.twice).toEqual([]);
+    expect(sw.self.length).toBeGreaterThan(30);
+    expect(sw.dueAfter).toEqual([]);
+  });
 });
 
 describe.skipIf(!existsSync(AC1999_PORTAL))('AC1999 SpellTable families', () => {
@@ -427,6 +588,15 @@ describe.skipIf(!existsSync(AC1999_PORTAL))('AC1999 SpellTable families', () => 
       .map(([id, s]): PlanSpell => ({ id, name: s.name, school: 'Creature Enchantment', category: s.category, power: s.power, self: true, buff: true, duration: s.duration ?? 0 }));
     const w = planBuffs({ spells: known, skills: [sk(31, 'Creature Enchantment', 'trained', 160), sk(11, 'Sword', 'trained', 100)], active: [], settings: {}, extraBuffs: [], blacklistedBuffs: [], idle: false, families: f }).wanted;
     expect(names(w)).toEqual(['Sword Mastery Self IV']);
+  });
+
+  it('every 1999 self buff lasts 150 to 300 s: none is due again once it landed, against the default 300 s threshold (BUG.vtank-buff-recast-loop)', () => {
+    const r = readTables(AC1999_PORTAL, true);
+    const sw = adminSweep(r.spells, buildBuffFamilies(r.spells, r.skills));
+    expect(sw.twice).toEqual([]);
+    expect(sw.self.length).toBeGreaterThan(20);
+    expect(Math.max(...sw.self.map((b) => b.spell.duration))).toBeLessThanOrEqual(300);
+    expect(sw.dueAfter).toEqual([]);
   });
 });
 

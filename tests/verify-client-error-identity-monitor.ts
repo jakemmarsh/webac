@@ -14,6 +14,7 @@ import { sanitizeClientError } from '../services/ws-tcp-bridge/src/clientErrors.
 import { sanitizeClientWorld } from '../services/ws-tcp-bridge/src/clientWorld.js';
 import { WorldReporter, type WorldEvent } from '../packages/renderer/src/telemetry/WorldReporter.js';
 import { formatLogLine } from '../services/ws-tcp-bridge/src/log.js';
+import { ErrorReporter } from '../packages/renderer/src/telemetry/ErrorReporter.js';
 
 const FILTER = path.join(__dirname, '..', 'tools', 'monitor', 'launch-filter.sh');
 
@@ -48,6 +49,21 @@ describe('launch-filter.sh with trace / bid on client_error', () => {
       bridgeLine({ kind: 'webglcontextlost', message: 'WebGL context lost', screen: 'world' }),
     ]);
     expect(out.trim()).toBe('');
+  });
+
+  it('TELEMETRY.extension-errors: the page\'s extension_error line (the real ErrorReporter body) is dropped; an error with one of our frames still alerts', () => {
+    const EXT = 'chrome-extension://eppiocemhmnlbhjplcgkofciiegomcon/executors/200.js';
+    const bodies: Array<Record<string, unknown>> = [];
+    const r = new ErrorReporter({ endpoint: 'https://b/client-errors', build: 'b1', screen: () => 'boot', send: (_u, b) => { bodies.push(JSON.parse(b)); } });
+    const listeners = new Map<string, (ev: Event) => void>();
+    r.install({ addEventListener: (t: string, l: (ev: Event) => void) => { listeners.set(t, l); } } as never);
+    const reject = (stack: string) => { const e = new TypeError("Cannot read properties of undefined (reading 'M_ID')"); e.stack = stack; listeners.get('unhandledrejection')!({ reason: e } as unknown as Event); };
+    reject(`TypeError: Cannot read properties of undefined (reading 'M_ID')\n    at h (${EXT}:1:761)\n    at C (${EXT}:1:1442)`);
+    reject(`TypeError: Cannot read properties of undefined (reading 'M_ID')\n    at h (${EXT}:1:761)\n    at f (https://playwebac.com/assets/main-abc.js:1:2)`);
+    expect(bodies.map(b => b.kind)).toEqual(['extension_error', 'unhandledrejection']);
+    const out = filter(bodies.map(b => bridgeLine(b)));
+    expect(out).not.toContain('kind="extension_error"');
+    expect(out).toContain('kind="unhandledrejection"');
   });
 });
 

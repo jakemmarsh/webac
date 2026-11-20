@@ -173,6 +173,39 @@ describe.skipIf(!existsSync(PORTAL))('VirindiTank\'s macro over the real spell t
     expect(host.sent).toContain(`cast ${id('Flame Bolt I')} 80005001`);
   });
 
+  it('a buff the server says landed that the plan wants again at once is held, not recast every step; after the hold it is cast again (BUG.vtank-buff-recast-loop)', async () => {
+    // "You cast Strength Self I on yourself", but the effects list never shows it: the plan keeps calling it
+    // due, as it did Night Runner (46 casts in 150 s, 2026-11-19).
+    const send = host.cast;
+    host.cast = (sid, t) => { const r = send(sid, t); const s = table.spells.get(sid); if (s && t === null) api.pushChat(`You cast ${s.name} on yourself`, 7); return r; };
+    const casts = () => host.sent.filter((x) => x === `cast ${id('Strength Self I')} self`).length;
+    api.routine.start(vt({ settings: { EnableBuffing: true } }));
+    await step(10000);
+    // One quick recast is let through (a dispel, a restart); the third is held.
+    expect(casts()).toBe(2);
+    expect(api.routine.history().filter((h) => /Strength Self I landed \d+ s ago and is due again \(not in your effects\); held 120 s, not recast/.test(h))).toHaveLength(1);
+    // The inverse: once the hold is over, a buff still missing is cast again (and held again).
+    await step(100000);
+    expect(casts()).toBe(2);
+    await step(20000);
+    expect(casts()).toBe(4);
+    expect(api.routine.history().filter((h) => /due again/.test(h))).toHaveLength(2);
+  });
+
+  it('a buff that lands and shows is recast only when it runs low, never held (BUG.vtank-buff-recast-loop inverse)', async () => {
+    serverAnswers();
+    api.routine.start(vt({ settings: { EnableBuffing: true } }));
+    await step(3000);
+    expect(host.sent.filter((x) => x === `cast ${id('Strength Self I')} self`)).toHaveLength(1);
+    // Up: not cast again. Then down to 200 s left (under the 300 s line), past the hold window: due, cast at once.
+    await step(31000);
+    expect(host.sent.filter((x) => x === `cast ${id('Strength Self I')} self`)).toHaveLength(1);
+    host.buffs = [{ spellId: id('Strength Self I'), name: 'Strength Self I', remaining: 200 }] as never;
+    await step(3000);
+    expect(host.sent.filter((x) => x === `cast ${id('Strength Self I')} self`)).toHaveLength(2);
+    expect(api.routine.history().join('\n')).not.toMatch(/due again/);
+  });
+
   it('magic mode needs a wand on ACE: the macro wields an Items-tab caster first, never an unlisted one; a server that keeps refusing gets spells left out, not asked forever', async () => {
     host.me.health.current = 10; // a heal is due
     host.me.combatMode = 'peace';
@@ -475,6 +508,217 @@ describe.skipIf(!existsSync(PORTAL))('VirindiTank\'s macro over the real spell t
     expect(host.sent.filter((x) => x.startsWith(`cast ${bd} `))).toEqual([]);
   });
 
+  describe('BUG.vtank-melee-aura-wand-loop: a melee character that buffs with an Items-tab wand (player report 2026-11-19)', () => {
+    const SWORD = 0x50000c11, WAND = 0x50000c12, DRUDGE = 0x80005011;
+    // The aura known: end of retail's Aura on yourself, or (classic / 1999) Blood Drinker cast on the weapon item.
+    const setup = (opts: { onItem?: boolean } = {}) => {
+      const bd = id('Aura of Blood Drinker Self I');
+      const s = table.spells.get(bd)!;
+      host.spells = () => [{ id: bd, name: s.name, school: 'Item Enchantment', level: 1, category: s.category, power: s.power, duration: s.duration ?? 0, ...(opts.onItem ? { targetType: 0xa090f } : { self: true }), buff: true }];
+      (host as unknown as { skillList: () => unknown[] }).skillList = () => [
+        { id: 32, name: 'Item Enchantment', training: 'trained', base: 150, buffed: 150 },
+        { id: 44, name: 'Heavy Weapons', training: 'trained', base: 150, buffed: 150 },
+      ];
+      if (opts.onItem) host.spellSelfTargetableTypeMask = () => 0; // the 1999 client: no non-Self spell at you
+      const home: Record<number, Record<string, unknown>> = {
+        [SWORD]: { guid: SWORD, name: 'Practice Sword', itemType: 0x1, slot: 'MeleeWeapon', mask: 0x00100000 },
+        [WAND]: { guid: WAND, name: 'Training Wand', itemType: 0x8000, slot: 'Held', mask: 0x01000000, fits: 'Held' },
+      };
+      const place = (inHand: number) => {
+        host.inv = [SWORD, WAND].map((g) => {
+          const { slot, mask, ...rest } = home[g] as { slot: string; mask: number };
+          return g === inHand ? { ...rest, slot, mask, where: 'equipped' } : { ...rest, where: 'main pack', fits: slot };
+        }) as never;
+      };
+      place(SWORD);
+      host.wield = (g) => { host.sent.push(`wield ${g.toString(16)}`); place(g); return true; };
+      // ACE refuses magic mode without a caster wielded.
+      host.setCombatMode = (m: string) => {
+        host.sent.push(`mode ${m}`);
+        if (m === 'magic' && !host.inv.some((i) => i.guid === WAND && i.where === 'equipped')) return;
+        host.me.combatMode = m as never;
+      };
+      host.me.combatMode = 'melee';
+      host.add({ guid: DRUDGE, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 35 });
+      serverAnswers();
+      return bd;
+    };
+    const profile = (items: Array<{ name: string; noBuffs?: boolean }>) => {
+      const data = emptyVtankData();
+      data.monsters[0].on = ['A'];
+      data.items = items;
+      return vt({ vtank: data, settings: { EnableBuffing: true, AttackDistance: 30, FightBeforeBuffs: 0 } });
+    };
+    const wields = () => host.sent.filter((x) => x.startsWith('wield '));
+    const attackAfterLastWield = () => {
+      const last = host.sent.map((x) => x.startsWith('wield ')).lastIndexOf(true);
+      return host.sent.slice(last + 1).some((x) => x.startsWith(`attack ${DRUDGE.toString(16)}`));
+    };
+
+    it('end of retail: Blood Drinker is cast once with the wand, the sword goes back, and the fight goes on (it looped: wand, sword, wand…)', async () => {
+      const bd = setup();
+      api.routine.start(profile([{ name: 'Practice Sword' }, { name: 'Training Wand' }]));
+      await step(10_000);
+      expect(host.sent, host.sent.join('\n')).toContain(`cast ${bd} self`);
+      expect(wields().length, wields().join(' ')).toBeLessThanOrEqual(3);
+      expect(attackAfterLastWield(), host.sent.join('\n')).toBe(true);
+    });
+
+    it('the wand listed Add (no buffs) is still the wand Blood Drinker is cast with; it no longer drops the sword\'s auras while in hand', async () => {
+      const bd = setup();
+      api.routine.start(profile([{ name: 'Practice Sword' }, { name: 'Training Wand', noBuffs: true }]));
+      await step(10_000);
+      expect(host.sent, host.sent.join('\n')).toContain(`cast ${bd} self`);
+      expect(wields().length, wields().join(' ')).toBeLessThanOrEqual(3);
+      expect(attackAfterLastWield(), host.sent.join('\n')).toBe(true);
+    });
+
+    it('the sword listed Add (no buffs): no melee aura is wanted, so the wand is never wielded for one', async () => {
+      const bd = setup();
+      api.routine.start(profile([{ name: 'Practice Sword', noBuffs: true }, { name: 'Training Wand' }]));
+      await step(10_000);
+      expect(host.sent.filter((x) => x.startsWith(`cast ${bd}`))).toEqual([]);
+      expect(wields()).toEqual([]);
+      expect(host.sent.some((x) => x.startsWith(`attack ${DRUDGE.toString(16)}`))).toBe(true);
+    });
+
+    it('several buffs due with a monster on you (FightBeforeBuffs 0): the wand goes in once, every due buff is cast, then the sword once', async () => {
+      const bd = setup();
+      const names = ['Acid Bane I', 'Flame Bane I', 'Frost Bane I', 'Lightning Bane I', 'Impenetrability I'];
+      const ids = names.map(id);
+      // War spells known too (a bolt and a streak: the A and S columns), as a character who could fight with the wand.
+      const war = ['Flame Bolt I', 'Flame Streak I'].map(id);
+      const known = [...host.spells(), ...war.map((k) => { const s = table.spells.get(k)!; return { id: k, name: s.name, school: 'War', level: 1, category: s.category, power: s.power, duration: 0 }; })];
+      host.spells = () => [...known, ...ids.map((k) => { const s = table.spells.get(k)!; return { id: k, name: s.name, school: 'Item', level: 1, category: s.category, power: s.power, duration: s.duration ?? 0, ...((s.bitfield & 0x8) ? { self: true } : {}), buff: true }; })];
+      host.inv = [...host.inv, { guid: 0x50000c21, name: 'Leather Coat', where: 'equipped', type: 'Armor', slot: 'Chest', itemType: 0x2 }] as never;
+      const inv0 = host.inv;
+      const wield0 = host.wield;
+      host.wield = (g) => { const r = wield0(g); host.inv = [...host.inv.filter((i) => i.guid !== 0x50000c21), inv0.find((i) => i.guid === 0x50000c21)!] as never; return r; };
+      (host as unknown as { skillList: () => unknown[] }).skillList = () => [
+        { id: 32, name: 'Item Enchantment', training: 'specialized', base: 150, buffed: 150 },
+        { id: 34, name: 'War Magic', training: 'specialized', base: 150, buffed: 150 },
+        { id: 44, name: 'Heavy Weapons', training: 'specialized', base: 150, buffed: 150 },
+      ];
+      serverAnswers({ worn: ['Leather Coat'], itemSpells: ids });
+      // Live timing: the server's lines come 1.5 s after the cast goes out (an Item VI cast's windup), each "refreshing".
+      const answer = host.cast;
+      const push = api.pushChat.bind(api);
+      host.cast = (sid, t) => {
+        const lines: Array<[string, number]> = [];
+        (api as unknown as { pushChat: (l: string, c: number) => void }).pushChat = (l, c) => { lines.push([l.startsWith('You cast ') && !/resists/.test(l) ? `${l}, refreshing ${table.spells.get(sid)?.name}` : l, c]); };
+        const r = answer(sid, t);
+        (api as unknown as { pushChat: typeof push }).pushChat = push;
+        setTimeout(() => { for (const [l, c] of lines) push(l, c); }, 1500);
+        return r;
+      };
+      const p = profile([{ name: 'Practice Sword' }, { name: 'Training Wand' }]);
+      p.vtank!.monsters[0].on = ['A', 'S'];
+      api.routine.start(p);
+      await step(15_000);
+      const log = host.sent.join('\n') + '\n---\n' + api.routine.history().join('\n');
+      for (const k of [bd, ...ids]) expect(host.sent.some((x) => x.startsWith(`cast ${k} `)), log).toBe(true);
+      // The wand once for the whole pass (the <AUTO> ladder then fights with it: War Magic and a streak known), no swap back and forth.
+      expect(wields().length, log).toBeLessThanOrEqual(3);
+      const last = host.sent.map((x) => x.startsWith('wield ')).lastIndexOf(true);
+      const firstFight = host.sent.findIndex((x) => x.startsWith(`attack ${DRUDGE.toString(16)}`) || x.endsWith(` ${DRUDGE.toString(16)}`));
+      expect(firstFight, log).toBeGreaterThan(last);
+      // Every buff before the first blow at the drudge: none was left for a weapon swap between.
+      const lastBuff = Math.max(...[bd, ...ids].map((k) => host.sent.findIndex((x) => x.startsWith(`cast ${k} `))));
+      expect(lastBuff, log).toBeLessThan(firstFight);
+    });
+
+    it('1999 / classic: Blood Drinker cast on the item goes on the sword in the pack, not the wand in hand, and is timed on the sword', async () => {
+      const bd = setup({ onItem: true });
+      api.routine.start(profile([{ name: 'Practice Sword' }, { name: 'Training Wand' }]));
+      await step(10_000);
+      const casts = host.sent.filter((x) => x.startsWith(`cast ${bd} `));
+      expect(casts, api.routine.history().join('\n')).toEqual([`cast ${bd} ${SWORD.toString(16)}`]);
+      expect(wields().length, wields().join(' ')).toBeLessThanOrEqual(3);
+      expect(attackAfterLastWield(), host.sent.join('\n')).toBe(true);
+    });
+  });
+
+  describe('BUG.vtank-same-name-weapon-swap: several carried weapons of one name (live, local ACE, 2026-11-20)', () => {
+    // Live: three "Wand"s carried, the Items tab listing one by its object id; in combat the macro logged every 1-2 s
+    // "<DEFAULT> uses Wand: equipped Wand (held (caster) slot), taking off Wand #8000115f into your pack", then #800011d5,
+    // #800011eb… The client lists what is in hand first and the one taken off goes to the end of the pack.
+    const DRUDGE = 0x80005021;
+    const setup = (kind: 'wand' | 'sword', guids: number[], inHand: number) => {
+      const item = (g: number) => (kind === 'wand'
+        ? { guid: g, name: 'Wand', itemType: 0x8000, mask: 0x01000000, slotName: 'Held' }
+        : { guid: g, name: 'Iron Sword', itemType: 0x1, mask: 0x00100000, slotName: 'MeleeWeapon' });
+      let order = [inHand, ...guids.filter((g) => g !== inHand)];
+      const place = () => {
+        host.inv = order.map((g, n) => {
+          const { slotName, mask, ...rest } = item(g);
+          return n === 0 ? { ...rest, slot: slotName, mask, where: 'equipped' } : { ...rest, where: 'main pack', fits: slotName };
+        }) as never;
+      };
+      place();
+      for (const g of guids) {
+        host.appraised.push(g);
+        host.appraisalDatas.set(g, { int: { 45: kind === 'wand' ? 0x10 : 0x1 }, float: {}, string: {}, bool: {}, did: {}, spells: [] });
+      }
+      host.wield = (g) => {
+        host.sent.push(`wield ${g.toString(16)}`);
+        const was = order[0];
+        order = [g, ...order.filter((x) => x !== g && x !== was), ...(was !== g ? [was] : [])];
+        place();
+        return true;
+      };
+      host.me.combatMode = kind === 'wand' ? 'magic' : 'melee';
+      host.add({ guid: DRUDGE, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 35 });
+      serverAnswers();
+    };
+    const profile = (items: Array<{ name: string; id?: number }>) => {
+      const data = emptyVtankData();
+      data.monsters[0].on = ['A'];
+      data.items = items;
+      return vt({ vtank: data });
+    };
+    const wields = () => host.sent.filter((x) => x.startsWith('wield '));
+    const W1 = 0x8000115f, W2 = 0x800011d5, W3 = 0x800011eb;
+    const S1 = 0x80002001, S2 = 0x80002002;
+
+    it('wands: the first in hand, the tab naming the second by id: it is wielded once and the fight goes on with it', async () => {
+      setup('wand', [W1, W2, W3], W1);
+      api.routine.start(profile([{ name: 'Wand', id: W2 }]));
+      await step(8000);
+      expect(wields(), api.routine.history().join('\n')).toEqual([`wield ${W2.toString(16)}`]);
+      expect(host.sent.some((x) => x.startsWith(`cast ${id('Flame Bolt I')} ${DRUDGE.toString(16)}`)), host.sent.join('\n')).toBe(true);
+    });
+
+    it('wands: the listed one already in hand, or an entry without an id with any of them in hand: no wield at all', async () => {
+      setup('wand', [W1, W2, W3], W2);
+      api.routine.start(profile([{ name: 'Wand', id: W2 }]));
+      await step(6000);
+      expect(wields()).toEqual([]);
+      api.routine.stop();
+      host.sent.length = 0;
+      setup('wand', [W1, W2, W3], W3);
+      api.routine.start(profile([{ name: 'Wand' }]));
+      await step(6000);
+      expect(wields()).toEqual([]);
+      expect(host.sent.some((x) => x.startsWith(`cast ${id('Flame Bolt I')} ${DRUDGE.toString(16)}`))).toBe(true);
+    });
+
+    it('a melee pair: the tab naming the second sword by id wields it once and attacks', async () => {
+      setup('sword', [S1, S2], S1);
+      api.routine.start(profile([{ name: 'Iron Sword', id: S2 }]));
+      await step(8000);
+      expect(wields(), api.routine.history().join('\n')).toEqual([`wield ${S2.toString(16)}`]);
+      expect(host.sent.some((x) => x.startsWith(`attack ${DRUDGE.toString(16)}`)), api.routine.history().join('\n')).toBe(true);
+    });
+
+    it('a melee pair, an entry without an id: the sword in hand stays and attacks', async () => {
+      setup('sword', [S1, S2], S1);
+      api.routine.start(profile([{ name: 'Iron Sword' }]));
+      await step(6000);
+      expect(wields()).toEqual([]);
+      expect(host.sent.some((x) => x.startsWith(`attack ${DRUDGE.toString(16)}`))).toBe(true);
+    });
+  });
+
   it('Recharge boost: after switching to magic mode to recharge, a vital that regenerated past its level still gets the heal (first cast only)', async () => {
     const heal = `cast ${id('Heal Self I')} self`;
     const switchThenRegen = async () => {
@@ -668,6 +912,32 @@ describe.skipIf(!existsSync(PORTAL))('VirindiTank\'s macro over the real spell t
     host.me.mana.current = 30;
     await step(4000);
     expect(casts()).toBe(2);
+  });
+
+  it('a buff that keeps waiting for mana rests a minute after ten waits (each a 3 s hold), rather than holding the routine at it for good', async () => {
+    const one = id('Strength Self I');
+    const s1 = table.spells.get(one)!;
+    host.spells = () => [{ id: one, name: s1.name, school: 'Creature', level: 1, category: s1.category, power: s1.power, duration: s1.duration ?? 0, self: true, buff: true }];
+    host.me.mana.current = 2;
+    serverAnswers({ refuse: () => "You don't have enough Mana to cast this spell." });
+    api.routine.start(vt({ settings: { EnableBuffing: true } }));
+    // The routine's log keeps its last 60 lines: each wait is counted as it is logged.
+    const seen = new Set<string>();
+    let waits = 0;
+    const watch = async (ms: number) => {
+      for (let t = 0; t < ms; t += 1000) {
+        await step(1000);
+        for (const h of api.routine.history()) if (/not enough mana/.test(h) && !seen.has(h)) { seen.add(h); waits++; }
+      }
+    };
+    await watch(90_000);
+    // Ten waits, then a minute's rest. Before 2026-11-20 the waits didn't count: only the real refusal every 30 s (when the
+    // mana hold ran out) did, so the routine stood at it about 60 s (18 waits) before its first rest.
+    const secs = [...seen].map((h) => { const [hh, mm, ss] = h.slice(0, 8).split(':').map(Number); return hh * 3600 + mm * 60 + ss; });
+    const rest = secs.findIndex((t, i) => i > 0 && t - secs[i - 1] >= 50);
+    expect(waits).toBeGreaterThanOrEqual(8);
+    expect(rest, [...seen].join('\n')).toBeGreaterThanOrEqual(8);
+    expect(rest, [...seen].join('\n')).toBeLessThanOrEqual(11);
   });
 
   describe('the blacklist and ghosts (BlacklistMonster*, DeleteGhostMonsters*)', () => {

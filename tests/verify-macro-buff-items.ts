@@ -99,6 +99,19 @@ describe('planBuffItem', () => {
     expect(planBuffItem(base({ items: [gem(0x72, 'Potion of Strength', 3)], listed: ['Potion of Strength'] }))?.spellId).toBe(3);
     expect(planBuffItem(base({ items: [gem(0x73, 'Healing Elixir', 11)], listed: ['Healing Elixir'] }))).toBeNull();
   });
+
+  it('an item whose spell lasts no longer than the threshold is not eaten again the moment it lands; half gone or expired, it is (BUG.vtank-buff-recast-loop)', () => {
+    // A 120 s draught against the 300 s rebuff threshold: before, "120 s left < 300" used another every 5 s.
+    const spells = new Map(TABLE).set(9100, { name: 'Quick Draught', desc: "Increases the caster's Quickness by 20 points.", category: 5, school: 4, bitfield: SELF_BUFF, power: 50, duration: 120 });
+    const draught = (remaining: number | null) => planBuffItem(base({
+      items: [gem(0x74, 'Quick Draught Potion', 9100)], listed: ['Quick Draught Potion'], spellTable: { spells },
+      active: remaining === null ? [] : [{ name: 'Quick Draught', spellId: 9100, category: 5, power: 50, remaining }],
+    }));
+    expect(draught(118)).toBeNull();
+    expect(draught(59)?.item.guid).toBe(0x74);
+    expect(draught(null)?.item.guid).toBe(0x74);
+    // A day-long gem keeps the plain rule (200 s left of 86400 is due, above).
+  });
 });
 
 describe('BuffCastRecast and FastCastBuffs (pure parts)', () => {
@@ -296,6 +309,24 @@ describe('the macro: buff items, BuffCastRecast, FastCastBuffs, caster items and
     expect(host.sent).toContain(`usewith 70000010 ${host.me.guid.toString(16)}`);
     expect(host.sent.some((x) => x.startsWith('cast 10'))).toBe(false);
     expect(keyLog).toContain('Space+');
+  });
+
+  it('a caster use the client refuses waits 30 s (the item hold) before it is tried again, rather than every step', async () => {
+    host.me.combatMode = 'magic';
+    host.me.health.current = 10;
+    const data = emptyVtankData();
+    data.items = [{ name: 'Healing Wand' }];
+    const w: PlanItem = { guid: 0x70000010, name: 'Healing Wand', itemType: 0x8000, ints: { [PropertyInt.ItemUseable]: 0x200004 }, dids: { [PropertyDataId.Spell]: 11 } };
+    carry([w], { 0x70000010: { where: 'equipped' } });
+    host.useWithTarget = (a: number, b: number) => { host.sent.push(`usewith ${a.toString(16)} ${b.toString(16)}`); return false; };
+    const uses = () => host.sent.filter((x) => x.startsWith('usewith 70000010')).length;
+    api.routine.start(vt({ EnableBuffing: false }, data));
+    await step(1500);
+    expect(uses()).toBe(1);
+    await step(10_000);
+    expect(uses()).toBe(1);
+    await step(25_000);
+    expect(uses()).toBe(2);
   });
 });
 
