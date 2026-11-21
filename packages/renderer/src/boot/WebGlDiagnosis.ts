@@ -286,7 +286,12 @@ export function pageBlockEvidence(win: PageBlockWindow): PageBlockEvidence {
 
 // ── Platform ──────────────────────────────────────────────────────────
 
-export type HelpOs = 'windows' | 'mac' | 'linux' | 'linux_arm' | 'chromeos' | 'other';
+/**
+ * BUG.webgl-advice-phone — 'android' and 'ios' (iPhone, iPad, iPod touch) get their own advice: phone and
+ * tablet browsers have none of the desktop settings, flags pages or graphics drivers the desktop advice names
+ * (prod 2026-11-21: an Android 10 phone on Chrome 154 was told to open chrome://settings/system).
+ */
+export type HelpOs = 'windows' | 'mac' | 'linux' | 'linux_arm' | 'chromeos' | 'android' | 'ios' | 'other';
 export type HelpBrowser = 'chrome' | 'edge' | 'firefox' | 'safari' | 'other';
 export interface HelpPlatform {
   os: HelpOs; browser: HelpBrowser;
@@ -297,6 +302,8 @@ export interface HelpPlatform {
 export interface NavigatorLike {
   userAgent?: string;
   userAgentData?: { platform?: string; brands?: Array<{ brand: string }> } | null;
+  /** navigator.maxTouchPoints: iPadOS Safari sends a Mac user agent by default, and only this tells it apart (Macs report 0). */
+  maxTouchPoints?: number;
 }
 
 /** OS and browser family from navigator.userAgentData (Chromium) with the userAgent string as fallback. */
@@ -307,8 +314,12 @@ export function detectHelpPlatform(nav: NavigatorLike | null | undefined): HelpP
   let os: HelpOs = 'other';
   if (uadPlatform === 'windows' || /Windows NT/.test(ua)) os = 'windows';
   else if (uadPlatform === 'chrome os' || uadPlatform === 'chromeos' || /\bCrOS\b/.test(ua)) os = 'chromeos';
+  // Before the Mac test: iPhone and iPad user agents say "like Mac OS X".
+  else if (uadPlatform === 'ios' || /\b(iPhone|iPad|iPod)\b/.test(ua)) os = 'ios';
+  // iPadOS Safari's default "desktop website" user agent is a Mac's; a touch screen is what gives it away.
+  else if (/Macintosh/.test(ua) && (nav?.maxTouchPoints ?? 0) > 1) os = 'ios';
   else if (uadPlatform === 'macos' || /Macintosh|Mac OS X/.test(ua)) os = 'mac';
-  else if (uadPlatform === 'android' || /Android/.test(ua)) os = 'other';
+  else if (uadPlatform === 'android' || /Android/.test(ua)) os = 'android';
   else if (uadPlatform === 'linux' || /Linux|X11/.test(ua)) os = /aarch64|arm64|armv\d|\barm\b/i.test(ua) ? 'linux_arm' : 'linux';
   let browser: HelpBrowser = 'other';
   if (brands.some(b => b.includes('edge')) || /\bEdg\//.test(ua)) browser = 'edge';
@@ -396,12 +407,67 @@ function blockedInPageText(platform: HelpPlatform, site: string): string[] {
     allow, `To check, open this page in ${privateWindow}, where extensions are off unless you allowed them.`];
 }
 
+// ── BUG.webgl-advice-phone: phones and tablets ──
+
+const MOBILE_RESTART = 'Close the browser completely and open it again, or restart the phone or tablet.';
+const MOBILE_UPDATE = 'Make sure the browser and the system software are up to date.';
+
+/**
+ * A phone or tablet: no graphics-acceleration setting, flags page, about:config (release Firefox for Android
+ * has none) or graphics driver to name. What the player can do is restart the browser or the device, update,
+ * or allow WebGL in a blocking extension. That phones and tablets are not supported is said once, by the
+ * capability screen's own pointer line (Capability.ts, shown when there is no mouse), not repeated here.
+ */
+function mobileHelpText(cause: WebGlFailureCause, platform: HelpPlatform, site: string): string[] {
+  const { browser } = platform;
+  switch (cause) {
+    case 'context_lost_after_crash': {
+      const name = browser === 'edge' ? 'Edge' : browser === 'chrome' ? 'Chrome' : 'the browser';
+      return [`After a graphics crash, ${name} turns graphics off for this site for up to two minutes.`,
+        'The game will continue by itself when they come back. If it doesn\'t, press Reload.',
+        'If it keeps happening, close the browser completely and open it again, or restart the phone or tablet.'];
+    }
+    case 'disabled_by_policy':
+      return ['Graphics are turned off for this browser by a policy (on a work or school phone or tablet, your IT department). '
+        + 'Ask your IT department, or try another browser.'];
+    case 'blocklisted':
+    case 'webgl2_blocked':
+      return [`The browser has turned ${cause === 'webgl2_blocked' ? 'WebGL 2' : 'graphics'} off for this phone or tablet's graphics chip.`,
+        MOBILE_UPDATE];
+    case 'webgl_turned_off':
+      return ['WebGL is turned off in this browser.', 'Turn it back on in the browser\'s settings, or try another browser.'];
+    case 'acceleration_disabled':
+    case 'gpu_process_unavailable':
+      return [cause === 'acceleration_disabled' ? 'The browser is drawing without the graphics chip.' : 'The browser could not use the graphics chip.',
+        MOBILE_RESTART, MOBILE_UPDATE];
+    case 'webgl1_only':
+      return ['It can only start the older WebGL 1, which usually means an old browser or system version.', MOBILE_UPDATE];
+    case 'blocked_in_page': {
+      if (platform.chromiumBrand === 'brave') {
+        return ['Brave Shields or a browser extension is blocking WebGL on this site.',
+          'Tap the Brave Shields button in the address bar and turn Shields off for this site, then press Reload.'];
+      }
+      const what = browser === 'firefox' ? 'add-on' : 'extension';
+      const who = browser === 'firefox' ? 'A Firefox add-on' : browser === 'safari' ? 'A Safari extension' : 'A browser extension';
+      return [`${who} is blocking WebGL on this site (privacy and anti-fingerprinting ${what}s do this).`,
+        `Allow WebGL for ${site} in that ${what}, or turn the ${what} off for this site, then press Reload.`];
+    }
+    case 'no_webgl':
+      return ['WebGL is turned off or unavailable in this browser.',
+        'A privacy or anti-fingerprinting extension can cause this: allow WebGL for this site in it.',
+        MOBILE_RESTART, MOBILE_UPDATE];
+    default:
+      return [MOBILE_RESTART, MOBILE_UPDATE];
+  }
+}
+
 /**
  * The player-facing explanation for a WebGL 2 failure, most likely fix first. `site` names the host in the
  * page-block advice (the page's own hostname; "this site" when unknown).
  */
 export function webgl2HelpText(failure: WebGlFailure | null, platform: HelpPlatform, site = 'this site'): string {
   const { os, browser } = platform;
+  if (os === 'android' || os === 'ios') return [INTRO, ...mobileHelpText(failure?.cause ?? 'unknown', platform, site)].join(' ');
   const chromium = browser === 'chrome' || browser === 'edge';
   const gpuPage = browser === 'edge' ? 'edge://gpu' : 'chrome://gpu';
   const tryFirefox = os === 'linux' || os === 'linux_arm' || os === 'windows' ? 'Or try Firefox, which may work on this computer.' : null;

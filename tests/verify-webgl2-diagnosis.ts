@@ -307,6 +307,119 @@ describe('BOOT.webgl2-diagnosis — the advice per cause and platform', () => {
   });
 });
 
+describe('BUG.webgl-advice-phone — phones and tablets get advice that exists on a phone', () => {
+  // Prod 2026-11-21 18:46Z: this exact phone failed with gpu_process_unavailable and was sent to chrome://settings/system.
+  const ANDROID_CHROME = { userAgent: 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Mobile Safari/537.36' };
+  const ANDROID_CHROME_UAD = { ...ANDROID_CHROME, userAgentData: { platform: 'Android', brands: [{ brand: 'Google Chrome' }, { brand: 'Chromium' }] } };
+  const ANDROID_FIREFOX = { userAgent: 'Mozilla/5.0 (Android 14; Mobile; rv:146.0) Gecko/146.0 Firefox/146.0' };
+  const IPHONE_SAFARI = { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1' };
+  const IPHONE_CHROME = { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/154.0.0.0 Mobile/15E148 Safari/604.1' };
+  // iPadOS Safari's default user agent is a Mac's; only the touch points tell it apart.
+  const IPAD_DESKTOP_UA = { userAgent: SAFARI_MAC.userAgent, maxTouchPoints: 5 };
+  const PHONES = [ANDROID_CHROME, ANDROID_CHROME_UAD, ANDROID_FIREFOX, IPHONE_SAFARI, IPHONE_CHROME, IPAD_DESKTOP_UA];
+  const at = (cause: WebGlFailureCause | null, nav: Parameters<typeof detectHelpPlatform>[0]) =>
+    webgl2HelpText(cause ? { cause, status: null } : null, detectHelpPlatform(nav), 'playwebac.com');
+  const RESTART = 'Close the browser completely and open it again, or restart the phone or tablet.';
+  const UPDATE = 'Make sure the browser and the system software are up to date.';
+  const INTRO = 'This browser could not start WebGL 2, which the game needs to draw the world.';
+
+  it('detects Android and iOS (iPhone, and iPad behind a Mac user agent); a Mac with no touch stays a Mac', () => {
+    expect(detectHelpPlatform(ANDROID_CHROME)).toEqual({ os: 'android', browser: 'chrome' });
+    expect(detectHelpPlatform(ANDROID_CHROME_UAD)).toEqual({ os: 'android', browser: 'chrome' });
+    expect(detectHelpPlatform(ANDROID_FIREFOX)).toEqual({ os: 'android', browser: 'firefox' });
+    expect(detectHelpPlatform(IPHONE_SAFARI)).toEqual({ os: 'ios', browser: 'safari' });
+    expect(detectHelpPlatform(IPHONE_CHROME)).toEqual({ os: 'ios', browser: 'other' });
+    expect(detectHelpPlatform(IPAD_DESKTOP_UA)).toEqual({ os: 'ios', browser: 'safari' });
+    expect(detectHelpPlatform({ ...SAFARI_MAC, maxTouchPoints: 0 })).toEqual({ os: 'mac', browser: 'safari' });
+  });
+
+  it('the prod Android phone end to end: probe → capability text, no desktop setting', () => {
+    const { factory } = fakeCanvases({ status: CHROME_NO_GPU });
+    const win = {
+      document: { createElement: factory },
+      navigator: { ...ANDROID_CHROME, webdriver: false },
+      WebSocket: function WebSocket() {},
+      matchMedia: () => ({ matches: true }),
+      location: { search: '' },
+    } as unknown as Parameters<typeof probeCapabilities>[0];
+    const env = probeCapabilities(win);
+    expect(env.webgl2Failure?.cause).toBe('gpu_process_unavailable');
+    expect(env.platform).toEqual({ os: 'android', browser: 'chrome' });
+    expect(capabilityProblems(env)[0].text).toBe(`${INTRO} The browser could not use the graphics chip. ${RESTART} ${UPDATE}`);
+  });
+
+  it('a touch-only phone hears "not supported" once: from the pointer line, not the WebGL text', () => {
+    const { factory } = fakeCanvases({ status: CHROME_NO_GPU });
+    const win = {
+      document: { createElement: factory },
+      navigator: { ...ANDROID_CHROME, webdriver: false },
+      WebSocket: function WebSocket() {},
+      matchMedia: () => ({ matches: false }),
+      location: { search: '' },
+    } as unknown as Parameters<typeof probeCapabilities>[0];
+    const all = capabilityProblems(probeCapabilities(win)).map(p => p.text).join(' ');
+    expect(all.match(/not supported/g)?.length).toBe(1);
+    expect(all).not.toMatch(/can't run it|desktop or laptop/);
+  });
+
+  it('the exact text for each cause on the prod Android phone', () => {
+    const want: Record<WebGlFailureCause, string> = {
+      blocklisted: `The browser has turned graphics off for this phone or tablet's graphics chip. ${UPDATE}`,
+      acceleration_disabled: `The browser is drawing without the graphics chip. ${RESTART} ${UPDATE}`,
+      gpu_process_unavailable: `The browser could not use the graphics chip. ${RESTART} ${UPDATE}`,
+      context_lost_after_crash: 'After a graphics crash, Chrome turns graphics off for this site for up to two minutes. '
+        + 'The game will continue by itself when they come back. If it doesn\'t, press Reload. '
+        + 'If it keeps happening, close the browser completely and open it again, or restart the phone or tablet.',
+      webgl1_only: `It can only start the older WebGL 1, which usually means an old browser or system version. ${UPDATE}`,
+      no_webgl: 'WebGL is turned off or unavailable in this browser. A privacy or anti-fingerprinting extension can cause this: '
+        + `allow WebGL for this site in it. ${RESTART} ${UPDATE}`,
+      unknown: `${RESTART} ${UPDATE}`,
+      disabled_by_policy: 'Graphics are turned off for this browser by a policy (on a work or school phone or tablet, your IT department). '
+        + 'Ask your IT department, or try another browser.',
+      webgl2_blocked: `The browser has turned WebGL 2 off for this phone or tablet's graphics chip. ${UPDATE}`,
+      webgl_turned_off: `WebGL is turned off in this browser. Turn it back on in the browser's settings, or try another browser.`,
+      blocked_in_page: 'A browser extension is blocking WebGL on this site (privacy and anti-fingerprinting extensions do this). '
+        + 'Allow WebGL for playwebac.com in that extension, or turn the extension off for this site, then press Reload.',
+    };
+    for (const cause of WEBGL_FAILURE_CAUSES) expect(at(cause, ANDROID_CHROME)).toBe(`${INTRO} ${want[cause]}`);
+    expect(at(null, ANDROID_CHROME)).toBe(`${INTRO} ${want.unknown}`);
+  });
+
+  it('iPhone: the same advice with Safari\'s names; Firefox for Android says add-on; Brave says Shields', () => {
+    expect(at('context_lost_after_crash', IPHONE_SAFARI)).toContain('After a graphics crash, the browser turns graphics off');
+    expect(at('blocked_in_page', IPHONE_SAFARI)).toContain('A Safari extension is blocking WebGL on this site');
+    expect(at('gpu_process_unavailable', IPHONE_SAFARI)).toBe(`${INTRO} The browser could not use the graphics chip. ${RESTART} ${UPDATE}`);
+    expect(at('blocked_in_page', ANDROID_FIREFOX)).toContain('Allow WebGL for playwebac.com in that add-on, or turn the add-on off');
+    const brave = webgl2HelpText({ cause: 'blocked_in_page', status: null }, { os: 'android', browser: 'chrome', chromiumBrand: 'brave' });
+    expect(brave).toContain('Tap the Brave Shields button');
+  });
+
+  it('every cause on every phone: no desktop settings, flags, about: pages, drivers, IT-PC or Firefox lines', () => {
+    for (const cause of [...WEBGL_FAILURE_CAUSES, null]) {
+      for (const nav of PHONES) {
+        const t = at(cause, nav);
+        expect(t.startsWith(INTRO)).toBe(true);
+        expect(t).not.toMatch(/chrome:|edge:|about:|flags|settings\/system|Relaunch|graphics card|driver|work computer|try Firefox|hardware acceleration|Incognito|InPrivate|null|undefined/);
+        expect(t.length).toBeLessThan(800);
+      }
+    }
+  });
+
+  it('desktop advice is unchanged (pinned whole)', () => {
+    expect(webgl2HelpText({ cause: 'gpu_process_unavailable', status: null }, detectHelpPlatform(CHROME_WIN))).toBe(
+      'This browser could not start WebGL 2, which the game needs to draw the world. The browser could not use the graphics card. '
+      + 'Open Settings > System (chrome://settings/system), turn on "Use graphics acceleration when available", and click Relaunch. '
+      + 'If the game worked before in this browser, quit the browser completely and start it again: after a graphics crash the browser '
+      + 'turns graphics off for the site until it restarts. If chrome://gpu still shows WebGL disabled: Open chrome://flags/#ignore-gpu-blocklist, '
+      + 'set "Override software rendering list" to Enabled, and click Relaunch. On a work computer, graphics may be turned off by your IT policy.');
+    expect(webgl2HelpText(null, detectHelpPlatform(CHROME_WIN))).toBe(
+      'This browser could not start WebGL 2, which the game needs to draw the world. Use a current Chrome, Edge, Firefox or Safari on a '
+      + 'desktop or laptop, and make sure hardware acceleration (graphics acceleration) is turned on in the browser settings. If the game '
+      + 'worked before in this browser, quit the browser completely and start it again: after a graphics crash the browser turns graphics '
+      + 'off for the site until it restarts (in Chrome, chrome://gpu shows it). If it keeps happening, update your graphics driver.');
+  });
+});
+
 describe('BOOT.webgl2-diagnosis — the boot report and the bridge', () => {
   it('ErrorReporter sends webglCause / webglStatus only when given', () => {
     const sent: Array<Record<string, unknown>> = [];
