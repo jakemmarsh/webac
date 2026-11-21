@@ -88,9 +88,9 @@ export const CHARGEN_FRAME_TEXT_MARGINS = { left: 9, right: 26, top: 15, bottom:
  * The retail heritage frame (reference/images/preworld/char-create-ref1.png,
  * lore panel) shows the up arrow at the top with the gem directly under it
  * and the down arrow at the bottom; the DAT lists 0x10000071 (0,83) with
- * 0x06004d35 and 0x10000072 (0,0) with 0x06004d36, so UIElement_Scrollbar
- * assigns the arrow media by role rather than by the child's slot — the
- * retail frame is followed here.
+ * 0x06004d35 and 0x10000072 (0,0) with 0x06004d36, and UIElement_Scrollbar
+ * places the arrows by role, not by the child's slot: p119 0x10000071 at the
+ * top (scrollbarArrowArt; UpdateScrollingArea @ 00470aa0).
  */
 export const CHARGEN_FRAME_SCROLLBAR = {
   right: -4, top: 15, bottom: 15, width: 37,
@@ -113,10 +113,16 @@ export interface DatScrollbarSkin {
   thumb: 'hud' | { tex: number; height: number };
 }
 
-/** The HUD base widget 0x10000367@0x2100003e (gold chain, blue 3-slice thumb). */
+/**
+ * The HUD base widget 0x10000367@0x2100003e (gold chain, blue 3-slice thumb).
+ * The buttons go by role (scrollbarArrowArt, webac#33): p119 0x10000072
+ * (0x06004c6c/6d/6e, the gem under a peak) at the top, p120 0x10000071
+ * (0x06004c69/6a/6b, the gem under a V) at the bottom, though the DAT rects
+ * author them the other way round. Every era draws this interface art.
+ */
 export const HUD_SCROLLBAR_SKIN: DatScrollbarSkin = {
   width: 16, buttonHeight: 16, track: 0x06004c5f,
-  up: [0x06004c69, 0x06004c6a, 0x06004c6b], down: [0x06004c6c, 0x06004c6d, 0x06004c6e],
+  up: [0x06004c6c, 0x06004c6d, 0x06004c6e], down: [0x06004c69, 0x06004c6a, 0x06004c6b],
   thumb: 'hud',
 };
 

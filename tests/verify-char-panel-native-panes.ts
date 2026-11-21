@@ -413,8 +413,8 @@ describe('CORE.6 — native pane renderers (behavioral)', () => {
       // Widget chrome from the DAT art family 0x06004c5f-6e.
       expect(sb.style.backgroundImage).toContain('tex:0x6004c5f');
       const kids = Array.from(sb.children) as HTMLElement[];
-      expect(kids.some((k) => k.style.backgroundImage.includes('tex:0x6004c69'))).toBe(true); // up
-      expect(kids.some((k) => k.style.backgroundImage.includes('tex:0x6004c6c'))).toBe(true); // down
+      expect(kids.some((k) => k.style.backgroundImage.includes('tex:0x6004c6c'))).toBe(true); // up (webac#33)
+      expect(kids.some((k) => k.style.backgroundImage.includes('tex:0x6004c69'))).toBe(true); // down
       const thumb = sb.querySelector('[data-dat-thumb="1"]') as HTMLElement;
       expect(thumb).toBeTruthy();
       // No layout → content fits → p121 hides the whole column.
@@ -437,8 +437,8 @@ describe('CORE.6 — native pane renderers (behavioral)', () => {
       const list = byId(body, 0x1000023d)!;
       overflow(list, 180, 160);
       const kids = Array.from(sb.children) as HTMLElement[];
-      const down = kids.find((k) => k.style.backgroundImage.includes('tex:0x6004c6c'))!;
-      const up = kids.find((k) => k.style.backgroundImage.includes('tex:0x6004c69'))!;
+      const down = kids.find((k) => k.style.backgroundImage.includes('tex:0x6004c69'))!;
+      const up = kids.find((k) => k.style.backgroundImage.includes('tex:0x6004c6c'))!;
       down.click();
       expect(list.scrollTop).toBe(20);
       up.click();

@@ -5173,9 +5173,9 @@ export class GameUI {
    * demangled.txt), not a per-panel DAT layout element — the LayoutDesc host
    * (e.g. options 0x10000208) carries no media, only a container flag,
    * confirming it's client-drawn. Track texture 0x06004c5f (gold-chain,
-   * tile-y) and arrow caps 0x06004c69 (up) / 0x06004c6c (down) are
-   * pixel-verified matches against reference/images/hud/chat-options.jpg's
-   * scrollbar crop — this host previously had only a flat CSS line with no
+   * tile-y) and arrow caps 0x06004c6c (top) / 0x06004c69 (bottom), placed by
+   * role as HUD_SCROLLBAR_SKIN (webac#33), match reference/images/hud/
+   * chat-options.jpg's scrollbar crop — this host previously had only a flat CSS line with no
    * arrows, which read as "only a thin flat vertical gold bar, no thumb or
    * texture" in the skeptic-verified audit. The thumb has no matching DAT
    * asset in the same ID family (0x06004c60/63/66 nearby is a navy 3-slice
@@ -5204,8 +5204,8 @@ export class GameUI {
 
     // `art`: another skin's ids (the VirindiTank window's lists: no track art, the blue thumb).
     const trackTex = art ? (art.track === null ? null : this.getTexURL(art.track)) : this.getTexURL(0x06004c5f);
-    const upTex = this.getTexURL(art?.up ?? 0x06004c69);
-    const downTex = this.getTexURL(art?.down ?? 0x06004c6c);
+    const upTex = this.getTexURL(art?.up ?? HUD_SCROLLBAR_SKIN.up[0]);
+    const downTex = this.getTexURL(art?.down ?? HUD_SCROLLBAR_SKIN.down[0]);
     const thumbTex = art ? this.getTexURL(art.thumb) : null;
 
     const track = document.createElement('div');
@@ -15318,9 +15318,10 @@ export class GameUI {
    * CORE.3.b/CORE.6.a — the retail UIElement_Scrollbar widget (base template
    * 0x10000367@0x2100003e), rendered INTO a DAT-positioned column element and
    * wired live to a scroll viewport. The base widget carries: track media
-   * 0x06004c5f (repeat-y ornate gold chain), up button p120=0x10000071
-   * (0x06004c69 normal / 0x06004c6a hover / 0x06004c6b pressed), down button
-   * p119=0x10000072 (0x06004c6c/6d/6e), and a 3-slice blue thumb child 0x1
+   * 0x06004c5f (repeat-y ornate gold chain), top button p119=0x10000072
+   * (0x06004c6c normal / 0x06004c6d hover / 0x06004c6e pressed), bottom
+   * button p120=0x10000071 (0x06004c69/6a/6b) — placed by role, not by their
+   * DAT rects (scrollbarArrowArt, webac#33) — and a 3-slice blue thumb child 0x1
    * whose cap/middle/cap slices 0x10000364-66 each carry per-state art
    * (normal 0x06004c60/63/66, hover 0x06004c61/64/67, pressed
    * 0x06004c62/65/68). Geometry is rect-based so it survives the HUD scale
@@ -17684,7 +17685,7 @@ export class GameUI {
 
       // CORE.17.p — grid scrollbar, el 0x100001c7 at (207,20) 16x96: the
       // DAT derives it from the scrollbar widget 0x10000367@0x2100003e
-      // (gold-chain track 0x06004c5f, gem buttons 0x06004c69/6c, 3-slice
+      // (gold-chain track 0x06004c5f, gem buttons 0x06004c6c/69, 3-slice
       // blue thumb 0x06004c60/63/66) — the same widget as the character
       // panel's stat list and the chat log. Only p131 (0x83 SetSmooth-
       // Movement) / p132 are overridden, so p121 hideDisabled stays the base

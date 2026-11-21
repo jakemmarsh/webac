@@ -1,5 +1,6 @@
 // Dump UI textures from portal.dat as PNGs for visual inspection.
-// Usage: npx tsx tools/dump-ui-texture-pngs.ts 0x06004cc2 0x0600111f ... [outdir]
+// Usage: npx tsx tools/dump-ui-texture-pngs.ts [--portal=<portal.dat>] 0x06004cc2 0x0600111f ... [outdir]
+// --portal reads another era's portal (e.g. dat/sets/classic-dereth/client_portal.dat); default dat/client_portal.dat.
 import * as fs from 'fs';
 import { DatDatabase } from '../packages/dat-parser/src/DatDatabase.js';
 import { DatReader } from '../packages/dat-parser/src/DatReader.js';
@@ -30,9 +31,10 @@ function pngFromRGBA(width: number, height: number, rgba: Uint8Array): Buffer {
   return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), ...chunks]);
 }
 
-const portalBuf = fs.readFileSync('dat/client_portal.dat').buffer;
+const portalArg = process.argv.find((a) => a.startsWith('--portal='));
+const portalBuf = fs.readFileSync(portalArg ? portalArg.slice('--portal='.length) : 'dat/client_portal.dat').buffer;
 const portalDb = new DatDatabase(portalBuf as ArrayBuffer);
-const argv = process.argv.slice(2);
+const argv = process.argv.slice(2).filter((a) => !a.startsWith('--portal='));
 const outdir = argv[argv.length - 1].startsWith('0x') ? '/tmp/ui-tex' : argv.pop()!;
 fs.mkdirSync(outdir, { recursive: true });
 for (const arg of argv) {

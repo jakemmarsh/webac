@@ -1573,11 +1573,13 @@ export class LayoutRenderer {
     // are all rendered (applyRetailPaintOrder).
 
     // Retail UIElement_Scrollbar (element class 11) is a RUNTIME widget:
-    // it repositions its down-button to the bottom edge, moves the thumb
+    // it places its arrow buttons by role (p119 at the top / left, p120 at
+    // the far end: scrollbarArrowArt, webac#33), moves the thumb
     // with the scroll fraction, and hides entirely when the content fits
     // (see the decompiled client's UIElement_Scrollbar). A static render
-    // of its resolved desc mis-assembles it — the down button sits at its
-    // DAT-baked y (e.g. 32 of 68 in classic_chat 0x10000012) and the bar
+    // of its resolved desc mis-assembles it — a button sits at its DAT-baked
+    // y (e.g. 32 of 68 in classic_chat 0x10000012, the wrong art at the
+    // top) and the bar
     // shows even where retail hides it (char-panel attribute list). Until
     // the runtime widget exists (CORE.3.b), INHERITED scrollbar subtrees
     // (baseElement != 0 — chrome-less before inheritance resolution)

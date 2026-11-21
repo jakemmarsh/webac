@@ -58,8 +58,8 @@ const SCROLLBAR_TEMPLATE_LAYOUT = 0x2100003e;
 const THUMB_TOP = 0x06004c60;
 const THUMB_MID = 0x06004c63;
 const THUMB_BOT = 0x06004c66;
-const ARROW_UP = 0x06004c69;
-const ARROW_DOWN = 0x06004c6c;
+const ARROW_UP = 0x06004c6c;
+const ARROW_DOWN = 0x06004c69;
 
 function findElement(elements: Map<number, { elementId: number; children: Map<number, unknown> }>, id: number): any {
   for (const [, el] of elements) {

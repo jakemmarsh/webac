@@ -12,10 +12,11 @@
  * (raw type 0) inheriting 0x10000367@0x2100003e, resolving to a type-11
  * UIElement_Scrollbar with:
  *   - track background 0x06004c5f (ornate gold, repeat-y)
- *   - up button   0x06004c69 (normal) / 0x06004c6a (hover) / 0x06004c6b (pressed)
- *   - down button 0x06004c6c / 0x06004c6d / 0x06004c6e
+ *   - top button p119 0x10000072: 0x06004c6c (normal) / 0x06004c6d (hover) / 0x06004c6e (pressed)
+ *   - bottom button p120 0x10000071: 0x06004c69 / 0x06004c6a / 0x06004c6b
+ *     (placed by role, not by their reversed DAT rects: webac#33, scrollbarArrowArt)
  *   - 3-slice blue thumb: top cap 0x06004c60, middle 0x06004c63, bottom cap 0x06004c66
- * The retail widget repositions the down button to the bottom edge, tracks the
+ * The retail widget puts the p120 button at the bottom edge, tracks the
  * thumb by scroll fraction; with p121 (HideDisabled) false it keeps the bar
  * chrome and thumb visible (thumb parked at top) when the content fits.
  *
@@ -41,8 +42,8 @@ const TEXT_AREA_ID = 0x10000011;
 
 // Resolved DAT texture IDs for the chat scrollbar (see file header).
 const TRACK = 0x06004c5f;
-const UP_NORMAL = 0x06004c69;
-const DOWN_NORMAL = 0x06004c6c;
+const UP_NORMAL = 0x06004c6c;
+const DOWN_NORMAL = 0x06004c69;
 const THUMB_TOP = 0x06004c60;
 const THUMB_MID = 0x06004c63;
 const THUMB_BOT = 0x06004c66;
@@ -123,14 +124,14 @@ describe('CORE.3.b — chat log scrollbar uses retail DAT art in the 0x10000012 
     expect(column.style.backgroundRepeat).toBe('repeat-y');
   });
 
-  it('renders the up button (0x06004c69) pinned to the top edge', () => {
+  it('renders the up button (0x06004c6c, the gem under a peak) pinned to the top edge (webac#33)', () => {
     const up = children().find((c) => bg(c).includes(texUrl(UP_NORMAL)));
     expect(up, 'up button present').toBeTruthy();
     expect(up!.style.top).toBe('0px');
     expect(up!.style.bottom).toBe('');
   });
 
-  it('renders the down button (0x06004c6c) repositioned to the BOTTOM edge (retail widget behavior)', () => {
+  it('renders the down button (0x06004c69, the gem under a V) at the BOTTOM edge (retail widget behavior)', () => {
     const down = children().find((c) => bg(c).includes(texUrl(DOWN_NORMAL)));
     expect(down, 'down button present').toBeTruthy();
     expect(down!.style.bottom).toBe('0px');

@@ -56,8 +56,8 @@ const TEX = {
   sbThumbTop: 0x06004c60,
   sbThumbMid: 0x06004c63,
   sbThumbBot: 0x06004c66,
-  sbUp: 0x06004c69,
-  sbDown: 0x06004c6c,
+  sbUp: 0x06004c6c,
+  sbDown: 0x06004c69,
   // The 37px red-gem template 0x100002dc — must NOT be used here any more.
   wrongTrack: 0x06004d33,
   wrongThumb: 0x06004d34,

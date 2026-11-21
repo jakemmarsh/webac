@@ -104,3 +104,49 @@ export function bindHotClick(button: HTMLElement, step: () => void, timing: HotC
     if (timing) timer = setTimeout(tick, timing.delayS * 1000);
   });
 }
+
+/** An arrow button's normal / hover / pressed media (UI states 1 / 2 / 3). */
+export type ScrollbarArrowArt = readonly [number, number, number];
+
+/** The shape scrollbarArrowArt reads: a resolved type-11 ElementDesc (structural, so a test or tool can pass the parser's own). */
+export interface ScrollbarDescLike {
+  properties: ReadonlyMap<number, { valueEnum?: number; valueInt?: number }>;
+  children: ReadonlyMap<number, ScrollbarDescLike & { elementId: number; states: ReadonlyMap<number, { media: ReadonlyArray<{ file?: number }> }> }>;
+}
+
+/**
+ * The art of a resolved UIElement_Scrollbar desc's two arrow buttons BY
+ * ROLE, not by where the children's own rects put them (webac#33).
+ * p119 (attr 0x77 → UpdateButtonID_ @ 00470680, m_eIncrementButtonID) is the
+ * button UpdateScrollingArea @ 00470aa0 moves to (0, 0): the TOP of a
+ * vertical bar, the LEFT of a horizontal one. p120 (0x78, the decrement
+ * button) goes to the far corner. The HUD widget 0x2100003e:0x10000367 (and
+ * 0x10000455) authors its p120 button 0x10000071 (0x06004c69, the gem under
+ * a V) at y 0 and its p119 button 0x10000072 (0x06004c6c, the gem under a
+ * peak) at y 32, so a bar drawn from the rects points both arrows the wrong
+ * way; the chargen bar 0x2100004c:0x100002dc is authored the same way round.
+ * Retail's character-panel skills bar (reference/images/hud/character-panel-
+ * skills.jpg) shows the peak at the top. Null when a role id is missing or
+ * names no child.
+ */
+export function scrollbarArrowArt(desc: ScrollbarDescLike): { start: ScrollbarArrowArt; end: ScrollbarArrowArt; startId: number; endId: number } | null {
+  const roleId = (p: number): number | undefined => {
+    const prop = desc.properties.get(p);
+    return prop?.valueEnum ?? prop?.valueInt;
+  };
+  const startId = roleId(119);
+  const endId = roleId(120);
+  if (startId === undefined || endId === undefined) return null;
+  const art = (id: number): ScrollbarArrowArt | null => {
+    const child = [...desc.children.values()].find((c) => c.elementId === id);
+    if (!child) return null;
+    const img = (state: number): number | undefined => child.states.get(state)?.media.find((m) => typeof m.file === 'number' && m.file >>> 24 === 0x06)?.file;
+    const normal = img(1);
+    if (normal === undefined) return null;
+    return [normal, img(2) ?? normal, img(3) ?? normal];
+  };
+  const start = art(startId);
+  const end = art(endId);
+  if (!start || !end) return null;
+  return { start, end, startId, endId };
+}
