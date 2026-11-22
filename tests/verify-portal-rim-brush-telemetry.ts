@@ -66,13 +66,13 @@ function rig(snapshot: () => PortalSnapshot | null = () => snap()) {
 describe('sentPathReach: the server\'s swept move between two sent positions', () => {
   const reach = (a: SentPoint, b: SentPoint) => sentPathReach(a, b, PORTAL_AT, HUMAN_SPHERES, PORTAL_SPHERES, 1.919);
 
-  it('outdoors (the default tolerance) the server reaches ~0.1 m past the body touch (1.835 m → ~1.936 m for a human at the stock portal)', () => {
+  it('the sent path is judged at the plain radius sum (1.837 m for a human at the stock portal); the 0.2 m band only starts watches', () => {
     expect(bodyTouchesPortal(1.83, 0, HUMAN_SPHERES, PORTAL_SPHERES)).toBe(true);
     expect(bodyTouchesPortal(1.9, 0, HUMAN_SPHERES, PORTAL_SPHERES)).toBe(false);
-    // A move straight in that stops at 1.92 m (the live strafe distance that still teleported) reaches; 1.98 m does not.
-    expect(reach(around(4), around(1.92)).reached).toBe(true);
-    expect(reach(around(4), around(1.98)).reached).toBe(false);
-    expect(SERVER_REACH_TOLERANCE_M).toBe(0.1);
+    // BUG.portal-walkin-sent-judge-plain-sum: a move straight in that stops at 1.80 m reaches; 1.92 m (in the band) does not.
+    expect(reach(around(4), around(1.8)).reached).toBe(true);
+    expect(reach(around(4), around(1.92)).reached).toBe(false);
+    expect(SERVER_REACH_TOLERANCE_M).toBe(0.2);
   });
 
   it('live: standing still at 1.70 m is no move; backing straight out from 1.70 m is no collision; strafing along the rim is', () => {
@@ -80,16 +80,18 @@ describe('sentPathReach: the server\'s swept move between two sent positions', (
       expect(reach(around(d), around(d)).reached).toBe(false); // teleloc'd, standing
       expect(reach(around(d), around(d + 3)).reached).toBe(false); // backing straight away
       const p = around(d);
-      expect(reach(p, { x: p.x, y: p.y + 2.5, z: p.z }).reached).toBe(true); // strafing: tangent from inside the rim
+      // strafing: tangent from inside the plain radius sum reaches; from the band (1.85 / 1.92) it does not
+      // (2026-11-13 re-run: only a strafe aimed at the portal teleported from there).
+      expect(reach(p, { x: p.x, y: p.y + 2.5, z: p.z }).reached).toBe(d < 1.83);
     }
   });
 
   it('a chord that dips inside counts even with both ends outside; its horizontal nearest approach is reported', () => {
-    const r = reach({ x: PORTAL_AT.x - 3, y: PORTAL_AT.y + 1.85, z: PORTAL_AT.z }, { x: PORTAL_AT.x + 3, y: PORTAL_AT.y + 1.85, z: PORTAL_AT.z });
+    const r = reach({ x: PORTAL_AT.x - 3, y: PORTAL_AT.y + 1.8, z: PORTAL_AT.z }, { x: PORTAL_AT.x + 3, y: PORTAL_AT.y + 1.8, z: PORTAL_AT.z });
     expect(r.reached).toBe(true);
-    expect(r.closest).toBeCloseTo(1.85, 6);
+    expect(r.closest).toBeCloseTo(1.8, 6);
     const wide = reach({ x: PORTAL_AT.x - 3, y: PORTAL_AT.y + 2.2, z: PORTAL_AT.z }, { x: PORTAL_AT.x + 3, y: PORTAL_AT.y + 2.2, z: PORTAL_AT.z });
-    expect(wide).toEqual({ closest: expect.closeTo(2.2, 6), reached: false });
+    expect(wide).toEqual({ closest: expect.closeTo(2.2, 6), reached: false, dz: expect.closeTo(0, 6) });
   });
 
   it('height counts: a path 3 m below the portal never reaches it', () => {
@@ -98,7 +100,8 @@ describe('sentPathReach: the server\'s swept move between two sent positions', (
   });
 
   it('with either shape unknown the part-array reach stands in (horizontal)', () => {
-    expect(sentPathReach(around(4), around(1.95), PORTAL_AT, null, PORTAL_SPHERES, 1.919).reached).toBe(true);
+    expect(sentPathReach(around(4), around(1.9), PORTAL_AT, null, PORTAL_SPHERES, 1.919).reached).toBe(true);
+    expect(sentPathReach(around(4), around(1.95), PORTAL_AT, null, PORTAL_SPHERES, 1.919).reached).toBe(false);
     expect(sentPathReach(around(4), around(2.1), PORTAL_AT, HUMAN_SPHERES, [], 1.919).reached).toBe(false);
   });
 });

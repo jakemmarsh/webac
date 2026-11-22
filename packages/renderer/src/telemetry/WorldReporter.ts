@@ -120,6 +120,12 @@ export interface FirstMinuteEvent {
   contextLossCount: number;
   restoreMs: number | null;
   lostForMs: number | null;
+  /**
+   * BUG.webgl-lost-no-notice — the lost-graphics notice (ui/ContextLostNotice.ts) went up this session, and the
+   * player pressed its Reload (the page then leaves: exit closed_tab).
+   */
+  lostNoticeShown: boolean;
+  lostNoticeReload: boolean;
   gpu: GpuClass;
   /** devicePixelRatio to the nearest 0.25. */
   dpr: number | null;
@@ -302,6 +308,12 @@ export interface WorldLeftEvent {
   contextLossCount: number;
   restoreMs: number | null;
   lostForMs: number | null;
+  /**
+   * BUG.webgl-lost-no-notice — the lost-graphics notice (ui/ContextLostNotice.ts) went up this session, and the
+   * player pressed its Reload (the page then leaves: exit closed_tab).
+   */
+  lostNoticeShown: boolean;
+  lostNoticeReload: boolean;
   errors: number;
   /** Exit 'disconnected': what ended the session, and the socket's close code. */
   endCause?: WorldEndCause | null;
@@ -585,6 +597,9 @@ export class WorldReporter {
   private contextLossCount = 0;
   private contextLostAt: number | null = null;
   private contextRestoredAt: number | null = null;
+  /** BUG.webgl-lost-no-notice — the lost-graphics notice showed this session / its Reload was pressed. */
+  private lostNoticeShown = false;
+  private lostNoticeReload = false;
   private frames = 0;
   private worldFrames = 0;
   private lastFrameAt: number | null = null;
@@ -738,6 +753,8 @@ export class WorldReporter {
     this.contextLossCount = 0;
     this.contextLostAt = null;
     this.contextRestoredAt = null;
+    this.lostNoticeShown = false;
+    this.lostNoticeReload = false;
     this.frames = 0;
     this.worldFrames = 0;
     this.lastFrameAt = null;
@@ -859,8 +876,18 @@ export class WorldReporter {
     this.contextRestoredAt = this.now();
   }
 
+  /** BUG.webgl-lost-no-notice — the lost-graphics notice went up. */
+  lostNoticeShownNow(): void {
+    if (this.enterAt !== null) this.lostNoticeShown = true;
+  }
+
+  /** BUG.webgl-lost-no-notice — the player pressed the notice's Reload (the pagehide's report carries it). */
+  lostNoticeReloadNow(): void {
+    if (this.enterAt !== null) this.lostNoticeReload = true;
+  }
+
   /** TELEMETRY.context-restore — the loss / restore fields at `at`. */
-  private contextFields(at: number): Pick<FirstMinuteEvent, 'contextRestored' | 'contextLossCount' | 'restoreMs' | 'lostForMs'> {
+  private contextFields(at: number): Pick<FirstMinuteEvent, 'contextRestored' | 'contextLossCount' | 'restoreMs' | 'lostForMs' | 'lostNoticeShown' | 'lostNoticeReload'> {
     const lostAt = this.contextLostAt;
     const restoredAt = this.contextRestoredAt;
     return {
@@ -868,6 +895,8 @@ export class WorldReporter {
       contextLossCount: this.contextLossCount,
       restoreMs: lostAt !== null && restoredAt !== null ? count(restoredAt - lostAt, SESSION_CAP_MS) : null,
       lostForMs: lostAt !== null && restoredAt === null ? count(Math.max(0, at - lostAt), SESSION_CAP_MS) : null,
+      lostNoticeShown: this.lostNoticeShown,
+      lostNoticeReload: this.lostNoticeReload,
     };
   }
 

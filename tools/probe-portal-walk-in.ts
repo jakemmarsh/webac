@@ -26,6 +26,11 @@
  *                walk straight past, one pass per value; prints the body's closest pass, whether it teleported,
  *                and the telemetry's sentClosest / sentReached.
  *
+ *   pass         MON 2026-11-21 (prod trace a6445ec44596b3eb, Coldeve wcid 24436 in 0x9E440021: overlapped, sentClosest
+ *                1.92, no teleport): walk straight past a STOCK portal where it stands (PASS_WCID at PASS_LB [PASS_X PASS_Y
+ *                PASS_Z]) heading PASS_BEARING, once per lateral offset in PASS_OFFSETS (m; + = right of the heading),
+ *                starting PASS_RUN m before it. Prints the closest horizontal and 3-D pass and whether it teleported.
+ *
  *   BASE=http://localhost:5477/ ACCT=testacjs3 npx tsx tools/probe-portal-walk-in.ts [scenario ...]
  *
  * Uses its own deleted-at-exit browser profile (createRunProfile) and deletes
@@ -62,8 +67,8 @@ await page.route('**/client-preworld', async (route) => {
     const ev = JSON.parse(body) as Record<string, unknown>;
     if (typeof ev.outcome === 'string' && ev.outcome.startsWith('portal_')) {
       events.push(ev);
-      const { outcome, trigger, wcid, useSent, serverWalk, overlapped, closest, weenieErrors, chatTemplate, endDist, waitedMs, ms, sentClosest, sentReached } = ev;
-      console.log(`${ts()} EVENT ${JSON.stringify({ outcome, trigger, wcid, useSent, serverWalk, overlapped, closest, weenieErrors, chatTemplate, endDist, waitedMs, ms, sentClosest, sentReached })}`);
+      const { outcome, trigger, wcid, useSent, serverWalk, overlapped, closest, weenieErrors, chatTemplate, endDist, waitedMs, ms, sentClosest, sentReached, sentReach, sentDz, reach } = ev;
+      console.log(`${ts()} EVENT ${JSON.stringify({ outcome, trigger, wcid, useSent, serverWalk, overlapped, closest, reach, weenieErrors, chatTemplate, endDist, waitedMs, ms, sentClosest, sentReached, sentReach, sentDz })}`);
     }
   } catch { /* not JSON */ }
   await route.fulfill({ status: 204, body: '' });
@@ -240,6 +245,33 @@ if (run('real')) {
     await page.waitForTimeout(6000);
     const end = await player();
     console.log(`${ts()} REAL bearing=${b} start=${JSON.stringify(start)} end=${JSON.stringify(end)} teleported=${!end.cell.startsWith(LB.toString(16))}`);
+  }
+}
+if (run('pass')) {
+  const PX = Number(process.env.PASS_X ?? 103.12), PY = Number(process.env.PASS_Y ?? 15.05), PZ = Number(process.env.PASS_Z ?? 33.78);
+  const LB = Number(process.env.PASS_LB ?? 0x9e44), WCID = Number(process.env.PASS_WCID ?? 24436);
+  const bearing = Number(process.env.PASS_BEARING ?? 0), run0 = Number(process.env.PASS_RUN ?? 6);
+  const offsets = (process.env.PASS_OFFSETS ?? '-1.80,-1.88,-1.92,-1.97,1.80,1.88,1.92,1.97').split(',').map(Number);
+  const rad = (bearing * Math.PI) / 180, fx = Math.sin(rad), fy = Math.cos(rad), rx = Math.cos(rad), ry = -Math.sin(rad);
+  for (const off of offsets) {
+    await fresh(`pass: walk past stock portal ${WCID} at ${off} m (heading ${bearing})`);
+    const x = PX + off * rx - run0 * fx, y = PY + off * ry - run0 * fy;
+    const cell = ((LB << 16) | (Math.floor(x / 24) * 8 + Math.floor(y / 24) + 1)) >>> 0;
+    await chatLine(page, `@teleloc 0x${cell.toString(16).padStart(8, '0')} [${x.toFixed(2)} ${y.toFixed(2)} ${(PZ + 1).toFixed(2)}] 1 0 0 0`);
+    await page.waitForTimeout(3000);
+    await waitFor(page, `!window.__ac.gameUI.worldHiddenByPortalSpace`, { timeoutMs: 60_000, reloadEveryMs: 0 });
+    await page.waitForTimeout(3000);
+    await ev(`JSON.stringify(window.__acAgent.turn(${bearing}))`);
+    await page.waitForTimeout(1500);
+    await ev(`(() => { window.__portalProbeMin = 1e9; window.__portalProbeMin3 = 1e9; window.__portalProbeTimer = setInterval(() => { const ac = window.__ac; const p = ac.playerModel.position;
+      for (const [g, o] of ac.serverObjectManager.getAllObjects()) if (o.weenieClassId === ${WCID} && !ac.gameUI.worldHiddenByPortalSpace) {
+        const h = Math.hypot(o.worldX - p.x, o.worldZ - p.z); if (h < window.__portalProbeMin) { window.__portalProbeMin = h; window.__portalProbeDy = (o.worldY ?? 0) - p.y; } } }, 20); })()`);
+    const start = await player(); const before = await teleports();
+    await hold('KeyW', Number(process.env.PASS_MS ?? 3500));
+    await page.waitForTimeout(7000);
+    const min = await ev<number>('window.__portalProbeMin'); const dy = await ev<number>('window.__portalProbeDy');
+    await ev(`clearInterval(window.__portalProbeTimer)`);
+    console.log(`${ts()} PASS off=${off} closest=${min.toFixed(2)} portalBaseAboveFeet=${(dy ?? 0).toFixed(2)} startCell=${start.cell} teleported=${(await teleports()) > before}`);
   }
 }
 if (run('side')) {

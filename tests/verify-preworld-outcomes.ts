@@ -666,7 +666,7 @@ describe('which screen the player is on (preworldScreenFor), and deliberate relo
     h.st.gameStarted = false;
     h.r.pageLeft();
     expect(h.sent).toHaveLength(0);
-    expect([...RELOAD_REASONS]).toEqual(['era_switch', 'update', 'epilogue']);
+    expect([...RELOAD_REASONS]).toEqual(['era_switch', 'update', 'epilogue', 'context_lost']);
     const h2 = mainLike();
     h2.st.launcherActive = true;
     h2.r.leavingForReload('update');

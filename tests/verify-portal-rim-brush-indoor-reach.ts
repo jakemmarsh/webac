@@ -12,6 +12,8 @@
  * Prod misfiled two indoor rim passes as findings: trace 80bb16163b8ab6fb (2026-11-10, cell 0x01110105,
  * sentClosest 1.88) and fa1539f3d8670e79 (2026-11-13, player 0x00070139, portal 0x0007012a, sentClosest 1.91).
  * Now an EnvCell portal (cell low 16 bits >= 0x0100) is judged with no tolerance; a landcell keeps 0.1 m.
+ * 2026-11-21 (BUG.portal-walkin-sent-judge-plain-sum): every sent path is judged at the plain sum; the cell's band
+ * (0.2 m outdoors, 0 indoors) only starts watches.
  */
 import { describe, it, expect } from 'vitest';
 import {
@@ -66,16 +68,16 @@ function rig(portalCell: number, playerCell = portalCell) {
 
 describe('serverReachTolerance: by the portal\'s cell', () => {
   it('an EnvCell gets no tolerance; a landcell keeps 0.1 m; unknown keeps 0.1 m (stays a finding)', () => {
-    expect(SERVER_REACH_TOLERANCE_M).toBe(0.1);
+    expect(SERVER_REACH_TOLERANCE_M).toBe(0.2); // the touch band (BUG.portal-walkin-sent-judge-plain-sum)
     expect(SERVER_REACH_TOLERANCE_INDOOR_M).toBe(0);
     expect(serverReachTolerance(INDOOR_A)).toBe(0);
     expect(serverReachTolerance(INDOOR_B_PORTAL, INDOOR_B_PLAYER)).toBe(0);
     expect(serverReachTolerance(0x01aa0100)).toBe(0); // the first EnvCell id
-    expect(serverReachTolerance(OUTDOOR)).toBe(0.1);
-    expect(serverReachTolerance(0xa9b400ff)).toBe(0.1); // below 0x0100: a landcell
-    expect(serverReachTolerance(null, null)).toBe(0.1);
+    expect(serverReachTolerance(OUTDOOR)).toBe(0.2);
+    expect(serverReachTolerance(0xa9b400ff)).toBe(0.2); // below 0x0100: a landcell
+    expect(serverReachTolerance(null, null)).toBe(0.2);
     // The portal's cell decides; the player's only stands in when the portal's is unknown.
-    expect(serverReachTolerance(OUTDOOR, INDOOR_A)).toBe(0.1);
+    expect(serverReachTolerance(OUTDOOR, INDOOR_A)).toBe(0.2);
     expect(serverReachTolerance(null, INDOOR_A)).toBe(0);
     expect(serverReachTolerance(0xffff0100)).toBe(0); // a high cell id is still read as unsigned
   });
@@ -84,7 +86,7 @@ describe('serverReachTolerance: by the portal\'s cell', () => {
     const at = serverFramePoint(INDOOR_A, 50, 60, -12);
     const a: SentPoint = { x: at.x - 3, y: at.y + 1.88, z: at.z };
     const b: SentPoint = { x: at.x + 3, y: at.y + 1.88, z: at.z };
-    expect(sentPathReach(a, b, at, HUMAN_SPHERES, PORTAL_SPHERES, 1.919).reached).toBe(true); // default = outdoor band
+    expect(sentPathReach(a, b, at, HUMAN_SPHERES, PORTAL_SPHERES, 1.919).reached).toBe(false); // default = the plain sum
     expect(sentPathReach(a, b, at, HUMAN_SPHERES, PORTAL_SPHERES, 1.919, 0.1).reached).toBe(true);
     expect(sentPathReach(a, b, at, HUMAN_SPHERES, PORTAL_SPHERES, 1.919, 0).reached).toBe(false);
     // The part-array fallback takes it too.
@@ -112,9 +114,9 @@ describe('PortalUseReporter: an indoor walk past the rim is a rim brush; outdoor
   });
 
   for (const d of [1.88, 1.91]) {
-    it(`outdoors (landcell 0xa9b40031) a pass at ${d} m with no teleport stays portal_use_failed (the 0.1 m band kept)`, () => {
+    it(`outdoors (landcell 0xa9b40031) a pass at ${d} m with no teleport is a rim brush (judged at the plain sum since 2026-11-21)`, () => {
       const ev = rig(OUTDOOR).passAt(d);
-      expect(ev).toMatchObject({ outcome: 'portal_use_failed', sentReached: true, sentClosest: d, portalCell: 'a9b40031' });
+      expect(ev).toMatchObject({ outcome: 'portal_rim_brush', sentReached: false, sentClosest: d, portalCell: 'a9b40031' });
     });
   }
 
@@ -124,19 +126,19 @@ describe('PortalUseReporter: an indoor walk past the rim is a rim brush; outdoor
 });
 
 describe('the event reports the reach it judged with (sentReach); reach stays the part-array radius', () => {
-  it('indoors sentReach = the radius sum 1.84 m, outdoors 1.94 m; reach is 1.92 in both', () => {
+  it('sentReach = the plain radius sum 1.84 m indoors and outdoors; reach is 1.92 in both', () => {
     const indoor = rig(INDOOR_A).passAt(1.88);
     expect(indoor).toMatchObject({ reach: 1.92, sentReach: 1.84 });
     const outdoor = rig(OUTDOOR).passAt(1.88);
-    expect(outdoor).toMatchObject({ reach: 1.92, sentReach: 1.94 });
+    expect(outdoor).toMatchObject({ reach: 1.92, sentReach: 1.84 });
   });
 
-  it('sentReachOf: the largest sphere pair + tolerance; the part-array reach when a shape is unknown', () => {
+  it('sentReachOf: the largest sphere pair (no tolerance); the part-array reach when a shape is unknown', () => {
     const base = { reach: 1.919, bodySpheres: HUMAN_SPHERES, portalSpheres: PORTAL_SPHERES, playerCell: null };
     expect(sentReachOf({ ...base, portalCell: INDOOR_A })).toBeCloseTo(0.48 + 1.357, 6);
-    expect(sentReachOf({ ...base, portalCell: OUTDOOR })).toBeCloseTo(0.48 + 1.357 + 0.1, 6);
+    expect(sentReachOf({ ...base, portalCell: OUTDOOR })).toBeCloseTo(0.48 + 1.357, 6);
     expect(sentReachOf({ ...base, bodySpheres: null, portalCell: INDOOR_A })).toBeCloseTo(1.919, 6);
-    expect(sentReachOf({ ...base, portalSpheres: [], portalCell: OUTDOOR })).toBeCloseTo(2.019, 6);
+    expect(sentReachOf({ ...base, portalSpheres: [], portalCell: OUTDOOR })).toBeCloseTo(1.919, 6);
   });
 
   it('the bridge keeps sentReach and drops a malformed one', () => {

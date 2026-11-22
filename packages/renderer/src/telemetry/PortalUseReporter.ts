@@ -153,6 +153,23 @@
  * raw PropertyInt.PlayerKillerStatus (134) as the client knew it when the watch began (PortalSnapshot.pk,
  * from PlayerDescription / PrivateUpdatePropertyInt), null when unknown. Era-neutral: GDLE and the AC1999
  * server send the same property; only ACE splits its move-to on it.
+ *
+ * BUG.portal-walkin-body-spheres-unknown (2026-11-21): until now no walk-in was judged on the player's body.
+ * main.ts read our spheres from ServerObjectManager, which never holds our own object (createObject skips our
+ * guid), so the touch and the sent path both fell back to the portal's part-array radius (1.919 m), horizontally
+ * and at any height: every prod walk-in carried sentReach 2.02 outdoors, never the 1.94 the body gives. ACE
+ * collides the player's Setup spheres with the portal's in 3-D at each transition step (PhysicsObj.cs
+ * FindObjCollisions → Sphere.cs IntersectsSphere, ObstructionEthereal branch), so on a slope or a stair a
+ * horizontal 1.7-1.9 m pass can be out of reach. The body now comes from the collision body's layout
+ * (bodySpheresFromLayout), the touch carries serverReachTolerance, and events carry `sentDz`.
+ *
+ * BUG.portal-walkin-sent-judge-plain-sum (2026-11-21): live on local ACE with the body known, the server's reach on
+ * the same spheres varied by site inside (sum, sum + ~0.17] (SERVER_REACH_TOLERANCE_M has the numbers): Coldeve's
+ * 24436 never took a pass at 1.88 m or more while a flat Holtburg 1087 took 1.94 m. So the decision changed, not
+ * the measure: a silent walk-in is `portal_use_failed` only when its sent path came within the plain radius sum
+ * (SENT_JUDGE_TOLERANCE_M 0, indoors and out; `sentReach` reports that sum), else `portal_rim_brush`; the touch
+ * that starts a watch keeps a 0.2 m outdoor band and is swept over the body's move between 100 ms checks
+ * (sweptPortalTouch), so a band walk-in the server takes is counted as `portal_used`.
  */
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 import type { MoveToPhase } from '../controllers/MoveToManager.js';
@@ -343,15 +360,34 @@ export function overlapsPortal(horizontalM: number, portalBaseAboveFeetM: number
 export function bodyTouchesPortal(
   horizontalM: number, portalBaseAboveFeetM: number,
   body: readonly { z: number; radius: number }[], portal: readonly { z: number; radius: number }[],
+  toleranceM = 0,
 ): boolean {
   if (!Number.isFinite(horizontalM) || !Number.isFinite(portalBaseAboveFeetM)) return false;
+  const tol = Number.isFinite(toleranceM) ? Math.max(0, toleranceM) : 0;
   for (const b of body) {
     for (const p of portal) {
       const dz = portalBaseAboveFeetM + p.z - b.z;
-      if (Math.hypot(horizontalM, dz) <= b.radius + p.radius) return true;
+      if (Math.hypot(horizontalM, dz) <= b.radius + p.radius + tol) return true;
     }
   }
   return false;
+}
+
+/**
+ * BUG.portal-walkin-body-spheres-unknown (2026-11-21) — the player's own body spheres as the touch check and the
+ * sent-path judge need them ({ z: centre height above the feet, radius }), from the collision body's resolved
+ * layout (DungeonCollision.bodySphereLayout: the player's Setup spheres × scale, the shapes ACE's transition
+ * sweeps: PhysicsObj.transition → trans.InitSphere(PartArray.GetNumSphere(), sphere, Scale)). The player is never
+ * a ServerObjectManager object (createObject skips our own guid), so the old lookup of its `physicsSpheres`
+ * always came back empty and every walk-in was judged on the portal's part-array radius alone, horizontally.
+ * null for no layout or no usable sphere.
+ */
+export function bodySpheresFromLayout(
+  layout: { radius: number; heights: readonly number[] } | null | undefined,
+): { z: number; radius: number }[] | null {
+  if (!layout || !Number.isFinite(layout.radius) || !(layout.radius > 0)) return null;
+  const out = layout.heights.filter((h) => Number.isFinite(h)).map((z) => ({ z, radius: layout.radius }));
+  return out.length ? out : null;
 }
 
 /** A point in the server's frame: east, north, up (m), landblock × 192 m + the cell-local offset. */
@@ -363,12 +399,29 @@ export function serverFramePoint(cellId: number, x: number, y: number, z: number
 }
 
 /**
- * BUG.portal-rim-brush-telemetry — how much wider the server's collision reaches than bodyTouchesPortal
- * OUTDOORS (progress.md 2026-11-03: about 0.1 m; live 2026-11-13 on local ACE at Holtburg (landcell), a
- * spawned 1087 passed at 1.93 / 1.94 / 1.97 / 1.99 / 2.00 m teleported every time; the 2026-11-08 "strafe
- * along the rim at 1.92 m" was indoors and a move into the portal, see SERVER_REACH_TOLERANCE_INDOOR_M).
+ * The TOUCH band: how far past the plain radius sum a walk-in may reach the server's collision, used only to
+ * START a watch (main.ts portalUseCheck → bodyTouchesPortal / sweptPortalTouch), so a walk-in the server does
+ * take in that band ends as `portal_used` instead of going unseen. It never makes a silent walk-in a finding:
+ * that is judged at the plain radius sum (SENT_JUDGE_TOLERANCE_M).
+ * Live, local ACE, the same Setup spheres (portal 0x020001B3 / 0x020005D6 r 1.357 at 1.42 m, human r 0.48 at
+ * 0.475 / 1.35 m: sum 1.837 m), closest horizontal pass of the body centre:
+ * - 2026-11-13 graze, Holtburg spawned 1087 (flat): 1.93 / 1.94 / 1.97 / 1.99 / 2.00 m teleported;
+ * - 2026-11-21 graze, Holtburg spawned 1087: 1.67-1.73 and 1.94 m teleported, 2.00 m did not; the 1.94 m pass
+ *   teleported with NO event (3-D 1.941 m > sum + 0.1: the old 0.1 m band never started its watch);
+ * - 2026-11-21 pass (stock 24436 in place at 0x9E440021, walking north): west side (portal base +0.06..0.13 m
+ *   above the feet) 1.84 teleported, 1.92 / 1.94 / 2.01 did not; east side (base -0.20) 1.80 teleported,
+ *   1.90 / 1.92 / 1.97 did not.
+ * So the server's outdoor reach on the same spheres varies by site within (sum, about sum + 0.17]: 0.2 m covers
+ * every teleport measured (2.00 m flat = 3-D 2.001 m).
  */
-export const SERVER_REACH_TOLERANCE_M = 0.1;
+export const SERVER_REACH_TOLERANCE_M = 0.2;
+/**
+ * BUG.portal-walkin-sent-judge-plain-sum (2026-11-21) — the tolerance a silent walk-in's SENT path is judged
+ * with: none. A walk-in is `portal_use_failed` only when the sent path came within the plain radius sum; one that
+ * reached only into the touch band is `portal_rim_brush` (Coldeve 24436 above: 1.92 m passes on both sides,
+ * sentDz 0.1 / -0.22, never teleported, and with the 0.1 m band each posted a false `portal_use_failed`).
+ */
+export const SENT_JUDGE_TOLERANCE_M = 0;
 /**
  * BUG.portal-rim-brush-indoor-reach (2026-11-13) — indoors (an EnvCell portal) the server's reach is the plain
  * radius sum. Live on local ACE (end of retail), tools/probe-portal-walk-in.ts graze: a spawned 1087 in the
@@ -385,9 +438,9 @@ export const SERVER_REACH_TOLERANCE_M = 0.1;
 export const SERVER_REACH_TOLERANCE_INDOOR_M = 0;
 
 /**
- * The tolerance the sent path is judged with for a portal in `portalCell` (fall back to the player's cell when
+ * The touch band (see SERVER_REACH_TOLERANCE_M) for a portal in `portalCell` (fall back to the player's cell when
  * the portal's is unknown): an EnvCell (low 16 bits >= 0x0100) gets SERVER_REACH_TOLERANCE_INDOOR_M, a
- * landcell or an unknown cell SERVER_REACH_TOLERANCE_M (the wider band keeps an unknown case a finding).
+ * landcell or an unknown cell SERVER_REACH_TOLERANCE_M. Only starts watches; the verdict uses SENT_JUDGE_TOLERANCE_M.
  * One rule in every era: the measurements are ACE; GDLE and the AC1999 server have none either way and ran
  * the one outdoor-measured band until now.
  */
@@ -404,7 +457,11 @@ export function serverReachTolerance(portalCell: number | null | undefined, play
 export const SENT_OUTWARD_COS = 0.5;
 
 /** One sent segment against a portal: its nearest horizontal approach, and whether the server's sweep reaches the portal on it. */
-export interface SentSegmentReach { closest: number; reached: boolean }
+export interface SentSegmentReach {
+  closest: number; reached: boolean;
+  /** The portal's origin height minus the sent body's (feet) at the segment's horizontal nearest point, m. */
+  dz: number;
+}
 
 /**
  * The server's swept move from `a` to `b` (two positions it was sent, body origins) against the portal at
@@ -420,16 +477,17 @@ export function sentPathReach(
   body: readonly { z: number; radius: number }[] | null | undefined,
   portalSpheres: readonly { z: number; radius: number }[] | null | undefined,
   fallbackReach: number,
-  toleranceM: number = SERVER_REACH_TOLERANCE_M,
+  toleranceM: number = SENT_JUDGE_TOLERANCE_M,
 ): SentSegmentReach {
-  const tol = Number.isFinite(toleranceM) ? Math.max(0, toleranceM) : SERVER_REACH_TOLERANCE_M;
+  const tol = Number.isFinite(toleranceM) ? Math.max(0, toleranceM) : SENT_JUDGE_TOLERANCE_M;
   const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
   // Horizontal nearest approach.
   const h2 = dx * dx + dy * dy;
   const th = h2 > 0 ? Math.min(1, Math.max(0, ((portal.x - a.x) * dx + (portal.y - a.y) * dy) / h2)) : 0;
   const closest = Math.hypot(a.x + th * dx - portal.x, a.y + th * dy - portal.y);
+  const nearDz = portal.z - (a.z + th * dz);
   const len = Math.hypot(dx, dy, dz);
-  if (!(len > 1e-4)) return { closest, reached: false };
+  if (!(len > 1e-4)) return { closest, reached: false, dz: nearDz };
   const pairs: { off: number; r: number; horizontal: boolean }[] = [];
   if (body?.length && portalSpheres?.length) {
     for (const s of body) for (const p of portalSpheres) pairs.push({ off: p.z - s.z, r: s.radius + p.radius + tol, horizontal: false });
@@ -452,12 +510,12 @@ export function sentPathReach(
     const cos = out > 1e-6 ? -(qx * dx + qy * dy + qz * sz) / (out * Math.sqrt(l2)) : 1;
     if (cos <= SENT_OUTWARD_COS) { reached = true; break; }
   }
-  return { closest, reached };
+  return { closest, reached, dz: nearDz };
 }
 
 /**
- * The nominal reach sentPathReach judges a snapshot's portal with: the largest body/portal radius sum (the
- * part-array reach with either shape unknown) + serverReachTolerance for the portal's cell.
+ * The reach a silent walk-in is judged against (reported as `sentReach`): the largest body/portal radius sum, or
+ * the part-array reach with either shape unknown, + SENT_JUDGE_TOLERANCE_M (0: the plain sum, indoors and out).
  */
 export function sentReachOf(s: Pick<PortalSnapshot, 'reach' | 'bodySpheres' | 'portalSpheres' | 'portalCell' | 'playerCell'>): number {
   let sum = 0;
@@ -466,7 +524,29 @@ export function sentReachOf(s: Pick<PortalSnapshot, 'reach' | 'bodySpheres' | 'p
   } else {
     sum = Math.max(0, s.reach || 0);
   }
-  return sum + serverReachTolerance(s.portalCell, s.playerCell);
+  return sum + SENT_JUDGE_TOLERANCE_M;
+}
+
+/**
+ * BUG.portal-walkin-sent-judge-plain-sum — the body's move since the last 100 ms check against a portal, as a
+ * touch: the nearest horizontal point of the segment prev → now (feet heights interpolated), so a graze that
+ * crosses the band between two checks still starts a watch. `prev` null = the point `now` alone. Render frame:
+ * x / z horizontal, y up; `portalBaseY` = the portal's origin height. Returns whether it touches and the
+ * horizontal distance it was judged at.
+ */
+export function sweptPortalTouch(
+  prev: { x: number; y: number; z: number } | null, now: { x: number; y: number; z: number },
+  portal: { x: number; baseY: number; z: number },
+  body: readonly { z: number; radius: number }[], portalSpheres: readonly { z: number; radius: number }[],
+  toleranceM = 0,
+): { touching: boolean; horizontal: number } {
+  const a = prev ?? now;
+  const dx = now.x - a.x, dz = now.z - a.z;
+  const h2 = dx * dx + dz * dz;
+  const t = h2 > 1e-12 ? Math.min(1, Math.max(0, ((portal.x - a.x) * dx + (portal.z - a.z) * dz) / h2)) : 1;
+  const horizontal = Math.hypot(a.x + t * dx - portal.x, a.z + t * dz - portal.z);
+  const feetY = a.y + t * (now.y - a.y);
+  return { touching: bodyTouchesPortal(horizontal, portal.baseY - feetY, body, portalSpheres, toleranceM), horizontal };
 }
 
 /** A server chat line worth a template: it speaks of portals or teleports. */
@@ -595,6 +675,12 @@ export interface PortalUseFailedEvent extends Ids {
    */
   sentReach: number | null;
   /**
+   * BUG.portal-walkin-body-spheres-unknown — the portal's origin height minus the sent body's feet at the point of
+   * `sentClosest`, m 0.01 (on a slope a horizontal graze is a wider 3-D one: ACE's touch is sphere to sphere).
+   * null = no segment.
+   */
+  sentDz: number | null;
+  /**
    * OBS.portal-use-server-walk-run — each server movement of the player in the watch, in order (at most
    * MAX_MOVE_RECORDS): its MovementType (6 MoveToObject, 7 MoveToPosition, 8 TurnToObject, 9 TurnToHeading)
    * and how our MoveToManager ended it (MOVE_TO_ENDS). Empty = no server movement.
@@ -687,6 +773,7 @@ interface Watch {
   useOutstanding: boolean;
   refusalLeadMs: number | null;
   sentClosest: number | null;
+  sentDz: number | null;
   sentReached: boolean;
   /** OBS.portal-use-server-walk-run — the server movements (types / ends index-aligned), the running one, the last MoveTo. */
   moveTypes: number[];
@@ -866,9 +953,10 @@ export class PortalUseReporter {
   private sentSegment(a: SentPoint, b: SentPoint): void {
     const w = this.watch;
     if (!w || !w.snap.portalAt) return;
+    // BUG.portal-walkin-sent-judge-plain-sum — judged at the plain radius sum; the band only starts watches.
     const r = sentPathReach(a, b, w.snap.portalAt, w.snap.bodySpheres, w.snap.portalSpheres, w.snap.reach,
-      serverReachTolerance(w.snap.portalCell, w.snap.playerCell));
-    if (w.sentClosest === null || r.closest < w.sentClosest) w.sentClosest = r.closest;
+      SENT_JUDGE_TOLERANCE_M);
+    if (w.sentClosest === null || r.closest < w.sentClosest) { w.sentClosest = r.closest; w.sentDz = r.dz; }
     if (r.reached) w.sentReached = true;
   }
 
@@ -1075,6 +1163,7 @@ export class PortalUseReporter {
       sentClosest: w.sentClosest === null ? null : r2(w.sentClosest),
       sentReached: w.sentClosest === null ? null : w.sentReached,
       sentReach: s.portalAt ? r2(sentReachOf(s)) : null,
+      sentDz: w.sentClosest === null || w.sentDz === null ? null : r2(w.sentDz),
       moveTypes: [...w.moveTypes],
       moveEnds: w.moveEnds.map((e) => e ?? 'running'),
       moveDist: mv ? dist3(mv.start, mv.target) : null,
@@ -1117,7 +1206,7 @@ export class PortalUseReporter {
       useDone: null, errors: [], chatLines: 0, chatType: null, chatTemplate: null,
       sends: 0, busyHeld: 0, serverMoves: 0, keysAtSend: null, movesSent: 0, useDones: 0,
       firstSendAt: null, firstUseDoneMs: null, useOutstanding: false, refusalLeadMs: null,
-      sentClosest: null, sentReached: false,
+      sentClosest: null, sentDz: null, sentReached: false,
       moveTypes: [], moveEnds: [], move: null, lastMoveTo: null, chainBreaks: 0, chainBreakTypes: [],
     };
     // The server's latest swept move (into the last position sent) is part of this walk-in's path.

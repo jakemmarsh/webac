@@ -9,6 +9,7 @@ import { outdoorGroundY, floorSearchFromY, traceGroundAlongPath, interiorGroundY
 import * as THREE from 'three';
 import { installCpuBacked2dCanvases } from './ui/CanvasBacking.js';
 import { installContextHealth, uiCanvasHealth } from './ui/ContextHealth.js';
+import { ContextLostNotice } from './ui/ContextLostNotice.js';
 import { freezeStaticTransform } from './utils/freezeStatic.js';
 import { pageStorage } from './utils/pageStorage.js';
 import { readResponseBytes } from './dat/readResponseBytes.js';
@@ -459,7 +460,7 @@ import { RefusalReporter, scrubNames, showServerText } from './telemetry/Refusal
 import { knownObjectNames, pendingRequestDetail, castRefusalDetail, selectionRefusalDetail, CastPressTracker, type RefusalDetail, type PlacedObject } from './telemetry/RefusalTemplates.js';
 import { ObjsendReporter, countReleasedInView, summarizeObjects, type ObjsendSnapshot } from './telemetry/ObjsendReporter.js';
 import { MoveLimiterReporter } from './telemetry/MoveLimiterReporter.js';
-import { PortalUseReporter, bodyTouchesPortal, isPortalObject, overlapsPortal, ownMovementTouch, serverFramePoint, type PortalSnapshot, type PortalUseHeld, type MoveToStopReason } from './telemetry/PortalUseReporter.js';
+import { PortalUseReporter, bodySpheresFromLayout, isPortalObject, serverReachTolerance, sweptPortalTouch, overlapsPortal, ownMovementTouch, serverFramePoint, type PortalSnapshot, type PortalUseHeld, type MoveToStopReason } from './telemetry/PortalUseReporter.js';
 import { accountTag, browserId, realLocalStorage } from './telemetry/LoginTags.js';
 import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, serverIdFromUrl, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { probeCapabilities, showCapabilityScreen, renderAdaptFor, runCapabilityGate, browserCanCreateWebGl2 } from './boot/Capability.js';
@@ -1413,6 +1414,13 @@ async function main() {
   // PERF.slow-first-minute-diagnostics — the main-thread work outside frameStep (telemetry/MainThreadCost.ts).
   worldReporter.setHandlerMeters(netHandlerCost, streamHandlerCost);
   worldReporter.install(window, document, canvas);
+  // BUG.webgl-lost-no-notice — a game context the browser never gives back gets a notice with Reload.
+  new ContextLostNotice(canvas, {
+    doc: document,
+    inWorld: () => worldReporter?.inWorld ?? false,
+    onShown: () => worldReporter?.lostNoticeShownNow(),
+    onReload: () => { worldReporter?.lostNoticeReloadNow(); preworldReporter?.leavingForReload('context_lost'); },
+  });
   // PERF.slow-minute-power-evidence — battery / mains power, asked once now and never awaited.
   worldReporter.readBattery(navigator as Navigator & { getBattery?: () => Promise<unknown> });
   automationReporter = new AutomationReporter({
@@ -3785,6 +3793,14 @@ async function main() {
    * portal's flags, PhysicsState, use radius and reach, and player → portal in the server's frame
    * (east, north, up: landblock × 192 m + the cell-local offset; a dungeon's cells share the frame).
    */
+  /**
+   * BUG.portal-walkin-body-spheres-unknown — the player's body spheres ({ z above the feet, radius }) from the
+   * active collision body (the player's Setup spheres × scale; the shapes ACE's transition sweeps), null when none.
+   * ServerObjectManager.createObject skips our own guid, so `getObject(ourGuid).physicsSpheres` never existed.
+   */
+  function playerBodySpheres(): { z: number; radius: number }[] | null {
+    return bodySpheresFromLayout((playerInDungeon ? dungeonCollision : outdoorCollision)?.bodySphereLayout);
+  }
   function portalSnapshot(guid: number): PortalSnapshot | null {
     const o = serverObjectManager?.getObject(guid);
     if (!o) return null;
@@ -3801,7 +3817,8 @@ async function main() {
       playerCell: me?.cellId ? me.cellId >>> 0 : null, portalCell: p?.landblock ? p.landblock >>> 0 : null,
       // BUG.portal-rim-brush-telemetry — what the sent path is judged against (the shapes bodyTouchesPortal tests).
       portalAt: p && p.landblock ? serverFramePoint(p.landblock, p.x, p.y, p.z) : null,
-      bodySpheres: serverObjectManager?.getObject(aceCharGuid ?? myPlayerGuid ?? 0)?.physicsSpheres ?? null,
+      // BUG.portal-walkin-body-spheres-unknown — our own body is no ServerObjectManager object: its collision body's spheres.
+      bodySpheres: playerBodySpheres(),
       portalSpheres: o.physicsSpheres ?? null,
       // OBS.portal-use-pk-status — the int mirror PlayerDescription seeds (no default: absent = unknown).
       pk: playerState.serverIntProps.get(PropertyInt.PlayerKillerStatus) ?? null,
@@ -3861,12 +3878,14 @@ async function main() {
       airborne: isPlayerAirborne,
       moveSent: portalCheckMoveSent,
     });
+    // BUG.portal-walkin-sent-judge-plain-sum — the body's move since the last check (none across a placement).
+    const bodyPrev = portalCheckPlaced || activeCorrection !== null ? null : portalCheckBody;
     portalCheckBody = bodyNow;
     portalCheckPlaced = false;
     portalCheckMoveSent = false;
     const inside: number[] = [];
     const insideAt: number[] = [];
-    const body = serverObjectManager.getObject(aceCharGuid ?? myPlayerGuid ?? 0)?.physicsSpheres;
+    const body = playerBodySpheres();
     const watched = portalUseReporter.watching;
     for (const o of serverObjectManager.getAllObjects().values()) {
       if (!isPortalObject(o) || o.wielderId || !o.position) continue;
@@ -3877,10 +3896,16 @@ async function main() {
       // 1.92 m for the stock portal) is wider than that touch (1.36 + 0.48 m), so a brush past the
       // rim counted as a try the server could never see. The reach stays the fallback while either
       // Setup is unknown.
-      const touching = body?.length && o.physicsSpheres?.length
-        ? bodyTouchesPortal(horizontal, o.worldY - playerFeetY, body, o.physicsSpheres)
-        : overlapsPortal(horizontal, o.worldY - playerFeetY, fixtureReach(o), 0);
-      if (touching) { inside.push(o.guid); insideAt.push(horizontal); }
+      // BUG.portal-walkin-body-spheres-unknown / BUG.portal-walkin-sent-judge-plain-sum — with the server's touch
+      // band (serverReachTolerance: outdoors up to 0.2 m past the radius sum, where ACE has teleported), swept
+      // over the move since the last check, so a walk-in the server takes always has a watch (portal_used). The
+      // band only starts watches: a silent one is judged at the plain sum.
+      const swept = body?.length && o.physicsSpheres?.length
+        ? sweptPortalTouch(bodyPrev, bodyNow, { x: o.worldX, baseY: o.worldY, z: o.worldZ }, body, o.physicsSpheres,
+          serverReachTolerance(o.position.landblock >>> 0))
+        : null;
+      const touching = swept ? swept.touching : overlapsPortal(horizontal, o.worldY - playerFeetY, fixtureReach(o), 0);
+      if (touching) { inside.push(o.guid); insideAt.push(swept ? Math.min(swept.horizontal, horizontal) : horizontal); }
     }
     portalUseReporter.overlaps(inside, selfMoved);
     // The touch that starts a walk-in watch is its first (often its closest) approach.

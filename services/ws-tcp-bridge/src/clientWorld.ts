@@ -67,6 +67,9 @@ export interface ClientWorldLeftEvent extends WorldIds {
   contextLossCount?: number | null;
   restoreMs?: number | null;
   lostForMs?: number | null;
+  /** BUG.webgl-lost-no-notice (renderer ui/ContextLostNotice.ts): the lost-graphics notice showed / its Reload was pressed. */
+  lostNoticeShown?: boolean | null;
+  lostNoticeReload?: boolean | null;
 }
 
 /** The first minute after enter_ok (renderer WorldReporter FirstMinuteEvent). */
@@ -159,15 +162,20 @@ export interface ClientFirstMinuteEvent extends WorldIds {
   contextLossCount?: number | null;
   restoreMs?: number | null;
   lostForMs?: number | null;
+  /** BUG.webgl-lost-no-notice (renderer ui/ContextLostNotice.ts): the lost-graphics notice showed / its Reload was pressed. */
+  lostNoticeShown?: boolean | null;
+  lostNoticeReload?: boolean | null;
 }
 
 /** TELEMETRY.context-restore — the WebGL loss / restore fields, each only when the page sent it (older pages send none). */
-function contextFields(b: Record<string, unknown>): Pick<ClientFirstMinuteEvent, 'contextRestored' | 'contextLossCount' | 'restoreMs' | 'lostForMs'> {
+function contextFields(b: Record<string, unknown>): Pick<ClientFirstMinuteEvent, 'contextRestored' | 'contextLossCount' | 'restoreMs' | 'lostForMs' | 'lostNoticeShown' | 'lostNoticeReload'> {
   return {
     ...('contextRestored' in b ? { contextRestored: bool(b.contextRestored) } : {}),
     ...('contextLossCount' in b ? { contextLossCount: uint(b.contextLossCount, 100_000) } : {}),
     ...('restoreMs' in b ? { restoreMs: uint(b.restoreMs, SESSION_MS) } : {}),
     ...('lostForMs' in b ? { lostForMs: uint(b.lostForMs, SESSION_MS) } : {}),
+    ...('lostNoticeShown' in b ? { lostNoticeShown: bool(b.lostNoticeShown) } : {}),
+    ...('lostNoticeReload' in b ? { lostNoticeReload: bool(b.lostNoticeReload) } : {}),
   };
 }
 
@@ -267,6 +275,8 @@ function perfFields(b: Record<string, unknown>): Partial<ClientFirstMinuteEvent>
  * brushed the rim between positions; the server collides on the sent path only); every failure carries
  * `sentClosest` (m) / `sentReached`. BUG.portal-rim-brush-indoor-reach: `sentReach` (m) is the collision reach the
  * sent path was judged against (the largest radius sum + the tolerance: 0.1 m for a landcell portal, 0 indoors).
+ * BUG.portal-walkin-body-spheres-unknown: `sentDz` (m) is the portal's origin height minus the sent body's feet at
+ * `sentClosest` (a slope turns a horizontal graze into a wider 3-D one).
  * OBS.portal-use-server-walk-run: each server movement in the watch (`moveTypes`, MovementType 6-9) and how the
  * page's MoveToManager ended it (`moveEnds`, PORTAL_MOVE_ENDS); the last MoveTo's distance to its target at the
  * start / end (`moveDist` / `moveLeft`, m), how far the body moved (`moveMoved`, m), how long it ran (`moveMs`),
@@ -336,6 +346,7 @@ export interface ClientPortalUseFailedEvent extends WorldIds {
   sentReached: boolean | null;
   /** The reach the sent path was judged against: the largest body/portal radius sum + the cell's tolerance (m 0.01). */
   sentReach: number | null;
+  sentDz: number | null;
   /** Each server movement's MovementType (6-9) and how the page's MoveToManager ended it, index-aligned. */
   moveTypes: number[] | null;
   moveEnds: (typeof PORTAL_MOVE_ENDS[number] | null)[] | null;
@@ -431,6 +442,7 @@ function sanitizePortal(outcome: typeof PORTAL_OUTCOMES[number], ids: WorldIds, 
     sentClosest: metres(b.sentClosest, 100_000, 2),
     sentReached: bool(b.sentReached),
     sentReach: metres(b.sentReach, 1000, 2),
+    sentDz: metres(b.sentDz, 1000, 2),
     moveTypes: Array.isArray(b.moveTypes) ? b.moveTypes.slice(0, PORTAL_MOVE_RECORDS).map((c) => uint(c, 255)).filter((c): c is number => c !== null) : null,
     moveEnds: Array.isArray(b.moveEnds) ? b.moveEnds.slice(0, PORTAL_MOVE_RECORDS).map((e) => pick(e, PORTAL_MOVE_ENDS)) : null,
     moveDist: metres(b.moveDist, 100_000, 2),

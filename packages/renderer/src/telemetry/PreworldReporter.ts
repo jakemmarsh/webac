@@ -80,10 +80,11 @@ export type PreworldScreen =
 /**
  * Why the page reloaded itself (page_reload's token): a world of another era
  * was picked on the launcher (switchEraFor), a new build arrived
- * (UpdateWatcher), or the epilogue's Device::Done relaunched. A deliberate
+ * (UpdateWatcher), the epilogue's Device::Done relaunched, or the player
+ * pressed Reload on the lost-graphics notice (ui/ContextLostNotice.ts). A deliberate
  * reload is never a walk-away, so it sends page_reload instead of page_left.
  */
-export const RELOAD_REASONS = ['era_switch', 'update', 'epilogue'] as const;
+export const RELOAD_REASONS = ['era_switch', 'update', 'epilogue', 'context_lost'] as const;
 export type ReloadReason = typeof RELOAD_REASONS[number];
 
 /** What main.ts knows when it names the screen (preworldScreenFor). */

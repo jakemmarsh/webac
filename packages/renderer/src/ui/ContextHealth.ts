@@ -13,7 +13,8 @@
  *
  * Recovery: THREE's WebGLRenderer prevents the default on loss and rebuilds on
  * restore. UI text canvases are CPU-backed (CanvasBacking.ts), so a GPU reset
- * no longer blanks them.
+ * no longer blanks them. When the browser never restores the game canvas,
+ * ContextLostNotice.ts tells the player and offers Reload (BUG.webgl-lost-no-notice).
  */
 export interface ContextHealth {
   webglLost: number;
@@ -58,10 +59,15 @@ export function describeCanvas(el: unknown): string {
   return `canvas${id}${cls} ${c.width ?? 0}x${c.height ?? 0}`;
 }
 
+/** A canvas whose context loss is deliberate (`data-ac-intentional-loss`: PortalSpaceRenderer's teardown). */
+export function isIntentionalLoss(target: unknown): boolean {
+  const ds = (target as { dataset?: Record<string, string | undefined> } | null)?.dataset;
+  return !!ds && ds.acIntentionalLoss !== undefined;
+}
+
 /** Record one context event into `h` (pure; exported for tests). Returns false when it is skipped. */
 export function recordContextEvent(h: ContextHealth, type: string, target: unknown, now = Date.now()): boolean {
-  const ds = (target as { dataset?: Record<string, string | undefined> } | null)?.dataset;
-  if (ds && ds.acIntentionalLoss !== undefined) return false;
+  if (isIntentionalLoss(target)) return false;
   if (type === 'webglcontextlost') h.webglLost++;
   else if (type === 'webglcontextrestored') h.webglRestored++;
   else if (type === 'contextlost') h.canvas2dLost++;

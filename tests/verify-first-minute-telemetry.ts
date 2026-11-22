@@ -41,6 +41,8 @@ const FIRST_MINUTE_KEYS = [
   'lumaMean', 'lumaDarkPct', 'lumaAtMs', 'viewCell', 'viewCellFound', 'cameraCell', 'visibleCells',
   // TELEMETRY.context-restore: whether a lost WebGL context came back (null fields when there was no loss).
   'contextRestored', 'contextLossCount', 'restoreMs', 'lostForMs',
+  // BUG.webgl-lost-no-notice (verify-context-lost-notice.ts): the lost-graphics notice showed / its Reload pressed.
+  'lostNoticeShown', 'lostNoticeReload',
 ].sort();
 const WORLD_LEFT_BASE_KEYS = ['outcome', 'era', 'server', 'trace', 'build', 'exit', 'sessionMs', 'contextLost', 'errors', 'eid'].sort();
 // BUG.hidden-tab-session-drop: the page adds hiddenMs / freezes / frozenMs to every world_left (endCause / closeCode
@@ -49,7 +51,7 @@ const WORLD_LEFT_BASE_KEYS = ['outcome', 'era', 'server', 'trace', 'build', 'exi
 // TELEMETRY.context-restore: contextRestored / contextLossCount / restoreMs / lostForMs.
 const WORLD_LEFT_KEYS = [
   ...WORLD_LEFT_BASE_KEYS, 'hiddenMs', 'freezes', 'frozenMs', 'lastBeatAgoMs', 'drainWaitMs',
-  'contextRestored', 'contextLossCount', 'restoreMs', 'lostForMs',
+  'contextRestored', 'contextLossCount', 'restoreMs', 'lostForMs', 'lostNoticeShown', 'lostNoticeReload',
 ].sort();
 
 interface Rig {
