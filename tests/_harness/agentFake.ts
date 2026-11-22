@@ -112,6 +112,8 @@ export class FakeHost implements AgentHost {
   setYaw = (y: number) => { this.me.yaw = y; };
   /** The agent's own position report to the server (AgentHost.reportPosition); unset = the host can't. */
   reportPosition: AgentHost['reportPosition'] = undefined;
+  /** This frame's body (AgentHost.bodyPosition); unset = self() is the body. */
+  bodyPosition: AgentHost['bodyPosition'] = undefined;
   pickUp = (g: number) => { this.sent.push(`pickup ${g.toString(16)}`); return true; };
   drop = (_g: number) => true;
   /** Wall-clock ms for remembered places; unset = Date.now(). */
@@ -193,6 +195,7 @@ export class FakeHost implements AgentHost {
 
   /** The RunAsDefaultMovement option (on: Shift walks; off: Shift runs, and the body walks without it). */
   runDefault = true;
+  runIsDefault = (): boolean => this.runDefault;
   /** Move the body forward along its facing at run speed while W is held. */
   /** A fixture's collision reach (guid → metres); unset = the host doesn't say. */
   objectReach: ((guid: number) => number) | undefined = undefined;
@@ -316,7 +319,8 @@ export class FakeHost implements AgentHost {
       }
       // Charging a standing long jump: the held forward key doesn't move the body.
       if (this.chargeAt !== null || !this.keys.has('KeyW')) continue;
-      const speed = this.keys.has('ShiftLeft') ? 3.12 : 4;
+      // A walk when the hold-run key flips RunAsDefaultMovement (Shift with the option on, none with it off).
+      const speed = this.keys.has('ShiftLeft') === this.runDefault ? 3.12 : 4;
       const nx = this.me.x + -Math.sin(this.me.yaw) * speed * dt;
       const ny = this.me.y + -Math.cos(this.me.yaw) * speed * dt;
       const f = this.walkStep(nx, ny, this.me.z);
@@ -331,7 +335,8 @@ export class FakeHost implements AgentHost {
       if (!down && this.keys.has('Space') && this.chargeAt !== null) {
         const power = Math.min(1, Math.max(0.001, (Date.now() - this.chargeAt) / 1000));
         this.chargeAt = null;
-        const walk = this.keys.has('ShiftLeft');
+        // The jump's pace (jumpLaunch's `walk`): the hold-run key against RunAsDefaultMovement, as the body's.
+        const walk = this.keys.has('ShiftLeft') === this.runDefault;
         const l = this.launchOf(power, walk);
         const forward = this.keys.has('KeyW') ? l.forward : 0;
         this.launches.push({ power, forward, walk, x: this.me.x, y: this.me.y, z: this.me.z });

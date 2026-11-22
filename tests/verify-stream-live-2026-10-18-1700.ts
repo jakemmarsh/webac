@@ -117,7 +117,9 @@ describe('1. walk_to a portal in the Qalaba\'r portal ring (0x9521, 2026-10-18 1
     expect(oasisDist(host), why).toBeGreaterThan(TOUCH);
     expect(oasisDist(host), why).toBeLessThan(STAND_OFF);
     expect(closest, why).toBeGreaterThan(TOUCH);
-    expect(traces.join('\n')).toMatch(/walk: Qalabar Oasis Settlement Portal's reach is known now \(1\.92 m, a portal\): arriving within 3\.9 m of its middle, not 2\.5/);
+    // Before its reach is known the stand-off counts a portal's PORTAL_REACH_UNKNOWN_M (1.92 + 0.8 + 0.7 = 3.4; it was
+    // 1 m, so 2.5, before BUG.agent-sentinel-first-approach).
+    expect(traces.join('\n')).toMatch(/walk: Qalabar Oasis Settlement Portal's reach is known now \(1\.92 m, a portal\): arriving within 3\.9 m of its middle, not 3\.4/);
     // Quick, not minutes of searching: 300 m at 11 m/s, and no search came up empty.
     expect(host.t, why).toBeLessThan(45_000);
     expect(traces.join('\n')).not.toMatch(/walk search none/);

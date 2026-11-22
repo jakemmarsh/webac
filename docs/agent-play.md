@@ -964,6 +964,16 @@ heal and hand control back on danger. The brief only listed a routine beside tho
     itself holds are touched: a player's own movement never is. Its trace line: `portal sentinel: …; let go of KeyW`.
     `ac_move`'s answer names its stop too ("…; the portal sentinel let go of KeyW 2.2 m from Drudge Hideout #7a9b3000 …";
     BUG.drudge-hideout-portal-stop, 2026-11-06: a bare "forward for 3s" beside a portal was taken for a collision wall).
+    It measures from the body's place this frame (`AgentHost.bodyPosition`, not self(), which is the last position sent
+    and stays at a run's start for up to a second), and a portal whose Setup isn't built yet counts the stock portal
+    radius 1.92 m (`PORTAL_REACH_UNKNOWN_M`), not 1 m (BUG.agent-sentinel-first-approach, 2026-11-21: the first move
+    after a teleloc went through). Its stride also counts the stop link's coast after the key comes up (1.29 m at a run,
+    from the human motion table's stop links; a walk's 0.41 m is inside the disk's margin) against the portal's touch: a release at 2.7 m coasted to
+    1.85 m and through. It slows a run to a walk only when the RunForward → WalkForward link the walk starts (2.16 m,
+    played out even if the key comes up) plus the walk's stop stays out of the touch, else it lets go; and it reads
+    RunAsDefaultMovement (`AgentHost.runIsDefault`), so with the option off its walk lets go of Shift.
+    Every check is "if the next look lets go": the stride to that look plus the travel a release owes, against the
+    touch disk, so the body rests outside it whichever look the release falls on.
   - *stay_with after a portal.* A fellow not placed yet within 30 s of your own arrival is waited for up to 20 s ("isn't
     placed here yet … waiting"), not "out of sight" at once; the fellows line says "not placed here yet (you came
     through a portal N s ago; …)". Bulwark's walk set off while Arcanist was still in portal space.

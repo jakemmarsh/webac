@@ -57,7 +57,8 @@ export interface UbHost {
   select(guid: number): AgentResult;
   give(item: number, target: number, amount: number | null): Promise<AgentResult>;
   turn(heading: number): AgentResult;
-  jump(o: { holdMs: number; forward?: boolean; backward?: boolean; strafeLeft?: boolean; strafeRight?: boolean; walk?: boolean }): AgentResult;
+  /** `shift`: UB's `s`, the Shift key held through the jump (literal, as UB presses it; a run with RunAsDefaultMovement off). */
+  jump(o: { holdMs: number; forward?: boolean; backward?: boolean; strafeLeft?: boolean; strafeRight?: boolean; shift?: boolean }): AgentResult;
   combatMode(mode: string): AgentResult;
   equip(guid: number): Promise<AgentResult>;
   /** Take a worn item off into the main pack (the drag onto the pack). */
@@ -471,7 +472,7 @@ export class UbRuntime {
     if (this.store.bool('Jumper.PauseNav')) this.host.holdNav(hold + 5000);
     const job = { cancelled: false };
     this.jobs.set('jump', job);
-    const r = this.host.jump({ holdMs: hold, forward: flags.includes('w'), backward: flags.includes('x'), strafeLeft: flags.includes('z'), strafeRight: flags.includes('c'), walk: flags.includes('s') });
+    const r = this.host.jump({ holdMs: hold, forward: flags.includes('w'), backward: flags.includes('x'), strafeLeft: flags.includes('z'), strafeRight: flags.includes('c'), shift: flags.includes('s') });
     void this.host.sleep(hold + 600).then(() => { this.jobs.delete('jump'); });
     if (!r.ok) return this.thinkOrWrite('You have failed to jump too many times.', this.store.bool('Jumper.ThinkFail'));
     if (this.store.bool('Jumper.ThinkComplete')) this.think('Jumper Success');

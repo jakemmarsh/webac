@@ -130,13 +130,21 @@ describe('walking with a slower companion: always a run, and one clean stop per 
     expect(k.shiftPresses).toBe(0);
   });
 
-  it('stay_with with running not the default: no Shift pressed, and the stops still last until they catch up', async () => {
+  // With running not the default the hold-run key is what runs (CameraController.isRunning), so "always a run" is Shift
+  // held whenever W is. The old pin here (no Shift pressed) was the bug: it walked the whole trip
+  // (BUG.agent-pace-run-default-off).
+  it('stay_with with running not the default: runs with the hold-run key (Shift) held, and the stops still last until they catch up', async () => {
     host.runDefault = false;
     const k = watchKeys(host, gap);
     const slow = arcanistRuns(2);
-    const r = await settle(api, host, api.walkTo('200m north', { within: 2, stayWith: 'Claude Arcanist', timeoutMs: 600_000 }), 300_000, () => { slow(); k.sample(); });
+    let wTicks = 0, walkTicks = 0;
+    const r = await settle(api, host, api.walkTo('200m north', { within: 2, stayWith: 'Claude Arcanist', timeoutMs: 600_000 }), 300_000, () => {
+      slow(); k.sample();
+      if (host.keys.has('KeyW')) { wTicks++; if (!host.keys.has('ShiftLeft')) walkTicks++; }
+    });
     expect(r, traces.join('\n')).toMatchObject({ ok: true });
-    expect(k.shiftPresses).toBe(0);
+    expect(wTicks).toBeGreaterThan(100);
+    expect(walkTicks).toBe(0);
     expect(k.pauses.length).toBeGreaterThanOrEqual(1);
     for (const p of k.pauses) { expect(p.ms).toBeGreaterThanOrEqual(2500); expect(p.endGap).toBeLessThanOrEqual(4.5); }
   });

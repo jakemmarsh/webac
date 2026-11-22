@@ -18580,6 +18580,12 @@ async function main() {
         // The server moves you along the straight line between two AutonomousPositions: the walk reports each bend near a
         // portal (portalAvoid.chordNeedsReport), the same message the client's own position event sends.
         reportPosition: () => { if (gameStarted) movementSync?.sendAutonomousPositionNow(syncPositionNow()); },
+        runIsDefault: () => cameraController.runIsDefault,
+        bodyPosition: () => {
+          if (!gameStarted || !movementSync) return null;
+          const f = movementSync.peekFrame(syncPositionNow());
+          return { cell: f.cellId, x: f.x, y: f.y, z: f.z };
+        },
         // A skill's spell line when retail names it otherwise ("Melee Defense" → Invulnerability), from the whole spell table.
         skillSpellLine: (skill) => {
           if (!spellTable) return null;
@@ -18789,12 +18795,13 @@ async function main() {
         jumpLaunch: (power, walk) => {
           // As the jump release does (the frame loop's triggerJump branch): the Jump skill's current
           // value and the load into getJumpVelocity; the held keys' state velocity forward
-          // (get_leave_ground_velocity). `walk` is Shift held: a walk when running is the default.
+          // (get_leave_ground_velocity). `walk` is the jump's pace (the agent maps it to the hold-run key
+          // through RunAsDefaultMovement: AgentApi.paceShift), so a walking jump is a walk in either setting.
           const SKILL_ID_JUMP = 22;
           const jumpSkill = jumpSkillWithStamina(playerSkillTable
             ? playerState.getSkillCurrent(SKILL_ID_JUMP, playerSkillTable.skills)
             : Math.max(200, playerState.skills.getRaises(SKILL_ID_JUMP)), playerState.stamina.current);
-          const running = cameraController.runIsDefault !== walk;
+          const running = !walk;
           return {
             forward: running ? RUN_ANIM_SPEED * cameraController.runRate : WALK_ANIM_SPEED,
             up: getJumpVelocity(getPlayerBurdenRatio(), jumpSkill, power),
@@ -19137,7 +19144,7 @@ async function main() {
           forceBuff: () => agentApi.routine.forceBuff(),
           mexec: (expr) => { const x = agentApi.routine.expressions; if (!x) throw new Error('expressions are not available'); return x.run(expr); },
           setAttackBar: (power) => agentApi.setAttackBar(power),
-          jump: (o) => { if (o.heading !== undefined) agentApi.turn(o.heading); return agentApi.jump({ ...(o.holdMs !== undefined ? { holdMs: o.holdMs } : {}), ...(o.walk ? { walk: true } : {}) }); },
+          jump: (o) => { if (o.heading !== undefined) agentApi.turn(o.heading); return agentApi.jump({ ...(o.holdMs !== undefined ? { holdMs: o.holdMs } : {}), shift: !!o.walk }); }, // VTank's Shift: the key itself
           fakeDeath: () => agentApi.routine.fakeDeath(),
           reverseRoute: (on) => agentApi.routine.reverseRoute(on),
           routeReversed: () => agentApi.routine.reversed,

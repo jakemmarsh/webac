@@ -257,7 +257,8 @@ export interface AgentHost {
   navTerrain?(x: number, y: number): { sea: boolean; steep: boolean; wade: number; height: number } | null;
   /**
    * A standing long jump charged to `power` (0..1) with the player's own Jump skill and load: its
-   * forward speed (run, or walk with Shift) and upward speed, m/s, and the seconds a full charge takes.
+   * forward speed (run, or walk when `walk`: the pace, not the Shift key, which paceShift maps) and upward speed, m/s,
+   * and the seconds a full charge takes.
    */
   jumpLaunch?(power: number, walk: boolean): { forward: number; up: number; chargeSeconds: number };
   /**
@@ -450,6 +451,14 @@ export interface AgentHost {
    * (portalAvoid.chordNeedsReport). Unset: the host can't.
    */
   reportPosition?(): void;
+  /**
+   * Where the body stands this frame (cell + landblock-local origin, z the feet), as reportPosition would send it.
+   * self() is the last position SENT, which inside the client's 1 s position-event window (MovementSync
+   * shouldSendPositionEvent) stays where a run started; the portal sentinel judges strides from this one. Unset: self().
+   */
+  bodyPosition?(): { cell: number; x: number; y: number; z: number } | null;
+  /** RunAsDefaultMovement (CameraController.runIsDefault): on, W runs and the hold-run key walks; off, the other way. Unset: on. */
+  runIsDefault?(): boolean;
   pickUp(guid: number): boolean;
   drop(guid: number): boolean;
   give(target: number, item: number, amount: number): boolean;
@@ -7318,14 +7327,26 @@ export class AgentApi {
 
   /**
    * Jump: hold the jump key `holdMs` (longer = higher, as retail's power
-   * bar), optionally while running forward (W) and/or walking (Shift), as
-   * UtilityBelt's /ub jump[s][w] does.
+   * bar), optionally with movement keys held.
+   * - `shift` (the plugins' and metas' jumps: UB /ub jump[s…], VTank's and
+   *   the routine's Jump with Shift; MagTools /mt sjump is the same shape):
+   *   the Shift KEY
+   *   held through the jump, literally, as those plugins press it
+   *   (reference/plugin-specs/magtools.md 10.9 "with optional Shift and
+   *   W/Z/X/C held"). With RunAsDefaultMovement off that is a running jump,
+   *   as it was on retail with the plugin; without `shift`, no Shift.
+   * - `walk` (Claude's own ac_jump, intent): a walking jump; with a movement
+   *   key held the pace goes to the hold-run key through paceShift.
    */
-  jump(opts: { holdMs?: number; forward?: boolean; backward?: boolean; strafeLeft?: boolean; strafeRight?: boolean; walk?: boolean } = {}): AgentResult {
+  jump(opts: { holdMs?: number; forward?: boolean; backward?: boolean; strafeLeft?: boolean; strafeRight?: boolean; walk?: boolean; shift?: boolean } = {}): AgentResult {
     const hold = Math.max(50, Math.min(opts.holdMs ?? 350, 3000));
     this.manualMoveCancels('jump');
-    // UB's jump[swzxc]: Shift (walk) and the movement keys held through the jump (the same keys move() presses).
-    const keys = [opts.walk && 'ShiftLeft', opts.forward && 'KeyW', opts.backward && 'KeyS', opts.strafeLeft && 'KeyZ', opts.strafeRight && 'KeyC'].filter((k): k is string => !!k);
+    // UB's jump[swzxc]: Shift and the movement keys held through the jump (the same keys move() presses).
+    const moveKeys = [opts.forward && 'KeyW', opts.backward && 'KeyS', opts.strafeLeft && 'KeyZ', opts.strafeRight && 'KeyC'].filter((k): k is string => !!k);
+    // A plugin's Shift is the key itself; ac_jump's walk is the pace (a walk alone, no movement key, still holds the walk
+    // pace so it carries into a key pressed after).
+    const shift = opts.shift !== undefined ? opts.shift : moveKeys.length || opts.walk ? this.paceShift(!!opts.walk) : false;
+    const keys = [...(shift ? ['ShiftLeft'] : []), ...moveKeys];
     for (const k of keys) this.key(k, true);
     this.key('Space', true);
     setTimeout(() => {
@@ -7344,11 +7365,15 @@ export class AgentApi {
    * UtilityBelt's setmotion: hold (or let go of) one of the motions UB names
    * (Forward, Backward, TurnRight, TurnLeft, StrafeRight, StrafeLeft, Walk;
    * UB Movement.cs) through the client's default movement keys. False for a
-   * name UB doesn't know.
+   * name UB doesn't know. Walk is a pace, not a key: holding it is the walk
+   * pace (paceShift: Shift with RunAsDefaultMovement on, none with it off),
+   * and letting go of it lets go of the hold-run key.
    */
   holdMotion(motion: string, down: boolean): boolean {
-    const code = MOTION_KEYS[motion.trim().toLowerCase()];
+    const name = motion.trim().toLowerCase();
+    const code = MOTION_KEYS[name];
     if (!code) return false;
+    if (name === 'walk') { if (down) this.setPace(true); else this.key(code, false); return true; }
     this.key(code, down);
     return true;
   }
@@ -7446,10 +7471,15 @@ export class AgentApi {
 
   stopMoving(): AgentResult {
     const attacking = /^attacking /.test(this.task?.label ?? '') || this.attackTarget !== 0;
-    // Something of the agent's own under way: a task (a walk, a use's approach, a follow), keys it holds, an attack order.
-    const own = !!this.task || this.agentKeys.size > 0 || attacking || this.chain !== null;
+    // Something of the agent's own under way: a task (a walk, a use's approach, a follow), a movement key it holds, an
+    // attack order. Only the keys that move the body (the ones let go of below): Shift (walk pace) and Space (a jump's
+    // charge) move nothing alone and are not released here, so counting them made every later stop "own" for as long
+    // as one stayed down. BUG.agent-stop-moving-shift-held (Classic Dereth, 2026-11-21, build 2128f407f): the portal
+    // sentinel's walk-pace Shift outlived an ac_move forward (key_up, key_down, key_up), and five agent stops after it
+    // sent three identical standing MoveToStates until the repeat cap dropped the rest.
+    const own = !!this.task || AgentApi.STOP_RELEASES.some((k) => this.agentKeys.has(k)) || attacking || this.chain !== null;
     this.cancelTask('stopped');
-    for (const k of ['KeyW', 'KeyS', 'KeyA', 'KeyD', 'KeyZ', 'KeyC']) this.key(k, false);
+    for (const k of AgentApi.STOP_RELEASES) this.key(k, false);
     // The server's approach to a melee target (its MoveTo after the attack request) runs on with no key held: letting go
     // of keys stopped nothing, and Bulwark ran on 16–19 m after stop_moving (Mountain Keep, 2026-10-16 16:57Z). Retail's
     // Stop Moving takes control back from the server: the MoveTo stops where you are and the attack is cancelled.
@@ -10704,7 +10734,7 @@ export class AgentApi {
         const r = this.host.objectReach?.(g) ?? 0;
         const isPortal = (o ? classify(o, false) : this.places.get(g)?.kind) === 'portal';
         if (r <= reachKnown + 0.01 && (!isPortal || portalKnown)) return;
-        const w = isPortal && !opts.enterPortal ? Math.max(baseWithin + r, (r || 1) + AgentApi.PORTAL_CLEARANCE_M + 0.7) : baseWithin + r;
+        const w = isPortal && !opts.enterPortal ? Math.max(baseWithin + r, (r || AgentApi.PORTAL_REACH_UNKNOWN_M) + AgentApi.PORTAL_CLEARANCE_M + 0.7) : baseWithin + r;
         if (reachKnown >= 0 && w > within + 0.01) this.trace(`walk: ${this.nameOf(g)}'s reach is known now (${r.toFixed(2)} m${isPortal ? ', a portal' : ''}): arriving within ${w.toFixed(1)} m of its middle, not ${within.toFixed(1)}`);
         reachKnown = Math.max(reachKnown, r);
         portalKnown ||= isPortal;
@@ -10778,7 +10808,7 @@ export class AgentApi {
           for (const o of this.host.objects()) {
             if (!o.cell || o.wielderId || o.containerId || o.guid === targetGuid || classify(o, false) !== 'portal') continue;
             const g = toGlobal(o.cell, o.x, o.y);
-            out.push({ x: g.x, y: g.y, z: o.z, r: (this.host.objectReach?.(o.guid) || 1) + AgentApi.PORTAL_CLEARANCE_M, guid: o.guid >>> 0, label: o.name });
+            out.push({ x: g.x, y: g.y, z: o.z, r: this.portalReach(o.guid) + AgentApi.PORTAL_CLEARANCE_M, guid: o.guid >>> 0, label: o.name });
           }
           cache = { at: now, disks: out };
           return out;
@@ -11270,7 +11300,7 @@ export class AgentApi {
           if (opts.enterPortal && targetGuid && this.samePortal(o.guid, targetGuid)) continue;
           const g = toGlobal(o.cell, o.x, o.y);
           if (Math.hypot(g.x - me.g.x, g.y - me.g.y) > 80) continue;
-          const reach = this.host.objectReach?.(o.guid) || 1;
+          const reach = this.portalReach(o.guid);
           const inRing = !!ringAt && !this.samePortal(o.guid, targetGuid) && Math.hypot(g.x - ringAt.x, g.y - ringAt.y) <= AgentApi.GOAL_PORTAL_RING_M;
           disks.push({ x: g.x, y: g.y, z: o.z, r: reach + (inRing ? BODY_RADIUS_M + STEP_CLEAR_M : AgentApi.PORTAL_CLEARANCE_M), guid: o.guid >>> 0, label: o.name });
         }
@@ -11672,12 +11702,13 @@ export class AgentApi {
     };
     const legText = (p: NavStep): string => `${p.jump ? (isDrop(p.jump) ? `drop ${(p.jump.from.z - p.z).toFixed(1)} m to ` : 'jump to ') : ''}(${p.x.toFixed(1)}, ${p.y.toFixed(1)}${p.jump ? `, z ${p.z.toFixed(1)}` : ''})`;
     // The keys of a standing long jump: the charge starts with nothing held (CMotionInterp standing_longjump),
-    // the forward key (and Shift for a walking jump) goes down during it, and the release launches.
+    // the forward key (and the hold-run key when the jump's pace needs it: paceShift) goes down during it, and the
+    // release launches.
     const leap = (j: JumpSpec): void => {
       lastLeapAt = this.host.now();
       const hold = Math.max(120, j.holdMs);
       this.key('Space', true);
-      setTimeout(() => { if (j.walk) this.key('ShiftLeft', true); this.key('KeyW', true); }, 60);
+      setTimeout(() => { if (this.paceShift(j.walk)) this.key('ShiftLeft', true); this.key('KeyW', true); }, 60);
       setTimeout(() => this.key('Space', false), hold);
       setTimeout(() => { this.key('KeyW', false); this.key('ShiftLeft', false); }, hold + 150);
     };
@@ -11984,7 +12015,7 @@ export class AgentApi {
         // (A8C3, 2026-10-17 05:28:40Z).
         const own = targetGuid && portalBy && this.samePortal(portalBy.guid, targetGuid) && now - portalBy.at < 5000;
         const tp = targetPlace ? toGlobal(targetPlace.cell, targetPlace.x, targetPlace.y) : null;
-        const wasNear = !!tp && !!prevAt && Math.hypot(tp.x - prevAt.x, tp.y - prevAt.y) < (this.host.objectReach?.(targetGuid) || 1) + AgentApi.PORTAL_CLEARANCE_M + 3;
+        const wasNear = !!tp && !!prevAt && Math.hypot(tp.x - prevAt.x, tp.y - prevAt.y) < this.portalReach(targetGuid) + AgentApi.PORTAL_CLEARANCE_M + 3;
         const ownName = targetPortalName();
         if (targetGuid && ownName && (own || wasNear)) {
           const how = lastLeapAt && now - lastLeapAt < 8000 ? 'a jump onto it landed within its reach' : 'the walk came within its reach';
@@ -13317,7 +13348,9 @@ export class AgentApi {
       // The run's stride, measured only while running (a walk's is no measure of the next run's).
       if (!wasSlow && moved <= PORTAL_JUMP_M) runStride = moved;
       wasSlow = !!slow;
-      this.key('ShiftLeft', !!slow);
+      // The pace as intent, mapped to the hold-run key by RunAsDefaultMovement (paceShift): with the option off the run
+      // is Shift held and the last metres let go of it.
+      this.setPace(!!slow);
       // A cast or an attack request stops the player (CommandInterpreter::MaybeStopCompletely clears the command lists:
       // "a movement key still held moves nothing until it is pressed again"), and a key already down is no new press.
       // Holding W through it, the body stood still: the walk lets go and presses again when the body hasn't moved for
@@ -13408,7 +13441,7 @@ export class AgentApi {
           dodgeKey = right >= left ? 'KeyC' : 'KeyZ';
           this.trace(`walk: the probe walks on from here but the body stood still (pressed on a wall by a hair); stepping ${dodgeKey === 'KeyC' ? 'right' : 'left'} off it`);
           this.key('KeyW', false);
-          this.key('ShiftLeft', false);
+          this.setPace(false);
           this.key(dodgeKey, true);
           dodgeUntil = now + 400;
           best = Infinity;
@@ -14837,7 +14870,7 @@ export class AgentApi {
       if (p.guid === guid || !p.cell || p.wielderId || p.containerId || classify(p, false) !== 'portal') continue;
       if (Math.abs(p.z - me.s.z) > 3 && Math.abs(p.z - o.z) > 3) continue;
       const g = toGlobal(p.cell, p.x, p.y);
-      const r = (this.host.objectReach?.(p.guid) || 1) + AgentApi.PORTAL_CLEARANCE_M;
+      const r = this.portalReach(p.guid) + AgentApi.PORTAL_CLEARANCE_M;
       if (segmentDistance(g, me.g, t) >= r) continue;
       const dist = Math.hypot(g.x - me.g.x, g.y - me.g.y);
       if (!best || dist < best.dist) best = { guid: p.guid >>> 0, name: p.name, dist, bearing: bearing(me.g, g) };
@@ -15790,11 +15823,73 @@ export class AgentApi {
   /** Every key the agent presses or lets go of goes through here, so the portal sentinel sees (and can veto) its movement. */
   private key(code: string, down: boolean): void {
     if (down) this.agentKeys.add(code); else this.agentKeys.delete(code);
+    // Whoever presses or lets go of Shift now owns it: the sentinel's pace no longer does.
+    if (code === 'ShiftLeft') this.sentinelShift = false;
     this.host.key(code, down);
     if (down && AgentApi.SENTINEL_MOVE_KEYS.has(code)) this.enforcePortalSentinel(this.host.now(), false);
+    // The sentinel's walk-pace Shift lasts as long as the movement it paced: the last movement key let go takes it too.
+    // Before, it stayed down after an ac_move or a hold ended (only a walk task's own release let go of Shift), so the
+    // player's own keys walked and every agent stop counted as "own" (BUG.agent-stop-moving-shift-held).
+    if (!down && this.sentinelShift && ![...this.agentKeys].some((k) => AgentApi.SENTINEL_MOVE_KEYS.has(k))) {
+      this.sentinelShift = false;
+      this.agentKeys.delete('ShiftLeft');
+      this.host.key('ShiftLeft', false);
+    }
+  }
+  /** The portal sentinel pressed Shift to make the agent's run a walk (and nobody has touched Shift since). */
+  private sentinelShift = false;
+
+  /** RunAsDefaultMovement (AgentHost.runIsDefault); a host that doesn't say: on, as retail's default. */
+  private runIsDefault(): boolean {
+    return this.host.runIsDefault?.() ?? true;
+  }
+  /**
+   * Whether the hold-run key (Shift) is down for a pace: the agent's one mapping from its intent (walk or run) to the key.
+   * The hold-run key inverts RunAsDefaultMovement (CameraController.isRunning: `runIsDefault ? !shiftHeld : shiftHeld`):
+   * with the option on Shift walks, with it off W alone walks and Shift runs. Every agent pace goes through here; before,
+   * the walk task held Shift for "walk", so with the option off it walked the whole trip and RAN the careful last metres,
+   * a portal approach and a jump's take-off (BUG.agent-pace-run-default-off).
+   */
+  private paceShift(walk: boolean): boolean {
+    return walk === this.runIsDefault();
+  }
+  /** Set the agent's pace (walk or run) through the hold-run key (paceShift). */
+  private setPace(walk: boolean): void {
+    this.key('ShiftLeft', this.paceShift(walk));
   }
 
+  /** The movement keys the agent's stop_moving lets go of: the ones that move the body (Shift and Space do not, alone). */
+  static readonly STOP_RELEASES: readonly string[] = ['KeyW', 'KeyS', 'KeyA', 'KeyD', 'KeyZ', 'KeyC'];
   static readonly SENTINEL_MOVE_KEYS: ReadonlySet<string> = new Set(['KeyW', 'KeyS', 'KeyZ', 'KeyC']);
+  /**
+   * A portal's reach before its Setup is built (AgentHost.objectReach 0): the part-array radius is set only once the
+   * object's mesh is (ServerObjectManager.applyPartArrayCylinder), and with streamed DATs that waits for the Setup to
+   * arrive, so a portal first seen after a teleport or login read 0. The old fallback, 1 m, put every disk inside the
+   * portal's real touch, and the body was through before any stride reached it (BUG.agent-sentinel-first-approach). This
+   * is the stock portal Setups' radius (0x020001B3 and 0x020005D2-0x020005D6, 0x020006F4: 1.919, from the portal DAT;
+   * 0x020019E4 / 0x02001698: 2.01), so an unknown portal is kept at least as far as almost every real one.
+   */
+  static readonly PORTAL_REACH_UNKNOWN_M = 1.92;
+  /** A portal's reach from its origin (AgentHost.objectReach), or PORTAL_REACH_UNKNOWN_M while its Setup isn't built. */
+  private portalReach(guid: number): number {
+    return this.host.objectReach?.(guid) || AgentApi.PORTAL_REACH_UNKNOWN_M;
+  }
+  /**
+   * The body for the sentinel: self() with its place taken from AgentHost.bodyPosition. self() is the last position
+   * the client SENT, and inside the 1 s position-event window a run sends none (no cell change, the same contact
+   * plane), so a run's first metres all read as the standing start and every stride was measured from there
+   * (BUG.agent-sentinel-first-approach).
+   */
+  /** The agent's own forward key runs the body: W held, and Shift (the hold-run key) not flipping RunAsDefaultMovement. */
+  private agentKeysRun(): boolean {
+    return this.agentKeys.has('KeyW') && this.agentKeys.has('ShiftLeft') !== this.paceShift(true);
+  }
+  private sentinelMe(): ReturnType<AgentApi['me']> {
+    const me = this.me();
+    const b = me ? this.host.bodyPosition?.() : null;
+    if (!me || !b || !b.cell) return me;
+    return { ...me, s: { ...me.s, cell: b.cell >>> 0, x: b.x, y: b.y, z: b.z }, g: toGlobal(b.cell, b.x, b.y) };
+  }
   /** Portals this near are checked by the sentinel; farther, no stride of any pace reaches one. */
   static readonly SENTINEL_SCAN_M = 30;
   /** A walk's pace (Shift held), m/s, for the sentinel's stride; a backpedal and a sidestep go no faster in its reckoning. */
@@ -15806,6 +15901,34 @@ export class AgentApi {
   static readonly SENTINEL_STRIDE_PAD_M = 0.25;
   /** A walk's (or sidestep's) stride is its pace × the longest recent gap, plus this. */
   static readonly SENTINEL_WALK_PAD_M = 0.1;
+  /**
+   * How far the body goes on after its forward (or backward) key comes up: the stop link to Ready plays out
+   * (CMotionInterp::StopCompletely @ 00527e40; our CameraController.sequenceStep plays it the same way). The human
+   * motion table 0x09000001's RunForward → Ready links move the root 0.79 m at peace (anim 0x03000007) and up to 1.29 m
+   * in the combat stances (portal DAT; the retail capture measured 0.94 m for a runner, docs/movement-ab.md), its
+   * WalkForward → Ready link 0.41 m (0x03000009). A release at the stride's edge left the body 0.85 m further on, inside
+   * the portal's reach (BUG.agent-sentinel-first-approach, live 2026-11-21: let go at 2.7 m, closest 1.85 m, teleported).
+   * Only a run's coast is added: a walk's 0.41 m stays inside the disk's own margin over the server's reach (the stock
+   * portal's disk 2.55 m = part radius 1.919 + body 0.48 + STEP_CLEAR_M, its reach 1.357 + 0.48 + the 0.2 m outdoor band =
+   * 2.04 m), and counting it again stopped walks round a portal at every bend (verify-agent-portal-avoid's ring).
+   */
+  static readonly SENTINEL_RUN_COAST_M = 1.29;
+  /** A body measured faster than a walk's pace by this (m/s) is still running, whatever the keys say (a walk is 3.12). */
+  static readonly SENTINEL_RUNNING_OVER_WALK_MPS = 0.5;
+  /**
+   * The RunForward → WalkForward link a run turned into a walk plays first (motion table 0x09000001 at peace, portal DAT:
+   * 2.16 m over 0.8 s), and the WalkForward → Ready stop link after it (0x03000009: 0.41 m). The sentinel's Shift at a
+   * run committed the body to both: a release 2.9 m out came to rest 1.19 m from the portal, through (live 2026-11-21,
+   * D 8 m, 2 s, 9848467fa).
+   */
+  static readonly SENTINEL_RUN_TO_WALK_M = 2.16;
+  static readonly SENTINEL_RUN_TO_WALK_MS = 800;
+  static readonly SENTINEL_WALK_COAST_M = 0.41;
+  /**
+   * When the sentinel last turned the agent's run into a walk (the Run → Walk link starts then). Only its own: a walk
+   * task's slow-down near a portal is that walk's pace, steered by its own portal guard and planner disks.
+   */
+  private sentinelWalkSince = -Infinity;
   /** The gaps between looks the stride assumes are the longest of the last few, clamped to this range (ms). */
   static readonly SENTINEL_GAP_MIN_MS = 100;
   static readonly SENTINEL_GAP_MAX_MS = 1500;
@@ -15821,7 +15944,10 @@ export class AgentApi {
   /** Portals near the body that it must not touch: every one but the portal a walk is sent into. */
   private sentinelDisks(now: number, me: { g: { x: number; y: number }; s: { z: number } }): Array<AvoidDisk & { guid: number; label: string; touch: number }> {
     const c = this.sentinelDiskCache;
-    let all = c && now - c.at < 500 ? c.disks : null;
+    // Only within one look (a key press and the look in the same moment share it): a portal whose CreateObject (or
+    // whose Setup, and so its reach) arrived since the last look counts at this one. Held for 500 ms, a portal that
+    // came in just after a scan went unseen for up to 5 m of a run (BUG.agent-sentinel-first-approach sweep).
+    let all = c && now - c.at < AgentApi.SENTINEL_GAP_MIN_MS / 2 ? c.disks : null;
     if (!all) {
       all = [];
       for (const o of this.host.objects()) {
@@ -15829,7 +15955,7 @@ export class AgentApi {
         if (classify(o, false) !== 'portal') continue;
         const g = toGlobal(o.cell, o.x, o.y);
         if (Math.hypot(g.x - me.g.x, g.y - me.g.y) > AgentApi.SENTINEL_SCAN_M) continue;
-        const touch = (this.host.objectReach?.(o.guid) || 1) + BODY_RADIUS_M;
+        const touch = this.portalReach(o.guid) + BODY_RADIUS_M;
         all.push({ x: g.x, y: g.y, z: o.z, r: touch + STEP_CLEAR_M, touch, guid: o.guid >>> 0, label: o.name });
       }
       this.sentinelDiskCache = { at: now, disks: all };
@@ -15849,7 +15975,7 @@ export class AgentApi {
    * overran a leg end into Aerbax Haven #7029e002 between two looks.
    */
   private enforcePortalSentinel(now: number, look: boolean): void {
-    const me = this.me();
+    const me = this.sentinelMe();
     if (!me || me.s.dead || this.host.screen() !== 'world') { if (look) { this.sentinel = null; this.sentinelReportedAt = null; } return; }
     const here = { x: me.g.x, y: me.g.y, z: me.s.z };
     let vx = 0, vy = 0;
@@ -15861,7 +15987,7 @@ export class AgentApi {
         this.sentinelGaps.push(dt);
         if (this.sentinelGaps.length > 10) this.sentinelGaps.shift();
         vx = ((here.x - prev.x) / dt) * 1000; vy = ((here.y - prev.y) / dt) * 1000;
-        if (this.agentKeys.has('KeyW') && !this.agentKeys.has('ShiftLeft')) this.sentinelRunMps = Math.max(this.sentinelRunMps, Math.hypot(vx, vy));
+        if (this.agentKeysRun()) this.sentinelRunMps = Math.max(this.sentinelRunMps, Math.hypot(vx, vy));
       }
       this.sentinel = { at: now, ...here, cell: me.s.cell >>> 0 };
     }
@@ -15889,24 +16015,64 @@ export class AgentApi {
       return { x, y };
     };
     const runMps = this.sentinelRunMps || AgentApi.SENTINEL_RUN_MPS;
-    const pace = (): number => (this.agentKeys.has('KeyW') && !this.agentKeys.has('ShiftLeft') ? runMps : AgentApi.SENTINEL_WALK_MPS);
-    const threat = (mps: number, exact = false): ReturnType<typeof portalStepThreat<(typeof disks)[number]>> => {
-      const s = Math.max(stride(mps, exact), moving && !exact ? stride(Math.hypot(vx, vy)) : 0);
-      return (held.length ? portalStepThreat(here, keysDir(), s, disks) : null) ?? (moving ? portalStepThreat(here, { x: vx, y: vy }, s, disks) : null);
+    const pace = (): number => (this.agentKeysRun() ? runMps : AgentApi.SENTINEL_WALK_MPS);
+    // Letting go of a run doesn't stop the body where it stands: the stop link coasts it on (SENTINEL_RUN_COAST_M; a
+    // walk's shorter coast is inside the disk's margin, a sidestep stops dead). So the held keys' stride is also checked
+    // out to where a release at its end would leave the body, against the portal's touch itself (the server's reach on
+    // its spheres, band included, stays inside the part-array touch: 1.84 + 0.2 m against 2.4 m for the stock portal).
+    // The gait is the body's, not the keys': after the sentinel's Shift the body still runs through the Run → Walk link,
+    // and with RunAsDefaultMovement off Shift runs. Judged by the keys, a body still running at 4+ m/s was given a walk's
+    // 0.42 m stride and no coast, let go of 2.9 m out and came to 1.19 m, through (live, 2026-11-21, D 8 m, 2 s).
+    const speed = Math.hypot(vx, vy);
+    const bodyRuns = speed > AgentApi.SENTINEL_WALK_MPS + AgentApi.SENTINEL_RUNNING_OVER_WALK_MPS;
+    // The sentinel's own walk plays the Run → Walk link out first (SENTINEL_RUN_TO_WALK_M over SENTINEL_RUN_TO_WALK_MS),
+    // then the walk's stop link. Live, a release a look after that walk still went the whole link and stop (~2.5 m:
+    // released 4.5 → rest 1.99 m, ff268bbe0), so while the link may play the full link is owed, not what is left of it.
+    const inLink = now - this.sentinelWalkSince < AgentApi.SENTINEL_RUN_TO_WALK_MS * 2;
+    const linkOwed = AgentApi.SENTINEL_RUN_TO_WALK_M + AgentApi.SENTINEL_WALK_COAST_M;
+    // How far the body goes before it rests if the NEXT look lets go: `s` (the stride to that look) plus what a release
+    // then owes. Checked against the touch disk, the body comes to rest outside it whichever look the release falls on.
+    // `switching`: for a walk chosen now (the link starts at once). A walk a task steers turns at its waypoints and holds
+    // back inside a disk itself (portalGuard), so its stride is not projected straight on through the link, nor a walk's
+    // stop added (a detour passes waypoints 2.8 m from a portal; a 0x029E follow at 700 ms looks stalled on it); a hand
+    // move or a held motion goes straight on, and counts both.
+    const owedOf = (s: number, run: boolean, switching = false): number => {
+      if (!this.agentKeys.has('KeyW')) return 0;
+      if (switching || inLink) return (this.task ? 0 : s) + linkOwed;
+      if (run || bodyRuns) return s + AgentApi.SENTINEL_RUN_COAST_M;
+      return this.task ? 0 : s + AgentApi.SENTINEL_WALK_COAST_M;
     };
-    const walking = !(this.agentKeys.has('KeyW') && !this.agentKeys.has('ShiftLeft'));
-    let th = held.length ? threat(pace(), walking) : null;
-    if (th && !walking && !threat(AgentApi.SENTINEL_WALK_MPS, true)) {
-      // A walk's stride stays out of it: walk, don't run.
-      this.agentKeys.add('ShiftLeft');
-      this.host.key('ShiftLeft', true);
+    const coast = owedOf(0, this.agentKeysRun());
+    const touchDisks = disks.map((d) => ({ ...d, r: d.touch }));
+    const threat = (mps: number, exact = false, run = !exact, switching = false): ReturnType<typeof portalStepThreat<(typeof disks)[number]>> => {
+      const s = Math.max(stride(mps, exact), moving && !exact ? stride(speed) : 0);
+      const owed = owedOf(s, run, switching);
+      return (held.length ? portalStepThreat(here, keysDir(), s, disks) ?? (owed ? portalStepThreat(here, keysDir(), owed, touchDisks) : null) : null)
+        ?? (moving ? portalStepThreat(here, { x: vx, y: vy }, s, disks) : null);
+    };
+    const walking = !this.agentKeysRun();
+    let th = held.length ? threat(pace(), walking, !walking) : null;
+    if (th && !walking && !threat(AgentApi.SENTINEL_WALK_MPS, true, false, true)) {
+      // A walk's stride, after the Run → Walk link it starts, stays out of it: walk, don't run. The hold-run key inverts RunAsDefaultMovement: with the option
+      // off the agent's Shift is what runs, so the walk is letting go of it (pressing it ran the body at 11 m/s into the
+      // portal, verify-agent-sentinel-first-approach).
+      if (this.paceShift(true)) {
+        this.agentKeys.add('ShiftLeft');
+        this.host.key('ShiftLeft', true);
+        this.sentinelShift = true;
+      } else {
+        this.agentKeys.delete('ShiftLeft');
+        this.host.key('ShiftLeft', false);
+      }
+      this.sentinelWalkSince = now;
       th = null;
     }
     if (th) {
       for (const k of held) { this.agentKeys.delete(k); this.host.key(k, false); }
       this.agentKeys.delete('ShiftLeft'); this.host.key('ShiftLeft', false);
+      this.sentinelShift = false;
       if (!this.sentinelSaid || this.sentinelSaid.guid !== th.disk.guid || now - this.sentinelSaid.at > 2000) {
-        this.trace(`portal sentinel: ${th.dist.toFixed(1)} m from ${th.disk.label} #${th.disk.guid.toString(16)}, and the next ${stride(pace()).toFixed(1)} m (looks up to ${(gap * 1000).toFixed(0)} ms apart) would come within ${th.closest.toFixed(1)} m of it (touching at ${th.disk.touch.toFixed(1)}); let go of ${held.join('+')}`);
+        this.trace(`portal sentinel: ${th.dist.toFixed(1)} m from ${th.disk.label} #${th.disk.guid.toString(16)}, and the next ${stride(pace()).toFixed(1)} m (looks up to ${(gap * 1000).toFixed(0)} ms apart)${coast ? ` and the ${coast.toFixed(2)} m stop coast after it` : ''} would come within ${th.closest.toFixed(1)} m of it (touching at ${th.disk.touch.toFixed(1)}); let go of ${held.join('+')}`);
       }
       this.sentinelSaid = { guid: th.disk.guid, at: now };
       this.sentinelVeto = { at: now, dist: th.dist, label: th.disk.label, guid: th.disk.guid, keys: held };
@@ -15918,7 +16084,7 @@ export class AgentApi {
       const still = ![...this.agentKeys].some((k) => AgentApi.SENTINEL_MOVE_KEYS.has(k));
       const dir = still ? { x: vx, y: vy } : keysDir();
       const len = Math.hypot(dir.x, dir.y);
-      const s = still ? (moving ? stride(Math.hypot(vx, vy)) : 0) : stride(pace());
+      const s = still ? (moving ? stride(Math.hypot(vx, vy)) : 0) : stride(pace()) + coast;
       const ahead = len > 1e-6 && s > 0 ? { x: here.x + (dir.x / len) * s, y: here.y + (dir.y / len) * s } : { x: here.x, y: here.y };
       if (chordNeedsReport(this.sentinelReportedAt, here, ahead, near)) {
         this.host.reportPosition();

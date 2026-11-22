@@ -229,7 +229,7 @@ describe('movement, combat state and scripting', () => {
   it('jump[swzxc] holds the keys UB names, within 0–1000 ms and 0–359°', async () => {
     const { ub, h } = setup();
     expect(await ub.command('/ub jumpsw 180 500')).toEqual([]);
-    expect(h.log.slice(-2)).toEqual(['turn 180', 'jump {"holdMs":500,"forward":true,"backward":false,"strafeLeft":false,"strafeRight":false,"walk":true}']);
+    expect(h.log.slice(-2)).toEqual(['turn 180', 'jump {"holdMs":500,"forward":true,"backward":false,"strafeLeft":false,"strafeRight":false,"shift":true}']);
     await settle();
     await ub.command('/ub jumpzc');
     expect(h.log.at(-1)).toContain('"strafeLeft":true,"strafeRight":true');

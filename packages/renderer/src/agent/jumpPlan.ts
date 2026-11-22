@@ -13,7 +13,7 @@
  *
  * The launch is the client's: get_leave_ground_velocity @ 005280c0 = the
  * held keys' get_state_velocity @ 00527d50 (RunForward × run_anim_speed ×
- * run rate, or WalkForward × walk_anim_speed with Shift) with z =
+ * run rate, or WalkForward × walk_anim_speed at a walk) with z =
  * get_jump_v_z @ 00527aa0 → CACQualities::InqJumpVelocity @ 00592980 =
  * sqrt(MovementSystem::GetJumpHeight @ 006b09b0 (load, Jump skill, extent)
  * × 19.6). The extent is the charge time over ATTACK_POWERUP_TIME (1 s;
@@ -83,7 +83,7 @@ export interface JumpKit {
   floor(x: number, y: number, fromZ: number): number | null;
   /** One airborne transition: the body with its feet at `from.z` moved by (dx, dy) through the collision world; where it ends. */
   airStep(from: NavPoint, dx: number, dy: number): { x: number; y: number };
-  /** A standing long jump charged to `power` (0..1): forward speed along the facing and upward speed, m/s; `walk` = Shift held. */
+  /** A standing long jump charged to `power` (0..1): forward speed along the facing and upward speed, m/s; `walk` = the walking pace (not the Shift key: AgentApi.paceShift maps it). */
   launch(power: number, walk: boolean): { forward: number; up: number };
   /** Seconds of holding the jump key to charge it fully (ATTACK_POWERUP_TIME; 0.8 s in dual wield). */
   chargeSeconds: number;
@@ -113,7 +113,7 @@ export interface JumpSpec {
   power: number;
   /** How long to hold the jump key, ms (power × the charge time). */
   holdMs: number;
-  /** Shift held (a walking jump: shorter). */
+  /** A walking jump (shorter); the agent holds the hold-run key for it as RunAsDefaultMovement says (AgentApi.paceShift). */
   walk: boolean;
   /** Seconds in the air. */
   flight: number;
@@ -332,7 +332,7 @@ const TAKEOFF_SLOP_M = 0.15;
 const POWER_SLOP = 0.05;
 
 /**
- * The jumps from `from` facing `dir` that land somewhere new: walking (Shift) jumps first, then
+ * The jumps from `from` facing `dir` that land somewhere new: walking jumps first, then
  * running ones, each from the gentlest charge up. Kept only when the landing deals at most
  * `maxDamage` and a slightly shorter or longer charge lands on the same floor. At most `max`.
  */

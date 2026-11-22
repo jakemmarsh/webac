@@ -810,6 +810,16 @@ export class MovementSync {
   // ─── Position serialization ─────────────────────────────────
 
   /**
+   * Where the body stands now, in the frame an AutonomousPosition would name it (cell + landblock-local origin, z the
+   * feet), without sending anything or counting telemetry. lastSentFrame is the last one SENT, which inside the 1 s
+   * position-event window lags a run by metres (shouldSendPositionEvent); the agent's portal sentinel reads this one.
+   */
+  peekFrame(pos: PlayerPosition): { cellId: number; x: number; y: number; z: number } {
+    const f = this.frameOf(pos);
+    return { cellId: f.landblockId >>> 0, x: f.localX, y: f.localY, z: pos.groundY };
+  }
+
+  /**
    * GAP.7 — bit 0 of the trailing ContactLongJump byte now reflects the
    * real airborne state so ACE's server physics can integrate falls
    * (WeenieObject.cs:236 → HandleFallingDamage needs a not-in-contact
@@ -817,6 +827,18 @@ export class MovementSync {
    * added by sendMoveToState only (AutonomousPositionPack has no such bit).
    */
   private buildPosition(pos: PlayerPosition): MovementPositionFields {
+    const { landblockId, localX, localY, staleSurfaceCell } = this.frameOf(pos);
+    // Counted once per run of frames naming it (a frame builds its position more than once).
+    if (staleSurfaceCell !== 0 && staleSurfaceCell !== this.lastStaleSurfaceCell) {
+      this.surfaceCellCorrections++;
+      this.onSurfaceCellCorrected?.(staleSurfaceCell, landblockId);
+    }
+    this.lastStaleSurfaceCell = staleSurfaceCell;
+    return this.positionFields(pos, landblockId, localX, localY);
+  }
+
+  /** The cell and landblock-local origin a position names (no side effects). */
+  private frameOf(pos: PlayerPosition): { landblockId: number; localX: number; localY: number; staleSurfaceCell: number } {
     let landblockId: number;
     let localX: number;
     let localY: number;
@@ -855,13 +877,10 @@ export class MovementSync {
       const cellId = cellX * 8 + cellY + 1; // 1-based, row-major
       landblockId = ((lbX << 24) | (lbY << 16) | (cellId & 0xFFFF)) >>> 0;
     }
-    // Counted once per run of frames naming it (a frame builds its position more than once).
-    if (staleSurfaceCell !== 0 && staleSurfaceCell !== this.lastStaleSurfaceCell) {
-      this.surfaceCellCorrections++;
-      this.onSurfaceCellCorrected?.(staleSurfaceCell, landblockId);
-    }
-    this.lastStaleSurfaceCell = staleSurfaceCell;
+    return { landblockId, localX, localY, staleSurfaceCell };
+  }
 
+  private positionFields(pos: PlayerPosition, landblockId: number, localX: number, localY: number): MovementPositionFields {
     // CORE.18.a — the AC orientation for the camera yaw: heading θ = π − yaw
     // about +Z (scene/AcHeading.ts). Sending θ = yaw told ACE a heading
     // reflected about the east-west axis.

@@ -2637,7 +2637,8 @@ export class RoutineEngine {
       case 'clear-watchdog': this.watchdog = null; return { ok: true, message: 'watchdog cleared' };
       case 'jump': {
         if (a.heading !== undefined) { this.api.turn(a.heading); await sleep(400); }
-        const r = this.api.jump({ holdMs: a.holdMs, forward: a.forward, walk: a.walk });
+        // The action's walk is the meta's Shift (VTank / MagTools jump with Shift): the key itself, not a pace.
+        const r = this.api.jump({ holdMs: a.holdMs, forward: a.forward, shift: !!a.walk });
         await sleep((a.holdMs ?? 350) + 900); // the jump's flight
         return r;
       }
