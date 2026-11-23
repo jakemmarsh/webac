@@ -303,12 +303,15 @@ pass about 1 s before the path to outside hosts opens in both directions.
 So a world with a path probe (`pathProbeFor(protocol, target)`, egress.ts)
 then waits, best-effort, for an answer from the session's own world server:
 for the AC1999 protocol, the server-tracker login (account
-`acservertracker`, `AC1999_TRACKER_LOGIN`) sent from a socket bound to the
-slot's private IP to the session's target host:port every 250 ms for its first 2 s, then every 1 s (`pathProbePollMs`: each is a query on the AC1999 server's single DB thread, and a stalled one once got 24 in 6 s; now 12), ready on
+`acservertracker`, `AC1999_TRACKER_LOGIN`) sent, each time from a NEW socket
+bound to the slot's private IP (earlier sockets keep listening until the
+probe ends; a stuck first flow is not revived by refreshing it, a new source
+port gets a fresh path), to the session's target host:port every 250 ms for its first 2 s, then every 1 s (`pathProbePollMs`: each is a query on the AC1999 server's single DB thread, and a stalled one once got 24 in 6 s; now 12), ready on
 the first reply from that host:port, for at most `PATH_PROBE_MAX_MS` (6 s,
 or what is left of the 10 s). With no reply the address is used anyway on
 checkip's word (`egress_path_unconfirmed`, warn: slot, publicIp, target,
-ms, attempts): it is never released, retried or refused for that, since the
+ms, attempts, sockets; a probe-decided `egress_ready` adds sockets and
+replySocket, the 1-based socket whose send was answered): it is never released, retried or refused for that, since the
 port rotation and the 5 s move below cover a path still opening, and a
 world that is down fails in the game as before instead of as a false
 `world_full`. `egress_not_ready` and `aws:NotReady` are checkip's only. The AC1999 server special-cases that

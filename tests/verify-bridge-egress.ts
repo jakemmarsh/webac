@@ -1818,7 +1818,10 @@ describe('readiness proves the round trip to the world server (path probe: the A
       expect(r.attempts).toBe(server.msgs.length);
       expect(r.attempts).toBeGreaterThanOrEqual(3); // 0, 250, 500 ms dropped
       expect(server.msgs.every((x) => x.msg.equals(AC1999_TRACKER_LOGIN))).toBe(true);
-      expect(server.msgs.every((x) => x.rinfo.address === '127.0.0.1' && x.rinfo.port === server.msgs[0].rinfo.port)).toBe(true);
+      // Every send from its own socket: a new source port each time, all on the slot's address.
+      expect(server.msgs.every((x) => x.rinfo.address === '127.0.0.1')).toBe(true);
+      expect(new Set(server.msgs.map((x) => x.rinfo.port)).size).toBe(server.msgs.length);
+      expect(r).toMatchObject({ sockets: r.attempts, replySocket: r.attempts });
       // Sends at the poll interval.
       expect(server.msgs[1].at - server.msgs[0].at).toBeGreaterThanOrEqual(PATH_PROBE_POLL_MS - 20);
     } finally {
@@ -1886,6 +1889,89 @@ describe('readiness proves the round trip to the world server (path probe: the A
     }
   }, 10_000);
 
+  /** A socket factory that records every socket the probe opens and whether it was closed. */
+  function trackedSockets() {
+    const opened: { sock: dgram.Socket; closed: boolean }[] = [];
+    const create = () => {
+      const sock = dgram.createSocket('udp4');
+      const e = { sock, closed: false };
+      sock.once('close', () => { e.closed = true; });
+      opened.push(e);
+      return sock;
+    };
+    return { opened, create };
+  }
+
+  it('a stuck 5-tuple: a server that never answers the first 3 source ports is answered from the 4th socket (replySocket 4), every socket closed after', async () => {
+    const server = await fakeServer();
+    const ports: number[] = [];
+    server.sock.on('message', (_m, rinfo) => {
+      if (!ports.includes(rinfo.port)) ports.push(rinfo.port);
+      if (ports.indexOf(rinfo.port) < 3) return; // these flows stay dead however often they are refreshed
+      server.sock.send(Buffer.from('04df9c54', 'hex'), rinfo.port, rinfo.address);
+    });
+    const t = trackedSockets();
+    try {
+      const r = await udpReplyProbe('test', AC1999_TRACKER_LOGIN, { host: '127.0.0.1', port: server.port }, 50, t.create).run('127.0.0.1', 2_000);
+      expect(r).toMatchObject({ ok: true, attempts: 4, sockets: 4, replySocket: 4 });
+      expect(ports).toHaveLength(4);
+      await until(() => t.opened.every((e) => e.closed));
+      expect(t.opened).toHaveLength(4);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('a late reply to an earlier socket still counts: socket 1 answered after later sockets went out', async () => {
+    const server = await fakeServer();
+    let first: dgram.RemoteInfo | null = null;
+    server.sock.on('message', (_m, rinfo) => {
+      if (first) return;
+      first = rinfo;
+      // Answer only the first send, and only after several more sockets have sent.
+      setTimeout(() => server.sock.send(Buffer.from('04df9c54', 'hex'), rinfo.port, rinfo.address), 230);
+    });
+    const t = trackedSockets();
+    try {
+      const r = await udpReplyProbe('test', AC1999_TRACKER_LOGIN, { host: '127.0.0.1', port: server.port }, 50, t.create).run('127.0.0.1', 2_000);
+      expect(r.ok).toBe(true);
+      expect(r.replySocket).toBe(1);
+      expect(r.sockets).toBeGreaterThanOrEqual(4);
+      expect(server.msgs.length).toBe(r.attempts);
+      await until(() => t.opened.every((e) => e.closed));
+      expect(t.opened).toHaveLength(r.sockets);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('no reply by the deadline, or a socket error: every socket the probe opened is closed and `sockets` says how many', async () => {
+    const server = await pathServer(Infinity);
+    const t = trackedSockets();
+    try {
+      const r = await udpReplyProbe('test', Buffer.from('ping'), { host: '127.0.0.1', port: server.port }, 50, t.create).run('127.0.0.1', 330);
+      expect(r).toMatchObject({ ok: false });
+      expect(r).not.toHaveProperty('replySocket');
+      expect(r.attempts).toBeGreaterThanOrEqual(5);
+      expect(r.sockets).toBe(t.opened.length);
+      expect(r.sockets).toBeGreaterThanOrEqual(r.attempts);
+      await until(() => t.opened.every((e) => e.closed));
+      // Nothing is sent after the end.
+      const sent = server.msgs.length;
+      await new Promise((res) => setTimeout(res, 150));
+      expect(server.msgs).toHaveLength(sent);
+      expect(t.opened).toHaveLength(r.sockets);
+      // A slot address this host doesn't have: the bind fails, the probe ends at once, closed.
+      const bad = trackedSockets();
+      const e = await udpReplyProbe('test', Buffer.from('ping'), { host: '127.0.0.1', port: server.port }, 50, bad.create).run('192.0.2.1', 2_000);
+      expect(e).toMatchObject({ ok: false, attempts: 0, sockets: 1 });
+      expect(e.ms).toBeLessThan(1_000);
+      await until(() => bad.opened.every((x) => x.closed));
+    } finally {
+      server.close();
+    }
+  });
+
   it('checkip comes first: while it fails the world server gets nothing', async () => {
     const server = await pathServer();
     const clock = fakeClock();
@@ -1930,7 +2016,7 @@ describe('readiness proves the round trip to the world server (path probe: the A
       const a = await m.acquire('ac1999', '198.51.100.1', target);
       expect(a.ok).toBe(true);
       const ready = cap.lines.find((x) => x.event === 'egress_ready')!;
-      expect(ready.fields).toMatchObject({ slot: '127.0.0.1', probe: 'ac1999-tracker', target: `127.0.0.1:${server.port}`, attempts: 1, checkipAttempts: 1, checkipMs: 100 });
+      expect(ready.fields).toMatchObject({ slot: '127.0.0.1', probe: 'ac1999-tracker', target: `127.0.0.1:${server.port}`, attempts: 1, checkipAttempts: 1, checkipMs: 100, sockets: 1, replySocket: 1 });
       expect(server.msgs).toHaveLength(1);
       expect(server.msgs[0].msg.equals(AC1999_TRACKER_LOGIN)).toBe(true);
       // The order: associated, proven, acquired.
@@ -1958,6 +2044,10 @@ describe('readiness proves the round trip to the world server (path probe: the A
       expect(unconfirmed[0].level).toBe('warn');
       expect(unconfirmed[0].fields).toMatchObject({ slot: '127.0.0.1', publicIp: r.ok ? r.lease.publicIp : null, target: `127.0.0.1:${server.port}` });
       expect(unconfirmed[0].fields.attempts as number).toBeGreaterThan(0);
+      // One socket per send (a bind still pending at the deadline may add one).
+      expect(unconfirmed[0].fields.sockets as number).toBeGreaterThanOrEqual(unconfirmed[0].fields.attempts as number);
+      expect(unconfirmed[0].fields.sockets as number).toBeLessThanOrEqual((unconfirmed[0].fields.attempts as number) + 1);
+      expect(unconfirmed[0].fields).not.toHaveProperty('replySocket');
       expect(unconfirmed[0].fields.ms as number).toBeGreaterThanOrEqual(250);
       expect(cap.lines.find((x) => x.event === 'egress_ready')!.fields).toMatchObject({ probe: 'checkip', checkipAttempts: 1 });
       expect(cap.lines.some((x) => x.event === 'egress_not_ready' || x.event === 'egress_release')).toBe(false);

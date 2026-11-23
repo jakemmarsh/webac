@@ -183,6 +183,8 @@ export class StaticEgressProvider implements EgressProvider {
 export interface ReadyResult {
   ready: boolean; ms: number; attempts: number; last: string; probe: string;
   checkipMs?: number; checkipAttempts?: number;
+  /** A path probe that decided it: sockets it opened, and which one (1-based) got the reply. */
+  sockets?: number; replySocket?: number;
   /** A path probe that got no reply within PATH_PROBE_MAX_MS: the address is ready anyway (checkip proved it ours). */
   pathUnconfirmed?: PathProbeResult;
 }
@@ -232,7 +234,13 @@ export interface PathTarget {
   spp?: boolean;
 }
 
-export interface PathProbeResult { ok: boolean; ms: number; attempts: number; last: string }
+export interface PathProbeResult {
+  ok: boolean; ms: number; attempts: number; last: string;
+  /** Sockets the probe opened (one per send). */
+  sockets: number;
+  /** On a reply: which socket's send was answered (1-based). */
+  replySocket?: number;
+}
 
 export interface PathProbe {
   /** For the log (egress_ready probe). */
@@ -279,43 +287,65 @@ export const AC1999_TRACKER_LOGIN: Buffer = Buffer.from(buildPacket1999({
 }));
 
 /**
- * A probe that sends `packet` to `target` from one socket bound to the slot,
- * paced by `pollMs` (a fixed gap, or the gap after a send at `elapsedMs`), and
- * passes on the first reply from target's host:port.
+ * A probe that sends `packet` to `target` from the slot, paced by `pollMs` (a
+ * fixed gap, or the gap after a send at `elapsedMs`), and passes on the first
+ * reply from target's host:port.
+ *
+ * Each send leaves from a NEW socket (port 0 on the slot's address), and every
+ * earlier socket keeps listening until the probe ends, so a late reply to any
+ * send still counts. The first datagrams of a flow through a just-associated
+ * address can be lost and that 5-tuple stay dead while the probe keeps
+ * refreshing it: twice (2026-11) one socket's 12 probes got nothing in 6 s,
+ * yet the session's first datagram from a new socket on the same address was
+ * answered in ~10 ms (docs/aws-hosting.md, "A lost grant sticks the session
+ * to its source port"). `sockets` is how many it opened; `replySocket` the
+ * 1-based index of the one whose send was answered.
  */
-export function udpReplyProbe(name: string, packet: Buffer, target: PathTarget, pollMs: number | ((elapsedMs: number) => number) = pathProbePollMs): PathProbe {
+export function udpReplyProbe(
+  name: string, packet: Buffer, target: PathTarget, pollMs: number | ((elapsedMs: number) => number) = pathProbePollMs,
+  createSocket: () => dgram.Socket = () => dgram.createSocket('udp4'),
+): PathProbe {
   const gap = typeof pollMs === 'number' ? () => pollMs : pollMs;
   return {
     name,
     target,
     run: (localAddress, deadlineMs) => new Promise<PathProbeResult>((resolve) => {
       const started = Date.now();
-      const sock = dgram.createSocket('udp4');
+      const socks: dgram.Socket[] = [];
       let attempts = 0;
       let last = `no reply from ${target.host}:${target.port}`;
       let done = false;
       let poll: ReturnType<typeof setTimeout> | undefined;
-      const finish = (ok: boolean) => {
+      const finish = (ok: boolean, replySocket?: number) => {
         if (done) return;
         done = true;
         clearTimeout(poll);
         clearTimeout(deadline);
-        try { sock.close(); } catch { /* closed */ }
-        resolve({ ok, ms: Date.now() - started, attempts, last: ok ? `reply from ${target.host}:${target.port}` : last });
+        for (const s of socks) { try { s.close(); } catch { /* closed */ } }
+        resolve({
+          ok, ms: Date.now() - started, attempts, sockets: socks.length,
+          ...(ok ? { replySocket } : {}),
+          last: ok ? `reply from ${target.host}:${target.port}` : last,
+        });
       };
       const deadline = setTimeout(() => finish(false), Math.max(0, deadlineMs));
-      sock.on('error', (err) => { last = awsErrorCode(err); finish(false); });
-      sock.on('message', (_msg, rinfo) => {
-        if (rinfo.address === target.host && rinfo.port === target.port) finish(true);
-        else last = `foreign reply from ${rinfo.address}:${rinfo.port}`;
-      });
       const send = () => {
         if (done) return;
-        attempts++;
-        sock.send(packet, target.port, target.host, (err) => { if (err) last = awsErrorCode(err); });
+        const sock = createSocket();
+        const index = socks.push(sock);
+        sock.on('error', (err) => { last = awsErrorCode(err); finish(false); });
+        sock.on('message', (_msg, rinfo) => {
+          if (rinfo.address === target.host && rinfo.port === target.port) finish(true, index);
+          else last = `foreign reply from ${rinfo.address}:${rinfo.port}`;
+        });
+        sock.bind({ address: localAddress, port: 0 }, () => {
+          if (done) return;
+          attempts++;
+          sock.send(packet, target.port, target.host, (err) => { if (err) last = awsErrorCode(err); });
+        });
         poll = setTimeout(send, gap(Date.now() - started));
       };
-      sock.bind({ address: localAddress, port: 0 }, send);
+      send();
     }),
   };
 }
@@ -586,7 +616,7 @@ export class AwsEgressProvider implements EgressProvider {
     const before = checkip?.ms ?? 0;
     const r = await path.run(slot.address, Math.min(PATH_PROBE_MAX_MS, READY_DEADLINE_MS - before));
     const ip = checkip ? { checkipMs: checkip.ms, checkipAttempts: checkip.attempts } : {};
-    if (r.ok) return { ready: true, ms: before + r.ms, attempts: r.attempts, last: r.last, probe: path.name, ...ip };
+    if (r.ok) return { ready: true, ms: before + r.ms, attempts: r.attempts, last: r.last, probe: path.name, ...ip, sockets: r.sockets, replySocket: r.replySocket };
     return {
       ready: true, ms: before + r.ms, attempts: checkip?.attempts ?? 0, last: checkip?.last ?? r.last, probe: checkip ? 'checkip' : 'none',
       ...ip, pathUnconfirmed: r,
@@ -1489,11 +1519,12 @@ export class EgressManager {
           probe: ready.probe, ms: ready.ms, attempts: ready.attempts,
           ...(path ? { target: `${path.target.host}:${path.target.port}` } : {}),
           ...(ready.checkipMs !== undefined ? { checkipMs: ready.checkipMs, checkipAttempts: ready.checkipAttempts } : {}),
+          ...(ready.sockets !== undefined ? { sockets: ready.sockets, replySocket: ready.replySocket } : {}),
         };
         if (ready.ready) {
           if (ready.pathUnconfirmed && path) {
             const u = ready.pathUnconfirmed;
-            this.log('warn', 'egress_path_unconfirmed', { slot: slot.address, publicIp: held.publicIp, target: `${path.target.host}:${path.target.port}`, probe: path.name, ms: u.ms, attempts: u.attempts, last: u.last });
+            this.log('warn', 'egress_path_unconfirmed', { slot: slot.address, publicIp: held.publicIp, target: `${path.target.host}:${path.target.port}`, probe: path.name, ms: u.ms, attempts: u.attempts, sockets: u.sockets, last: u.last });
           }
           this.log('info', 'egress_ready', { slot: slot.address, publicIp: held.publicIp, ...fields });
           return held;
