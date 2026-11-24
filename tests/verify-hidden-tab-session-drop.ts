@@ -31,6 +31,8 @@ import {
   GameMessageGroup, type ConnectionEvent, type NetCommand, type NetReply,
 } from '@ac/network';
 import { Connection1999 } from '../packages/network/src/era1999/Connection1999.js';
+import { buildPacket1999 } from '../packages/network/src/era1999/Packet1999.js';
+import { LinkCheck, deadSessionCause } from '../packages/renderer/src/session/LinkCheck.js';
 import { NetWorkerClient, SNAPSHOT_EXTRAPOLATION_MAX_MS, type NetWorkerEndpoint } from '../packages/renderer/src/network/NetWorkerClient.js';
 import { linkDeadCause, linkSampleIsDead } from '../packages/renderer/src/ui/ConnectionNotices.js';
 import { ThreadStallClock, silenceIsOwnStall, STALE_RECEIVE_GRACE_MS } from '../packages/network/src/ThreadStall.js';
@@ -523,6 +525,60 @@ describe('Connection1999 timeout', () => {
     const b = session1999();
     b.conn.disconnect();
     expect(b.disconnects()).toEqual([expect.objectContaining({ deliberate: true, endCause: 'local' })]);
+  });
+});
+
+// ── BUG.preworld-link-dead-finish: the page's link check before the world, over each era's connection ──
+
+describe('the link check at character select and in chargen (LinkCheck over the real connections)', () => {
+  function linkCheckOn(sample: () => ReturnType<NetWorkerClient['getLinkStatus']>) {
+    const dead: string[] = [];
+    const lc = new LinkCheck({ sample, show: () => {}, dead: (cause) => dead.push(cause) });
+    lc.start();
+    return { lc, dead };
+  }
+
+  it('end of retail / GDLE (ClientConnection via the worker): a server answering our keepalives for 2 min is never ended', () => {
+    const s = workerSession();
+    const { dead } = linkCheckOn(() => s.client.getLinkStatus(Date.now()));
+    // ACE answers the 3 s EchoRequest and sends TimeSync every 20 s; GDLE answers each EchoRequest.
+    for (let seq = 2; seq <= 41; seq++) { vi.advanceTimersByTime(3000); s.ws.receive(serverMessage(seq)); }
+    expect(dead).toEqual([]);
+    expect(s.disconnects()).toHaveLength(0);
+  });
+
+  it('end of retail: a hidden page stopped 45 s while its worker heard the server is not ended', () => {
+    const s = workerSession();
+    const { dead } = linkCheckOn(() => s.client.getLinkStatus(Date.now()));
+    s.state.blocked = true;
+    for (let seq = 2; seq <= 16; seq++) { vi.advanceTimersByTime(3000); s.ws.receive(serverMessage(seq)); }
+    s.unblock();
+    vi.advanceTimersByTime(1000);
+    expect(dead).toEqual([]);
+  });
+
+  it('end of retail: a server gone silent with the socket open is caught at 40 s, long before the worker\'s 140 s drop', () => {
+    const s = workerSession();
+    s.ws.receive(serverMessage(2));
+    const { lc, dead } = linkCheckOn(() => s.client.getLinkStatus(Date.now()));
+    vi.advanceTimersByTime(39_000);
+    expect(dead).toEqual([]);
+    vi.advanceTimersByTime(3_000);
+    expect(dead).toEqual(['link_dead']);
+    expect(lc.running).toBe(false);
+    expect(s.disconnects()).toHaveLength(0); // the connection itself had not noticed
+    expect(deadSessionCause(s.client)).toBe('link_dead'); // and FINISH would see it dead too
+  });
+
+  it('AC1999: the server\'s 5 s keepalive keeps character select alive; its silence is caught at 40 s', () => {
+    const s = session1999();
+    const { dead } = linkCheckOn(() => s.conn.getLinkStatus(Date.now()));
+    const keepalive = buildPacket1999({ sequence: 0, flags: 0x202, recipient: 0, time: 0 });
+    for (let i = 0; i < 24; i++) { vi.advanceTimersByTime(5000); s.sock.deliver(keepalive); }
+    expect(dead).toEqual([]);
+    vi.advanceTimersByTime(41_000);
+    expect(dead).toEqual(['link_dead']);
+    expect(s.disconnects()).toHaveLength(0); // before Connection1999's own 60 s
   });
 });
 

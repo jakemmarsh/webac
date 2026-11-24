@@ -17,7 +17,9 @@
  * reports the drop again nor schedules a second resume, and it never marks a
  * logout (only SessionLifecycle.noteLoggedOut does), so the resume stands.
  */
+import type { LinkSample } from '@ac/network';
 import type { SessionLifecycle } from './SessionLifecycle.js';
+import { deadSessionCause, type LinkDeadCause } from './LinkCheck.js';
 
 /**
  * BUG.ac1999-relogin-resume-pingpong — the session ended because the server
@@ -198,17 +200,26 @@ export class PageHideClose {
 
 /**
  * BUG.beforeunload-silent-disconnect (inverse sweep) — a request that needs
- * the live session (chargen FINISH's CharacterCreate, the enter-world request)
- * went out on a connection that was no longer connected and vanished: the
- * player waited out its timeout (FINISH: 20 s, then the catch-all refusal).
- * The send now finds the session dead first and ends it the way the 40 s link
- * check does (handleUnexpectedDrop: the chargen / enter / char-select resume,
- * else the Disconnected screen). True when the session is live and the send
- * may go.
+ * the live session (chargen FINISH's CharacterCreate, the enter-world request,
+ * character delete / restore) went out on a connection that was no longer
+ * connected and vanished: the player waited out its timeout (FINISH: 20 s,
+ * then the catch-all refusal). The send now finds the session dead first and
+ * ends it the way the 40 s link check does (handleUnexpectedDrop: the chargen /
+ * enter / char-select resume, else the Disconnected screen). True when the
+ * session is live and the send may go.
+ *
+ * BUG.preworld-link-dead-finish — dead also means an open socket whose server
+ * has been silent past DISCONNECT_TIME (LinkCheck.deadSessionCause): ACE had
+ * dropped a chargen session whose hidden tab stopped acking, the socket stayed
+ * open, and FINISH went into it.
  */
-export function sessionLiveForSend(connection: { readonly isConnected: boolean }, endDeadSession: () => void): boolean {
-  if (connection.isConnected) return true;
-  endDeadSession();
+export function sessionLiveForSend(
+  connection: { readonly isConnected: boolean; getLinkStatus(): LinkSample },
+  endDeadSession: (cause: LinkDeadCause) => void,
+): boolean {
+  const cause = deadSessionCause(connection);
+  if (cause === null) return true;
+  endDeadSession(cause);
   return false;
 }
 

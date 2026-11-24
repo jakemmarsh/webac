@@ -27,6 +27,16 @@
  * FINISH first: the character is never created twice. Every page console line
  * goes to a log file (printed at the end).
  *
+ * MODE=chargen-silent (BUG.preworld-link-dead-finish) freezes the relay
+ * (SIGSTOP) mid-chargen instead of killing it: the socket stays open and
+ * nothing flows either way, as when ACE dropped a hidden tab's chargen session
+ * (2026-11-24). The page's 40 s link check must catch it in chargen
+ * ("No server data for … (link_dead)", then "connection lost in chargen"),
+ * and the relay comes back SILENT_S after the freeze (default 45) for the
+ * chargen resume. Before the fix nothing noticed until the connection's own
+ * 140 s drop. MODE=charselect-silent does the same at character select: the
+ * character-select resume must land back there.
+ *
  *   AC_BASE=http://localhost:<vite>/ AC_ACCOUNT=testacjs3 PAUSE_S=50 npx tsx tools/probe-client-suspend.ts [--gpu]
  *   Another era: BRIDGE_PORT=<that era's bridge> AC_URL='http://localhost:<vite>/?ace&bridge=x&account=…&password=…&era=<id>'
  *
@@ -50,6 +60,8 @@ const NET_BACK_S = Number(process.env.NET_BACK_S ?? 5);
 const MODE = process.env.MODE ?? 'sleep';
 /** MODE=sleep-hidden: how long to watch the hidden tab after the wake (it must stay out of the world). */
 const HOLD_WATCH_S = Number(process.env.HOLD_WATCH_S ?? 60);
+/** MODE=chargen-silent / charselect-silent: how long the relay stays frozen (past the page's 40 s link check). */
+const SILENT_S = Number(process.env.SILENT_S ?? 45);
 
 /**
  * The bridge pings every 20 s and terminates a silent socket. On a sleeping
@@ -88,8 +100,12 @@ async function main(): Promise<void> {
   const allLines: string[] = [];
   page.on('console', (m) => { const t = m.text(); allLines.push(`${Date.now()} ${t}`); if (/\[AC:NET\]|\[AC\] ACE|ServerDied|resum|link_dead|client_suspended|server_silent|socket_closed/i.test(t)) { lines.push(t); console.log(`  [page] ${t.slice(0, 240)}`); } });
   try {
-    if (MODE === 'chargen-netdrop' || MODE === 'chargen-netdrop-pending') {
-      await runChargenNetdrop(page, lines, MODE === 'chargen-netdrop-pending', (r) => { relay = r; }, relay);
+    if (MODE === 'chargen-netdrop' || MODE === 'chargen-netdrop-pending' || MODE === 'chargen-silent') {
+      await runChargenNetdrop(page, lines, MODE === 'chargen-netdrop-pending', (r) => { relay = r; }, relay, MODE === 'chargen-silent');
+      return;
+    }
+    if (MODE === 'charselect-silent') {
+      await runCharSelectSilent(page, lines, relay);
       return;
     }
     await page.goto(gameUrl({ cb: 'client-suspend' }), { waitUntil: 'load' });
@@ -199,7 +215,7 @@ const RESUME_GIVES_UP_AFTER_S = 2 + 5 + 10;
  *  - NET_BACK_S past it: the Disconnected screen with the draft held, then its button relaunches
  *    and the page offers the draft ("chargen draft offered").
  */
-async function runChargenNetdrop(page: Page, lines: string[], pending: boolean, setRelay: (r: ChildProcess) => void, relay: ChildProcess): Promise<void> {
+async function runChargenNetdrop(page: Page, lines: string[], pending: boolean, setRelay: (r: ChildProcess) => void, relay: ChildProcess, silent = false): Promise<void> {
   const count = (re: RegExp): number => lines.filter((l) => re.test(l)).length;
   const waitLine = async (re: RegExp, ms: number, atLeast = 1): Promise<boolean> => {
     const end = Date.now() + ms;
@@ -224,15 +240,28 @@ async function runChargenNetdrop(page: Page, lines: string[], pending: boolean, 
     before = await page.evaluate(SNAP_JS) as string | null;
   }
   const listsBefore = count(CHAR_LIST);
-  console.log(`in chargen (${pending ? 'FINISH sent' : 'Town page'}, name ${name}); cutting the network; back in ${NET_BACK_S} s`);
-  relay.kill('SIGKILL');
-  const caught = await waitLine(/connection lost in chargen/, 10_000);
-  await new Promise((r) => setTimeout(r, Math.max(0, NET_BACK_S * 1000 - 10_000)));
-  setRelay(spawn(process.execPath, ['-e', RELAY_JS], { stdio: 'ignore' }));
-  const expectResume = NET_BACK_S < RESUME_GIVES_UP_AFTER_S - 1;
+  let caught: boolean;
+  if (silent) {
+    // The socket stays open and the server goes quiet: only the page's 40 s link check can notice.
+    console.log(`in chargen (Town page, name ${name}); freezing the relay for ${SILENT_S} s (socket open, nothing flows)`);
+    const frozenAt = Date.now();
+    process.kill(relay.pid!, 'SIGSTOP');
+    caught = (await waitLine(/No server data for \d+ s \((link_dead|client_suspended)\)/, SILENT_S * 1000))
+      && (await waitLine(/connection lost in chargen/, 2_000));
+    console.log(`link check after ${Math.round((Date.now() - frozenAt) / 1000)} s: ${caught ? 'caught in chargen' : 'NOT caught'}`);
+    await new Promise((r) => setTimeout(r, Math.max(0, frozenAt + SILENT_S * 1000 - Date.now())));
+    process.kill(relay.pid!, 'SIGCONT');
+  } else {
+    console.log(`in chargen (${pending ? 'FINISH sent' : 'Town page'}, name ${name}); cutting the network; back in ${NET_BACK_S} s`);
+    relay.kill('SIGKILL');
+    caught = await waitLine(/connection lost in chargen/, 10_000);
+    await new Promise((r) => setTimeout(r, Math.max(0, NET_BACK_S * 1000 - 10_000)));
+    setRelay(spawn(process.execPath, ['-e', RELAY_JS], { stdio: 'ignore' }));
+  }
+  const expectResume = silent || NET_BACK_S < RESUME_GIVES_UP_AFTER_S - 1;
   let pass = false;
   if (!caught) {
-    console.log('RESULT chargen-netdrop FAIL: the page never logged "connection lost in chargen" (the drop was not caught in chargen)');
+    console.log(`RESULT ${silent ? 'chargen-silent' : 'chargen-netdrop'} FAIL: the page never logged ${silent ? 'the link check\'s verdict and ' : ''}"connection lost in chargen" (the drop was not caught in chargen)`);
   } else if (expectResume) {
     const newSession = await waitLine(CHAR_LIST, 60_000, listsBefore + 1);
     const outcome = pending ? /back on step|not creating it again/ : /chargen resume — back on step/;
@@ -258,7 +287,7 @@ async function runChargenNetdrop(page: Page, lines: string[], pending: boolean, 
     }
     const held = await page.evaluate("(() => { try { return !!sessionStorage.getItem('acjs.chargen.draft.v1'); } catch { return false; } })()").catch(() => false);
     pass = !disconnected && resumed && !held && (created ? !inChargen : !!inChargen && same);
-    console.log(`RESULT chargen-netdrop${pending ? '-pending' : ''} caught=true new_session=${newSession} resumed=${resumed} back_in_chargen=${inChargen} same_step_and_choices=${same} created_not_resent=${created} disconnected=${disconnected} draft_held=${held} => ${pass ? 'PASS' : 'FAIL'}`);
+    console.log(`RESULT ${silent ? 'chargen-silent' : `chargen-netdrop${pending ? '-pending' : ''}`} caught=true new_session=${newSession} resumed=${resumed} back_in_chargen=${inChargen} same_step_and_choices=${same} created_not_resent=${created} disconnected=${disconnected} draft_held=${held} => ${pass ? 'PASS' : 'FAIL'}`);
   } else {
     const disconnected = await waitLine(/Disconnected screen/, 60_000);
     const held = await page.evaluate("(() => { try { return !!sessionStorage.getItem('acjs.chargen.draft.v1'); } catch { return false; } })()").catch(() => false);
@@ -270,6 +299,41 @@ async function runChargenNetdrop(page: Page, lines: string[], pending: boolean, 
     pass = disconnected && !!held && offered;
     console.log(`RESULT chargen-netdrop${pending ? '-pending' : ''} caught=true disconnected=${disconnected} draft_held=${held} relogged=${relogged} offered=${offered} => ${pass ? 'PASS' : 'FAIL'}`);
   }
+  process.exitCode = pass ? 0 : 1;
+}
+
+/**
+ * MODE=charselect-silent (BUG.preworld-link-dead-finish): at character select,
+ * the relay frozen (socket open, nothing flows). The page's 40 s link check
+ * must end the session with link_dead and the character-select resume bring a
+ * new session's list back to character select (never the world, never the
+ * Disconnected screen).
+ */
+async function runCharSelectSilent(page: Page, lines: string[], relay: ChildProcess): Promise<void> {
+  const count = (re: RegExp): number => lines.filter((l) => re.test(l)).length;
+  const waitLine = async (re: RegExp, ms: number, atLeast = 1): Promise<boolean> => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) { if (count(re) >= atLeast) return true; await page.waitForTimeout(250); }
+    return false;
+  };
+  const CHAR_LIST = /\[AC\] ACE: Got character list/;
+  await page.goto(gameUrl({ cb: 'charselect-silent', autoenter: false }), { waitUntil: 'load' });
+  if (!(await waitLine(CHAR_LIST, 240_000))) throw new Error('no character list');
+  await page.waitForTimeout(5000);
+  const listsBefore = count(CHAR_LIST);
+  console.log(`at character select; freezing the relay for ${SILENT_S} s (socket open, nothing flows)`);
+  const frozenAt = Date.now();
+  process.kill(relay.pid!, 'SIGSTOP');
+  const caught = await waitLine(/No server data for \d+ s \((link_dead|client_suspended)\)/, SILENT_S * 1000);
+  const caughtAfterS = Math.round((Date.now() - frozenAt) / 1000);
+  await new Promise((r) => setTimeout(r, Math.max(0, frozenAt + SILENT_S * 1000 - Date.now())));
+  process.kill(relay.pid!, 'SIGCONT');
+  const newSession = caught && (await waitLine(CHAR_LIST, 60_000, listsBefore + 1));
+  await page.waitForTimeout(2000);
+  const disconnected = lines.some((l) => /Disconnected screen/.test(l));
+  const atCharSelect = await page.evaluate("window.__ac.gameUI.ui.currentScreen === 'character-select' && !window.__ac.gameUI.connectingScreenShown").catch(() => false);
+  const pass = caught && newSession && !disconnected && !!atCharSelect;
+  console.log(`RESULT charselect-silent caught=${caught} (after ${caughtAfterS} s) new_session=${newSession} at_char_select=${atCharSelect} disconnected=${disconnected} => ${pass ? 'PASS' : 'FAIL'}`);
   process.exitCode = pass ? 0 : 1;
 }
 

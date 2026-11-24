@@ -142,16 +142,21 @@ describe('the drop path cannot be swallowed', () => {
 });
 
 describe('a send that needs the session finds it dead first (sessionLiveForSend)', () => {
+  /** A connection with a fresh link (1 s since the server's last packet) while connected. */
+  const conn = (isConnected: boolean) => ({
+    isConnected,
+    getLinkStatus: () => (isConnected ? { connected: true, secondsSinceLastPacket: 1, stall: null } : { connected: false, secondsSinceLastPacket: 0 }),
+  });
   it('connected: the send goes, nothing ends', () => {
     const end = vi.fn();
-    expect(sessionLiveForSend({ isConnected: true }, end)).toBe(true);
+    expect(sessionLiveForSend(conn(true), end)).toBe(true);
     expect(end).not.toHaveBeenCalled();
   });
 
   it('not connected in chargen: the session ends through handleUnexpectedDrop as the chargen resume, never a silent wait', () => {
     const lc = new SessionLifecycle();
     const calls: string[] = [];
-    const ok = sessionLiveForSend({ isConnected: false }, () => {
+    const ok = sessionLiveForSend(conn(false), () => {
       calls.push(handleUnexpectedDrop({
         lifecycle: lc,
         reportLeft: () => calls.push('left'),
@@ -178,7 +183,7 @@ describe('a send that needs the session finds it dead first (sessionLiveForSend)
     expect(kind).toBe('enter');
     const none = new SessionLifecycle();
     const died: string[] = [];
-    sessionLiveForSend({ isConnected: false }, () => {
+    sessionLiveForSend(conn(false), () => {
       died.push(handleUnexpectedDrop({
         lifecycle: none, reportLeft: () => {}, teardownWorld: () => {}, scheduleResume: () => true,
         raiseServerDied: () => died.push('server_died'), armPreworldResume: () => false,

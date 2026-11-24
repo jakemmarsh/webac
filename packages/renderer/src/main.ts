@@ -392,7 +392,7 @@ import {
   tradeClosedLine, allegianceLoginLine, confirmationRequestText} from './ui/ServerMessageText.js';
 import { deliverWeenieError, ATTEMPT_FAILED_NAME_TEMPLATED, abortRepeatAttackOnFailure } from './ui/WeenieErrorNotices.js';
 import { SocialRefusalMemo } from './ui/SocialRefusalLines1999.js';
-import { connectionLostText, characterErrorNotice, connectionFailureNotice, linkDeadCause, linkSampleIsDead, NET_ERROR_STRING_TABLE, REQUEST_TIMEOUT_S, type ConnectionNotice } from './ui/ConnectionNotices.js';
+import { connectionLostText, characterErrorNotice, connectionFailureNotice, NET_ERROR_STRING_TABLE, REQUEST_TIMEOUT_S, type ConnectionNotice } from './ui/ConnectionNotices.js';
 import { accountEndCause, accountRefusalRoute, characterErrorRoute, disconnectedQuitAction, staleSessionWaitText, type AccountEndCause, type DisconnectedCause } from './session/RefusalRoute.js';
 import { characterRestoreRefusalText } from './session/CharacterRestore.js';
 import { CharacterError, runExpr } from '@ac/shared';
@@ -416,6 +416,7 @@ import { LoginRefusalMemory } from './session/LoginRefusalMemory.js';
 import { ProvenLoginRetry, firstTimeLoginRetryAllowed, type LoginCredentials } from './session/ProvenLoginRetry.js';
 import { LoginCaseFallback, LoginCaseMemory, passwordCaseFor } from './session/LoginCredentialCase.js';
 import { PageHideClose, armDropResume, handleUnexpectedDrop, resumeAttemptRefusalIsFinal, sessionLiveForSend, silentReloginDrop, sleepDrop } from './session/UnexpectedDrop.js';
+import { LinkCheck, deadSessionCause, type LinkDeadCause } from './session/LinkCheck.js';
 import { SessionLiveness, sessionDropped, characterListRole } from './session/SessionLiveness.js';
 import { ChargenDraftStore, decideChargenDraft, CHARGEN_DRAFT_OFFER_TEXT, type ChargenDraftOwner } from './session/ChargenResume.js';
 import { DrainHandover } from './session/DrainHandover.js';
@@ -5873,9 +5874,24 @@ async function main() {
   const gameActions = new GameActions(() => sendGameAction, pingLatencyTracker);
   // BUG.ac1999-spell-tabs — a favorite on a tab the era's bar lacks is never sent (1999: one bar).
   gameActions.spellBarTabs = eraRules.spellBarTabs;
-  // CORE.17.k — Link Indicator ticker (see the post-showGame block).
-  let linkStatusIntervalId: ReturnType<typeof setInterval> | null = null;
-  const LINK_STATUS_TICK_MS = 250;
+  // CORE.17.k / CORE.17.k.b — the link check (CPlayerSystem::UseTime @ 00563110): the Link Indicator
+  // sample every LINK_CHECK_TICK_MS, and the 40 s DISCONNECT_TIME ServerDied test, which catches a
+  // server that simply went silent (the socket-close path handles the !connected half).
+  // BUG.preworld-link-dead-finish — retail ran it from client start, so ours runs whenever a session is
+  // live: from its character list (character select, chargen) through the world (session/LinkCheck.ts).
+  // BUG.link-dead-no-resume — a dead session resumes first, as the connection's own 'disconnected' does.
+  const linkCheck = new LinkCheck({
+    sample: () => aceConnection.getLinkStatus(),
+    show: (sample) => { gameUI.updateLinkStatus(sample); },
+    dead: (cause, sample) => {
+      // OBS.dm-stall-diagnostics — say which way traffic stopped, in the player's console and in the
+      // world_left / first_minute / pre-world dropped event. NET.client-suspended-endcause — or our
+      // own receiving thread stopped across it.
+      const net = aceConnection.getDiagnostics();
+      console.warn(`[AC:NET] No server data for ${Math.round(sample.secondsSinceLastPacket)} s (${cause}) — connection diagnostics: ${JSON.stringify(net)}`);
+      endDeadSession(cause, net);
+    },
+  });
 
   // BUG.portal-space-hide-timer-race — startGame()/handleTeleportToPosition()
   // each schedule their own hidePortalSpace() timer with no stored id. If a
@@ -6129,31 +6145,9 @@ async function main() {
     worldReporter?.enteredWorld(worldResumePending);
     portalUseReporter?.reset();
     worldResumePending = false;
-    // CORE.17.k — retail gmUIElement_LinkStatusIndicator::UseTime: feed the
-    // LinkStatusHolder sample (connected + seconds since the last packet)
-    // to the 4-state model every frame-ish; the model itself re-evaluates
-    // every 4 s and flashes yellow/red at 0.75 s while the link is Bad.
-    if (linkStatusIntervalId !== null) clearInterval(linkStatusIntervalId);
-    linkStatusIntervalId = setInterval(() => {
-      const sample = aceConnection.getLinkStatus();
-      gameUI.updateLinkStatus(sample);
-      // CORE.17.k.b — CPlayerSystem::UseTime @ 00563110: every
-      // CHECK_LINK_STATUS_INTERVAL, `DISCONNECT_TIME (40 s) < seconds since
-      // the last packet || !connected` raises ServerDied — the Disconnected
-      // screen, not a chat line. The socket-close path handles the
-      // !connected half; this catches a server that simply went silent.
-      // BUG.link-dead-no-resume — an in-world drop resumes first, as the
-      // connection's own 'disconnected' does (UnexpectedDrop.ts).
-      if (sample.connected && linkSampleIsDead(sample)) {
-        // OBS.dm-stall-diagnostics — say which way traffic stopped, in the
-        // player's console and in the world_left / first_minute event.
-        // NET.client-suspended-endcause — or our own receiving thread stopped across it.
-        const net = aceConnection.getDiagnostics();
-        const cause = linkDeadCause(sample);
-        console.warn(`[AC:NET] No server data for ${Math.round(sample.secondsSinceLastPacket)} s (${cause}) — connection diagnostics: ${JSON.stringify(net)}`);
-        endDeadSession(cause, net);
-      }
-    }, LINK_STATUS_TICK_MS);
+    // CORE.17.k — the link check (Link Indicator + DISCONNECT_TIME): already running since this
+    // session's character list; start() is a no-op then (one check, never two).
+    linkCheck.start();
     // Reveal the WebGL canvas — kept hidden during pre-play to avoid sky bleed-through
     sceneManager.setWorldShown(true);
 
@@ -8876,7 +8870,7 @@ async function main() {
   const sendEnterWorldRequest = (): void => {
     // BUG.beforeunload-silent-disconnect — a dead session would swallow the request and leave
     // Entering World waiting out REQUEST_TIMEOUT: end it now (the enter resume enters this character).
-    if (!sessionLiveForSend(aceConnection, () => endDeadSession('link_dead'))) {
+    if (!sessionLiveForSend(aceConnection, (cause) => endDeadSession(cause))) {
       console.warn('[AC] ACE: enter-world request with no live session — ending it as a drop');
       return;
     }
@@ -9070,12 +9064,17 @@ async function main() {
    * Ended as the socket's own unexpected close is: the world / chargen / enter / char-select
    * resume, else the Disconnected screen (UnexpectedDrop.handleUnexpectedDrop).
    */
-  const endDeadSession = (cause: 'link_dead' | 'client_suspended', net = aceConnection.getDiagnostics()): void => {
+  const endDeadSession = (cause: LinkDeadCause, net = aceConnection.getDiagnostics()): void => {
+    linkCheck.stop();
+    // BUG.preworld-link-dead-finish — before the world the drop is a pre-world `dropped` with why
+    // (link_dead / client_suspended + the diagnostics), as the socket's own close reports it
+    // (onSessionEnded); in the world it is world_left (reportLeft below).
+    if (!sessionLifecycle.inWorld) preworldReporter?.dropped(null, cause, net);
     const verdict = handleUnexpectedDrop({
       lifecycle: sessionLifecycle,
       reportLeft: () => worldReporter?.left('disconnected', { endCause: cause, net }),
       teardownWorld: () => {
-        if (linkStatusIntervalId !== null) { clearInterval(linkStatusIntervalId); linkStatusIntervalId = null; }
+        linkCheck.stop();
         if (gameStarted || gameplayUi.isShown) teardownWorldState();
         gameUI.setIndicatorActive('connection', false);
         pingLatencyTracker.reset();
@@ -9208,6 +9207,7 @@ async function main() {
     // BUG.resume-silent-launcher — every return to the server select says why (a resume
     // that ended there at 2026-10-17 02:34Z left no trace of how).
     preworldReporter?.leftForLauncher(why);
+    linkCheck.stop();
     drainHandover.reset();
     cancelProvenLoginRetry();
     exitToLauncherAfterLogOff = false;
@@ -9266,7 +9266,7 @@ async function main() {
     // ClientNet::LogOffServer — close what is left of the session ourselves
     // (a no-op when the socket already went away).
     aceConnection.disconnect();
-    if (linkStatusIntervalId !== null) { clearInterval(linkStatusIntervalId); linkStatusIntervalId = null; }
+    linkCheck.stop();
     pingLatencyTracker.reset();
     gameUI.setIndicatorActive('connection', false);
     console.log(`[AC] ACE: ServerDied — showing the Disconnected screen: "${text}"`);
@@ -15088,9 +15088,11 @@ async function main() {
       // would vanish and FINISH wait out its 20 s. End the session as a drop instead (the chargen
       // resume keeps every choice), once GameUI has cleared its pending FINISH, so the draft is
       // not kept as "FINISH sent".
-      if (!aceConnection.isConnected) {
+      // BUG.preworld-link-dead-finish — dead also means an open socket whose server went silent past
+      // DISCONNECT_TIME (ACE had dropped a hidden tab's chargen session; the socket stayed open).
+      if (deadSessionCause(aceConnection) !== null) {
         console.warn('[AC] ACE: FINISH with no live session — ending it as a drop');
-        queueMicrotask(() => { sessionLiveForSend(aceConnection, () => endDeadSession('link_dead')); });
+        queueMicrotask(() => { sessionLiveForSend(aceConnection, (cause) => endDeadSession(cause)); });
         return 'session_lost';
       }
 
@@ -15216,6 +15218,12 @@ async function main() {
     // slot renders pending-deletion and can be restored.
     const sendCharacterDelete = (guid: number): boolean => {
       if (!aceCharList) return false;
+      // BUG.preworld-link-dead-finish (sweep) — a delete into a dead session vanished and left Please
+      // Wait up: end the session as a drop (the character-select resume keeps the list and selection).
+      if (!sessionLiveForSend(aceConnection, (cause) => endDeadSession(cause))) {
+        console.warn('[AC] ACE: character delete with no live session — ending it as a drop');
+        return false;
+      }
       const slotIndex = characterSlotIndex(aceCharList.characters, guid);
       if (slotIndex < 0) {
         console.warn(`[AC] ACE: delete — guid 0x${guid.toString(16)} not in character list`);
@@ -15226,6 +15234,11 @@ async function main() {
       return true;
     };
     const sendCharacterRestore = (guid: number): boolean => {
+      // BUG.preworld-link-dead-finish (sweep) — as delete. True: handled (no local-only clear).
+      if (!sessionLiveForSend(aceConnection, (cause) => endDeadSession(cause))) {
+        console.warn('[AC] ACE: character restore with no live session — ending it as a drop');
+        return true;
+      }
       aceConnection.sendMessage(buildCharacterRestore(guid), GameMessageGroup.UIQueue);
       console.log(`[AC] ACE: Sent CharacterRestore guid=0x${guid.toString(16)}`);
       return true;
@@ -19252,6 +19265,8 @@ async function main() {
         selection: () => gameUI.charSelectSelectionId,
       });
       sessionLiveness.noteEnded();
+      // The session is gone: its link check with it (the next session's character list starts one).
+      linkCheck.stop();
       const droppedInWorld = dropResume !== null;
       // RELEASE.first-minute — the world session ended under the player (a no-op after a tab close).
       // BUG.hidden-tab-session-drop — with what ended it (a network close vs the client's own verdict).
@@ -19297,7 +19312,7 @@ async function main() {
       // CORE.17.k — a dead server is NOT reported in chat. Retail signals
       // link trouble only through the Link Indicator (0x100000f8, green /
       // yellow at 5 s / red at 20 s without packets — LinkStatusModel.ts,
-      // driven by the linkStatusIntervalId ticker below); the chat line
+      // driven by the link check, session/LinkCheck.ts); the chat line
       // this branch used to print was an invented client diagnostic.
       // ClientConnection already logs the timeout to the console.
       if ((event.type as string) === 'serverTimeout') return;
@@ -19350,6 +19365,9 @@ async function main() {
           // its news, SessionLiveness.characterListRole): a repeat over chargen keeps chargen.
           const listRole = characterListRole(sessionLiveness.isLive, gameUI.ui.currentScreen ?? null);
           sessionLiveness.noteCharacterList();
+          // BUG.preworld-link-dead-finish — the session is proven: the link check runs from here
+          // (character select, chargen, then the world), as retail's did from client start.
+          linkCheck.start();
           if (listRole === 'keep_chargen') {
             console.log('[AC] ACE: character list again for this session — chargen stays');
             break;
