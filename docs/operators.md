@@ -69,14 +69,14 @@ player shares the bridge's address, so for browser players together:
   no reason.
 
 To let browser players create accounts and play together, add an
-`ip_limit_overrides` row for the bridge's egress address (as of 2026-10-12,
-`50.18.108.214`; open an issue to confirm the current one). The server reads
+`ip_limit_overrides` row for the bridge's egress address (since 2026-10-16,
+`184.193.176.126`; open an issue to confirm the current one). The server reads
 it on every login, so no restart is needed. `-1` keeps the config default and
 `0` means unlimited:
 
 ```sql
 INSERT INTO ip_limit_overrides (ip_address, max_accounts, max_sessions, note)
-VALUES ('50.18.108.214', 0, 0, 'webAC bridge: every browser player shares this address');
+VALUES ('184.193.176.126', 0, 0, 'webAC bridge: every browser player shares this address');
 ```
 
 A better fix keeps the limits per person: adamplumb/ac1999!3 (opened
@@ -114,7 +114,7 @@ The hosted bridge runs in a cloud data centre, so IP-reputation and anti-VPN
 checks flag every browser player. Seen on Conquest (2026-10-12): the server
 says "VPN/Proxy connections are not permitted on this server" in chat and
 leaves the character in portal space. To let browser players in, exempt the
-bridge's egress address from the check (as of 2026-10-12, `50.18.108.214`;
+bridge's egress address from the check (since 2026-10-16, `184.193.176.126`;
 it can change when the hosting moves, so open an issue to confirm the current
 one), or run your own bridge as above. The bridge logs each session's real
 address if you want to screen players yourself.
@@ -152,6 +152,9 @@ world). Of 34 online worlds:
   portal space) and AChard (at login: "You have been booted… Connections from
   VPN / proxy disallowed by server policy"). Both are now marked "Blocks
   webAC" and refused at ENTER (above).
+  Rechecked 2026-11-23 from the AWS address (`tools/probe-world-access.ts
+  --only Conquest,AChard --recheck-blocked`, one fresh account each): both
+  still refuse, with the same texts (Conquest in the world, AChard at login).
 - **1 unclear:** Modclaim completes the handshake but never sends the
   character list (2+ minutes, twice); a silent block or a server problem.
   Not marked: nothing it sent names a VPN or IP check.
