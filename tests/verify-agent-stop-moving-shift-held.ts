@@ -50,9 +50,9 @@ class PageHost extends FakeHost {
   constructor(private readonly page: ReturnType<typeof wiredPage>) { super(); }
   override key = (code: string, down: boolean) => {
     if (down) this.keys.add(code); else this.keys.delete(code);
-    if (down) this.page.cam.simulateKeyDown(code); else this.page.cam.simulateKeyUp(code);
+    if (down) this.page.cam.simulateKeyDown(code, 'agent'); else this.page.cam.simulateKeyUp(code, 'agent');
   };
-  stopMovingAction = () => this.page.cam.stopMoving();
+  stopMovingAction = () => this.page.cam.stopMoving('agent');
   stopMovingNeeded = () => agentStopMovingNeeded({
     standingStopSent: this.page.sync.standingStopSent, autoRun: this.page.cam.autoRun,
     controlledByServer: this.page.cam.controlledByServer, attackPending: false, heldSubstate: 0,

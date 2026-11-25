@@ -45,6 +45,18 @@ export class LootExtras {
     return (f.members ?? []).filter((n) => n !== me).map((n) => ({ name: n, shareLoot: sharing.has(n.toLowerCase()) }));
   }
 
+  /** The fellowship as last seen (members and who shares loot), to notice a change. */
+  private fellowsSeen: string | null = null;
+  /**
+   * Looks at the fellowship: when it changed since the last look, the corpses set aside for their loot rights are
+   * tried again (corpseBook.ts fellowshipChanged: a fellow's kill opens to you once you share their loot).
+   */
+  watchFellowship(): void {
+    const key = this.fellows().map((f) => `${f.name.toLowerCase()}${f.shareLoot ? '+' : ''}`).sort().join(',');
+    if (this.fellowsSeen !== null && key !== this.fellowsSeen) this.book.fellowshipChanged();
+    this.fellowsSeen = key;
+  }
+
   /** Examine a corpse for its "Killed by …" (one look, waited for as VTank does), and note it in the book. */
   async describe(guid: number, st: Settings): Promise<void> {
     const reply = await Promise.race([this.api.appraise(guid, { quiet: true }), sleep(describeWaitMs(st)).then(() => null)]);

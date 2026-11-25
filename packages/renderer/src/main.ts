@@ -29,7 +29,7 @@ import { SkillTable } from '@ac/dat-parser/file-types/SkillTable.js';
 import { SecondaryAttributeTable } from '@ac/dat-parser/file-types/SecondaryAttributeTable.js';
 import { DatReader } from '@ac/dat-parser/DatReader.js';
 import { parseMasterProperty, setMasterPropertyTypes, parseStringTable, registerStringTable, acStringHash, getStringFromTable, getString } from '@ac/dat-parser/file-types/LayoutDesc.js';
-import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, jumpSkillWithStamina, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyString, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken, characterCreateErrorFallbackText, playerText, PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatWeenieErrorWithString, weenieErrorWithStringText, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, POSTYPE_LAST_OUTSIDE_DEATH, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
+import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, jumpSkillWithStamina, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyString, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken, characterCreateErrorFallbackText, playerText, PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, formatWeenieErrorWithString, weenieErrorWithStringText, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, POSTYPE_LAST_OUTSIDE_DEATH, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
 import type { PendingTieBind } from '@ac/shared';
 import { APPRAISAL_1999_STRING, inqSpellTargetType, appraisedMissileVelocity, foldAppraisalProfiles, mtWornItemOf } from '@ac/shared';
 import { OpenContainerTracker } from './world/OpenContainerTracker.js';
@@ -115,7 +115,7 @@ import { MotionCommand, MotionStance, isSubstateCommand } from './animation/Moti
 import { eventToCode } from './input/KeybindRegistry.js';
 import { wheelZoomDirections } from './ui/MouseTurningDefaults.js';
 import { ACT, MOVEMENT_CANONICAL, activeInputMaps } from './input/KeybindDefaults.js';
-import { dispatchGameAction, isTellableSelection, channelReplyPartner, CHAT_COMMAND_PREFIX, type ActionHost } from './input/ActionDispatch.js';
+import { dispatchGameAction, isTellableSelection, channelReplyPartner, CHAT_COMMAND_PREFIX, type ActionHost, type ActionInput } from './input/ActionDispatch.js';
 import { routeGameKeyDown, keyDownConsumed } from './input/GameKeyDown.js';
 import { loadEraKeybinds, saveEraKeybinds, type KeybindStore } from './input/EraKeymaps.js';
 import { stepPowerLevel } from './controllers/PowerBarStep.js';
@@ -123,7 +123,7 @@ import { combatClickSelectRefused } from './controllers/CombatClickSelect.js';
 import { backgroundAppraisalVerdict } from './controllers/BackgroundAppraisal.js';
 import { buildEmoteMotionMap } from './input/EmoteActionMap.js';
 import { PendingCastQueue, type PendingCast } from './magic/PendingCastQueue.js';
-import { handleMagicUpdateSpell } from './magic/SpellLearn.js';
+import { handleMagicUpdateSpell, spellbookFromDescription } from './magic/SpellLearn.js';
 import { stripOlthoiSuffix } from './chat/OlthoiSuffix.js';
 import { deathTransition } from './player/deathTransition.js';
 import { clearTargetOnTeleport } from './player/teleportTargetClear.js';
@@ -6620,6 +6620,9 @@ async function main() {
     // previous character's items (ObjectCreates repopulate on re-enter).
     playerState.inventory.clear();
     playerState.equipment.clear();
+    // BUG.spellbook-stale-char-switch — the spellbook is per character; the next one's
+    // PlayerDescription refills it (a macro cast a previous character's spell: 0x03FE).
+    magicController.clear();
     loginCompleteNotifier.reset(); // a new character session starts from scratch
     questTracker.reset();
     // BUG.item-shortcut-restore-runs-before-inventory — unresolved deferred
@@ -11521,31 +11524,16 @@ async function main() {
 
         // VISUAL.ac1999-spell-charge — the 1999 spellbook's charges (SpellBookPage +0x4).
         spellCharge1999?.seed(desc.spellCharges1999, performance.now() / 1000);
-        // Learn spells from PlayerDescription (bulk spell list sent at login)
+        // Learn spells from PlayerDescription (bulk spell list sent at login). It is the whole
+        // spellbook: it replaces the book (BUG.spellbook-stale-char-switch: adding to it kept the
+        // previous character's spells after a character switch in this page).
+        const learned = magicController.replaceSpellbook(spellbookFromDescription(desc.spellIds, spellTable));
+        if (desc.spellIds.length === 0 || !spellTable) {
+          // No spells: the spellbook and bars show none (not the last character's).
+          gameUI.spellbookListFlushed();
+          gameUI.setSpellData(magicController.knownSpells, []);
+        }
         if (desc.spellIds.length > 0 && spellTable) {
-          let learned = 0;
-          for (const spellId of desc.spellIds) {
-            if (!magicController.isSpellKnown(spellId)) {
-              const sb = spellTable.spells.get(spellId);
-              if (sb) {
-                magicController.learnSpell({
-                  id: spellId,
-                  name: sb.name,
-                  desc: sb.desc,
-                  school: sb.school as MagicSchool,
-                  level: spellLevelFromPower(sb.power),
-                  power: sb.power,
-                  manaCost: sb.baseMana,
-                  difficulty: sb.power,
-                  duration: sb.duration ?? 0,
-                  components: sb.formula,
-                  targetType: 2,
-                  iconId: sb.icon || undefined,
-                });
-                learned++;
-              }
-            }
-          }
           console.log(`[PlayerDesc] Learned ${learned} spells from login (${desc.spellIds.length} total)`);
           // FAITHFUL.569 — restore spell-quickbar slot assignments from the
           // server's SpellLists8 section. ACE persists Add/RemoveSpellFavorite
@@ -18597,12 +18585,21 @@ async function main() {
           castPresses.during('agent', () => gameUI['spellCallbacks'].onCastSpell?.(spellId));
           return true;
         },
+        // The server answered an agent cast "You don't know that spell!" (GDLE / AC1999 WERROR_MAGIC_UNLEARNED_SPELL,
+        // SpellcastingManager TryBeginCast's IsSpellKnown check): the mirror held a spell the server's book doesn't.
+        // Dropped from the mirror (not from the server's spell bars), so nothing casts it again; MagicUpdateSpell
+        // brings it back if the server teaches it later.
+        spellNotKnown: (spellId) => {
+          if (!magicController.forgetSpell(spellId)) return;
+          console.warn(`[Magic] The server says spell ${spellId} is not in this character's book: dropped from the client's spellbook`);
+          gameUI.setSpellData(magicController.knownSpells);
+        },
         spellSelfTargetableTypeMask: () => eraRules.spellSelfTargetableTypeMask,
         chat: (text) => gameUI.callbacks.onChatSend?.(text),
         // The agent's "/sit" note (AgentApi.poseNotCommand): this era's ChatPoseTable and the client's own command table.
         chatPose: (word) => chatPoseTable?.stateFor(word.toLowerCase()) ?? null,
         clientCommand: (word) => !!retailCommands.lookup(word),
-        key: (code, down) => { if (down) cameraController.simulateKeyDown(code); else cameraController.simulateKeyUp(code); },
+        key: (code, down) => { if (down) cameraController.simulateKeyDown(code, 'agent'); else cameraController.simulateKeyUp(code, 'agent'); },
         setYaw: (yaw) => { cameraController.playerYaw = yaw; cameraController.cameraYawOffset = 0; },
         // The server moves you along the straight line between two AutonomousPositions: the walk reports each bend near a
         // portal (portalAvoid.chordNeedsReport), the same message the client's own position event sends.
@@ -18661,7 +18658,7 @@ async function main() {
         trainSkill: (skill) => gameUI.agentTrainSkill(skill),
         // Retail's Stop Moving action (ACT.StopMoving → CameraController.stopMoving: TakeControlFromServer, which
         // aborts an automatic attack and stops a server MoveTo where the body is): the agent's stop_moving.
-        stopMovingAction: () => cameraController.stopMoving(),
+        stopMovingAction: () => cameraController.stopMoving('agent'),
         // BUG.agent-stop-moving-repeat: an agent's stop with nothing moving sends no further standing MoveToState.
         stopMovingNeeded: () => agentStopMovingNeeded({
           standingStopSent: movementSync?.standingStopSent ?? false,
@@ -20496,11 +20493,12 @@ async function main() {
     },
   };
   /** Dispatch a resolved one-shot command. Returns true if handled. */
-  const dispatchAction = (id: number): boolean => dispatchGameAction(id, actionHost);
+  // OBS.stop-moving-input-source: `input` names what ran the command (Stop Moving's movement-event source).
+  const dispatchAction = (id: number, input: ActionInput = 'key'): boolean => dispatchGameAction(id, actionHost, input);
   // GAP.indicator-bar-interactive — a strip indicator click fires its DAT
   // InputAction exactly like the bound key (UIElement_Button::
   // HandleButtonClick @ 00471e50).
-  gameUI.callbacks.onInputAction = (id: number) => { dispatchAction(id); };
+  gameUI.callbacks.onInputAction = (id: number) => { dispatchAction(id, 'ui'); };
   // RadarUI::Global_MouseDown → HandleMouseDownOnObject: a radar click is refused like a world one (CM-3).
   gameUI.callbacks.onRadarObjectClick = (guid: number) => {
     // RadarUI_Global_MouseDown @ 0x00528e00 → PanelUI_HandleMouseDownOnObject: a one-click mode's press
@@ -20540,7 +20538,7 @@ async function main() {
       automationHotkey: (code, repeat) => gameUI.automationHotkey(code, repeat),
       syncMaps: syncActiveInputMaps,
       resolve: (code) => keybinds.resolveOrBare(code),
-      dispatch: (id) => castPresses.during('key', () => dispatchAction(id)),
+      dispatch: (id) => castPresses.during('key', () => dispatchAction(id, e.isTrusted === false ? 'synthetic' : 'key')),
     });
     if (keyDownConsumed(route)) { e.preventDefault(); return; }
     if (route !== 'unbound') return;
@@ -20635,7 +20633,7 @@ async function main() {
     const id = resolveMouse(code);
     if (id == null || id === ACT.ToggleMouselook || MOVEMENT_CANONICAL[id] !== undefined) return false;
     if (!down) { releaseAction(id); return true; }
-    return dispatchAction(id);
+    return dispatchAction(id, 'mouse');
   };
   window.addEventListener('blur', () => {
     cameraController.releaseAllKeys();

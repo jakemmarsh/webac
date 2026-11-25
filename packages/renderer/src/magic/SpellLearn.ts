@@ -43,6 +43,40 @@ export type SpellLearnOutcome =
   | 'no-spell-table'
   | 'not-in-spell-table';
 
+/** A spellbook entry from its DAT SpellTable row (MagicUpdateSpell and the PlayerDescription list alike). */
+export function spellDefinitionFromRow(spellId: number, sb: SpellBaseRow): SpellDefinition {
+  return {
+    id: spellId,
+    name: sb.name,
+    desc: sb.desc,
+    school: sb.school as MagicSchool,
+    level: spellLevelFromPower(sb.power),
+    power: sb.power,
+    manaCost: sb.baseMana,
+    difficulty: sb.power,
+    duration: sb.duration ?? 0,
+    components: sb.formula,
+    targetType: 2, // SingleTarget default
+    iconId: sb.icon || undefined,
+  };
+}
+
+/**
+ * The login PlayerDescription's spell list as spellbook entries: the whole book
+ * (BUG.spellbook-stale-char-switch: MagicController.replaceSpellbook takes it).
+ * Ids the SpellTable lacks, or every id when it has not loaded, are left out.
+ */
+export function spellbookFromDescription(
+  spellIds: readonly number[],
+  spellTable: { spells: Map<number, SpellBaseRow> } | null,
+): SpellDefinition[] {
+  if (!spellTable) return [];
+  return spellIds.flatMap((id) => {
+    const sb = spellTable.spells.get(id);
+    return sb ? [spellDefinitionFromRow(id, sb)] : [];
+  });
+}
+
 /**
  * Apply a MagicUpdateSpell event to the local spellbook.
  *
@@ -59,20 +93,7 @@ export function handleMagicUpdateSpell(
   const sb = deps.spellTable.spells.get(spellId);
   if (!sb) return 'not-in-spell-table';
 
-  deps.learnSpell({
-    id: spellId,
-    name: sb.name,
-    desc: sb.desc,
-    school: sb.school as MagicSchool,
-    level: spellLevelFromPower(sb.power),
-    power: sb.power,
-    manaCost: sb.baseMana,
-    difficulty: sb.power,
-    duration: sb.duration ?? 0,
-    components: sb.formula,
-    targetType: 2, // SingleTarget default
-    iconId: sb.icon || undefined,
-  });
+  deps.learnSpell(spellDefinitionFromRow(spellId, sb));
 
   deps.refreshSpellbook();
   // BUG.nonpositional-human-table-sounds — no local chime: ACE plays the

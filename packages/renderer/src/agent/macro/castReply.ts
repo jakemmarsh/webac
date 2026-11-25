@@ -26,8 +26,16 @@ import type { AgentResult } from '../types.ts';
 /** The server (or the client's pre-check) refused a cast for missing components. */
 export const COMPONENTS_MISSING = /don't have all the components|do not have all of this spell's components/i;
 
+/**
+ * The server refused the cast because the spell is not in your book: WeenieError 0x03FE "You don't know that spell!"
+ * (GDLE / Seedsow and the AC1999 server: SpellcastingManager TryBeginCast, WERROR_MAGIC_UNLEARNED_SPELL when
+ * !IsSpellKnown). Never worth retrying: AgentApi drops the spell from the client's spellbook (AgentHost.spellNotKnown).
+ * ACE answers the same case with UseDone MagicInvalidSpellType (Player_Magic VerifySpell), a refusal already.
+ */
+export const SPELL_NOT_KNOWN = /you don't know that spell/i;
+
 /** Reply lines that mean the spell did not take on its target. */
-export const CAST_NOT_LANDED = /resists your spell|you fail to affect|is an invalid target|fizzle|don't have|do not have|can't|cannot|not enough|unable|refuse|too busy|out of range/i;
+export const CAST_NOT_LANDED = /resists your spell|you fail to affect|is an invalid target|fizzle|don't have|do not have|don't know that spell|can't|cannot|not enough|unable|refuse|too busy|out of range/i;
 
 const esc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /** "You cast" and ClassicACE's metaspell words before the spell's name. */

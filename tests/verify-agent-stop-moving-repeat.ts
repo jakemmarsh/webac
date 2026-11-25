@@ -52,9 +52,9 @@ class PageHost extends FakeHost {
   constructor(private readonly page: ReturnType<typeof wiredPage>) { super(); }
   override key = (code: string, down: boolean) => {
     if (down) this.keys.add(code); else this.keys.delete(code);
-    if (down) this.page.cam.simulateKeyDown(code); else this.page.cam.simulateKeyUp(code);
+    if (down) this.page.cam.simulateKeyDown(code, 'agent'); else this.page.cam.simulateKeyUp(code, 'agent');
   };
-  stopMovingAction = () => this.page.cam.stopMoving();
+  stopMovingAction = () => this.page.cam.stopMoving('agent');
   stopMovingNeeded = () => agentStopMovingNeeded({
     standingStopSent: this.page.sync.standingStopSent,
     autoRun: this.page.cam.autoRun,
@@ -104,6 +104,8 @@ describe('an agent stop with nothing moving sends no further MoveToState (every 
     for (let i = 0; i < 100; i++) expect(api.stopMoving().ok).toBe(true);
     expect(page.mts()).toHaveLength(1);
     expect(page.limiter).toEqual([]);
+    // OBS.stop-moving-input-source: the one stop that ran is named the agent's, not the player's Stop Moving key.
+    expect(page.cam.recentMovementEventSources).toEqual(['agent_stop_moving']);
   });
 
   it('standingStopSent: false before any MoveToState, after a moving one, and once another action went out', () => {

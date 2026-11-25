@@ -8,7 +8,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentApi } from '../packages/renderer/src/agent/AgentApi.ts';
 import {
-  CORPSE_DENIAL_SKIP_MS, CORPSE_OTHERS_AFTER_MS, CorpseBook, corpseBookSettings, corpseIsRare, corpseKiller, isCorpseDenial,
+  CORPSE_DENIAL_SKIP_MS, CORPSE_OPEN_TO_ALL_ACE_MS, CORPSE_OPEN_TO_ALL_GDLE_MS, CORPSE_OTHERS_AFTER_MS, CorpseBook, corpseBookSettings,
+  corpseIsRare, corpseKiller, corpseRightsDenial, isCorpseDenial,
 } from '../packages/renderer/src/agent/macro/corpseBook.ts';
 import { isDonor, manaLootAction, planDrain, spareStones } from '../packages/renderer/src/agent/macro/manaDonorPlan.ts';
 import { canReadScroll, isScrollRefusal, scrollSpell } from '../packages/renderer/src/agent/macro/scrollPlan.ts';
@@ -106,6 +107,53 @@ describe('CorpseBook: VTank\'s CanLoot and its bookkeeping', () => {
   });
 });
 
+describe('loot-rights refusals: set aside until the server could open the corpse (BUG.macro-loot-rights-loop)', () => {
+  const ace = 'You do not yet have the right to loot the Corpse of Drudge Skulker.';
+  const gdle = 'You do not have permission to loot that corpse!';
+  it('tells the rights refusals from "in use", per server (ACE Corpse.Open; GDLE / AC1999 CheckOpenContainer)', () => {
+    expect(corpseRightsDenial(ace)).toEqual({ openAfterMs: CORPSE_OPEN_TO_ALL_ACE_MS });
+    expect(corpseRightsDenial(gdle)).toEqual({ openAfterMs: CORPSE_OPEN_TO_ALL_GDLE_MS });
+    expect(corpseRightsDenial('You may not loot the Corpse of Drudge Skulker because the Corpse of Drudge Skulker has generated a rare item.')).toBe('never');
+    expect(corpseRightsDenial('The Corpse of Drudge Skulker is already in use by someone else!')).toBeNull();
+    // ACE opens a monster corpse to all once under HalfLife (180 s) of its 300 s TimeToRot is left, on 5 s heartbeats.
+    expect(CORPSE_OPEN_TO_ALL_ACE_MS).toBeGreaterThanOrEqual((300 - 180) * 1000);
+  });
+
+  it('refused before the open-to-all time: one try once it has passed; refused after it: the blacklist time, not every 10 s', () => {
+    const s = corpseBookSettings({ BlacklistCorpseOpenTimeoutSeconds: 200 });
+    const b = new CorpseBook();
+    b.observe([1], 0, s);
+    expect(b.denied(1, 100_000, s, ace)).toBe(CORPSE_OPEN_TO_ALL_ACE_MS);
+    expect(b.skipped(1, 100_000 + CORPSE_DENIAL_SKIP_MS, s)).toBe(true);
+    expect(b.skipped(1, CORPSE_OPEN_TO_ALL_ACE_MS - 1, s)).toBe(true);
+    expect(b.skipped(1, CORPSE_OPEN_TO_ALL_ACE_MS, s)).toBe(false);
+    // Still refused once it could have opened (a player's corpse, a kill its killer hasn't looted): 200 s, every time.
+    for (let i = 0, t = CORPSE_OPEN_TO_ALL_ACE_MS; i < 3; i++, t += 200_000) {
+      expect(b.denied(1, t, s, ace)).toBe(t + 200_000);
+      expect(b.skipped(1, t + 199_999, s)).toBe(true);
+      expect(b.skipped(1, t + 200_000, s)).toBe(false);
+    }
+    // GDLE's text: its own 60 s.
+    b.observe([2], 0, s);
+    expect(b.denied(2, 10_000, s, gdle)).toBe(CORPSE_OPEN_TO_ALL_GDLE_MS);
+    // A rare's corpse (or a player killer's kill): never again while remembered.
+    expect(b.denied(3, 0, s, 'You may not loot the Corpse of Drudge Skulker because the death was caused by a player killer.')).toBeNull();
+    expect(b.skipped(3, 1e9, s)).toBe(true);
+    // "In use" keeps VTank's 10 s.
+    expect(b.denied(4, 0, s, 'The Corpse of Drudge Skulker is already in use by someone else!')).toBe(CORPSE_DENIAL_SKIP_MS);
+  });
+
+  it('a fellowship change tries a set-aside corpse again at once (a fellow\'s kill opens to you with sharing on)', () => {
+    const s = corpseBookSettings({ BlacklistCorpseOpenTimeoutSeconds: 3600 });
+    const b = new CorpseBook();
+    b.observe([1], 0, s);
+    b.denied(1, 150_000, s, ace);
+    expect(b.skipped(1, 160_000, s)).toBe(true);
+    b.fellowshipChanged();
+    expect(b.skipped(1, 160_000, s)).toBe(false);
+  });
+});
+
 // ── the engine ──
 
 const corpseProfile = (settings: Record<string, string | number | boolean>, over: Partial<RoutineProfile> = {}): RoutineProfile => ({
@@ -189,6 +237,95 @@ describe('which corpses the macro loots', () => {
     refuse = false;
     await tick(20_000);
     expect(uses(0x80005031)).toBe(3); // tried again, opened, closed
+  });
+
+  it('a corpse refusing its loot rights is not asked for every few seconds: once more when the server could open it, then the blacklist time', async () => {
+    // Production (trace d98e7a4e082e5f81, 2026-11-25): "You do not yet have the right to loot …" 17 times in 5 min.
+    corpse(0x80005051, 'Someone Else');
+    host.use = (g: number) => { host.sent.push(`use ${g.toString(16)}`); api.pushChat('You do not yet have the right to loot the Corpse of Drudge Skulker.', 0); return true; };
+    api.routine.start(corpseProfile({ LootAllCorpses: true }));
+    await tick(360_000);
+    // Was six (three 10 s retries, then three more after the blacklist).
+    expect(uses(0x80005051)).toBe(3);
+    const said = api.routine.history().filter((l) => /won't open/.test(l));
+    expect(said[0]).toMatch(/refused, skipping it for \d+ s$/);
+    expect(said[1]).toMatch(/refused, skipping it for 200 s$/);
+  });
+
+  it('a refusal that comes after the open timed out still sets the corpse aside (not an unanswered open, tried again at once)', async () => {
+    corpse(0x800050a1, 'Someone Else');
+    // The server answers once its walk to the corpse ends: after VTank's 1.5 s CorpseOpenTimeoutSeconds.
+    host.use = (g: number) => { host.sent.push(`use ${g.toString(16)}`); setTimeout(() => api.pushChat('You do not yet have the right to loot the Corpse of Drudge Skulker.', 0), 3500); return true; };
+    api.routine.start(corpseProfile({ LootAllCorpses: true }));
+    await tick(240_000);
+    expect(api.routine.history().join('\n')).toMatch(/never opened .*; refused, skipping it for \d+ s/);
+    expect(uses(0x800050a1)).toBe(2); // at 100 s, and once it could have opened (without the wait: four, the first ones counted as unanswered opens)
+  });
+
+  it('the opposite: a corpse the server opens to everyone later is still looted', async () => {
+    corpse(0x80005061, 'Someone Else');
+    let refuse = true;
+    host.use = (g: number) => {
+      host.sent.push(`use ${g.toString(16)}`);
+      if (refuse) { refuse = false; api.pushChat('You do not yet have the right to loot the Corpse of Drudge Skulker.', 0); return true; }
+      host.container = host.container?.guid === g ? null : { guid: g, items: [] };
+      return true;
+    };
+    api.routine.start(corpseProfile({ LootAllCorpses: true }));
+    await tick(200_000);
+    expect(uses(0x80005061)).toBe(3); // refused, then opened and closed once it could open
+    expect(api.routine.history().join('\n')).toMatch(/Corpse of Drudge Skulker is empty/);
+  });
+
+  it('the opposite: a refused fellow\'s kill is looted as soon as you join them with loot sharing', async () => {
+    corpse(0x80005071, 'Claude Bulwark');
+    const sharing = () => !!host.fellowInfo?.sharing?.includes('Claude Bulwark');
+    host.use = (g: number) => {
+      host.sent.push(`use ${g.toString(16)}`);
+      if (!sharing()) { api.pushChat('You do not yet have the right to loot the Corpse of Drudge Skulker.', 0); return true; }
+      host.container = host.container?.guid === g ? null : { guid: g, items: [] };
+      return true;
+    };
+    api.routine.start(corpseProfile({ LootAllCorpses: true, LootFellowCorpses: true, BlacklistCorpseOpenTimeoutSeconds: 3600 }));
+    await tick(400_000);
+    expect(uses(0x80005071)).toBe(2); // the stranger's try at 100 s, and once the server could have opened it
+    host.fellowInfo = { leader: false, open: false, count: 2, members: ['Claude Test', 'Claude Bulwark'], sharing: ['Claude Bulwark'] };
+    await tick(15_000);
+    expect(uses(0x80005071)).toBe(4); // opened and closed
+  });
+
+  it('your own kill refused "in use" (no LootAll / LootFellow) is looted once the 10 s are up', async () => {
+    host.add({ guid: 0x80005081, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 23 });
+    let refuse = true;
+    host.use = (g: number) => {
+      host.sent.push(`use ${g.toString(16)}`);
+      if (refuse) { refuse = false; api.pushChat('The Corpse of Drudge Skulker is already in use by someone else!', 0); return true; }
+      host.container = host.container?.guid === g ? null : { guid: g, items: [] };
+      return true;
+    };
+    api.routine.start(corpseProfile({}));
+    for (let i = 0; i < 40 && !host.sent.some((x) => x.startsWith('attack 80005081')); i++) await tick(100);
+    host.pending = false;
+    host.dying.add(0x80005081);
+    await tick(300);
+    host.objs.delete(0x80005081);
+    corpse(0x80005082, 'Claude Test');
+    await tick(60_000);
+    expect(uses(0x80005082)).toBe(3); // refused, then opened and closed (before, the kill was dropped after the refusal)
+  });
+
+  it('a loot-corpse rule step does not ask again for a corpse the server just refused', async () => {
+    corpse(0x80005091, 'Someone Else');
+    host.use = (g: number) => { host.sent.push(`use ${g.toString(16)}`); api.pushChat('You do not yet have the right to loot the Corpse of Drudge Skulker.', 0); return true; };
+    const p = corpseProfile({});
+    api.routine.start(p);
+    const act = (api.routine as unknown as { act(a: unknown, p: RoutineProfile): Promise<{ ok: boolean; message: string } | null> }).act.bind(api.routine);
+    const first = act({ kind: 'loot-corpse', name: 'Corpse of Drudge Skulker' }, p);
+    await tick(10_000);
+    expect((await first)?.message).toMatch(/refused, skipping it for/);
+    const again = await act({ kind: 'loot-corpse', name: 'Corpse of Drudge Skulker' }, p);
+    expect(again?.message).toMatch(/set aside/);
+    expect(uses(0x80005091)).toBe(1);
   });
 
   it('CorpseApproachRange-Max: beyond arm\'s reach nothing is walked to at 0 (VTank\'s default); set, it walks to within -Min and loots', async () => {

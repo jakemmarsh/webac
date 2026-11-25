@@ -14,7 +14,9 @@
  *   corpse with no killer in its description, and someone else's rare, never.
  * - The server's refusals ("… is already in use by someone else!", "You do
  *   not yet have the right to loot …"; GDLE / AC1999: "You do not have
- *   permission to loot that corpse!") skip the corpse for 10 s.
+ *   permission to loot that corpse!") skip the corpse for 10 s. Ours, for the
+ *   loot-rights refusals (BUG.macro-loot-rights-loop, 2026-11-25): set aside
+ *   until the server could open it to you (below), never retried every 10 s.
  * - An open that never answers counts an attempt; at
  *   BlacklistCorpseOpenAttemptCount the corpse is skipped for
  *   BlacklistCorpseOpenTimeoutSeconds. A description that never comes counts
@@ -23,9 +25,27 @@
  * - What is known about a corpse is forgotten once it has been out of sight
  *   for CorpseCacheTimeoutMinutes.
  *
- * The 100 s is VTank's, not the server's (ACE opens a monster corpse to all
- * after its HalfLife, 180 s; the AC1999 server after 15 s): VTank waits its
- * own time and the server's refusal covers the rest.
+ * The 100 s is VTank's, not the server's: VTank waits its own time and the
+ * server's refusal covers the rest. When each server opens a corpse to you:
+ *
+ * - ACE (Corpse.HasPermission): its killer; a fellow of the killer's with
+ *   loot sharing on; everyone once the killer has opened and closed it
+ *   (Corpse.Close sets IsLooted); everyone once a monster's corpse has less
+ *   than HalfLife (180 s) of its TimeToRot left. The corpse weenie (21) sets
+ *   no TimeToRot, so the first landblock heartbeat (every 5 s,
+ *   Landblock.heartbeatInterval) gives it DefaultTimeToRot, 300 s
+ *   (WorldObject_Decay.cs), and later heartbeats count it down: open to all
+ *   about 125–130 s after it appeared. A player's corpse, a rare's and a
+ *   player killer's kill never open by time ("You may not loot … because …"
+ *   for the last two).
+ * - GDLE (ClassicDereth Corpse.cpp CheckOpenContainer): CORPSE_MONSTER_OPEN_TIME,
+ *   60 s; the AC1999 server 15 s (30 s from June 2000); both once anyone opened it.
+ *
+ * So a loot-rights refusal sets the corpse aside until that time has passed
+ * since it was first seen (the earliest it could open). Refused after it, it
+ * opens only when its killer loots it or your fellowship changes: tried again
+ * after BlacklistCorpseOpenTimeoutSeconds, or at once when the fellowship
+ * changes (a fellow's kill opens when you join them with sharing on).
  */
 
 /** VTank lets a stranger's corpse (or an unshared fellow's) be looted this long after it first appeared. */
@@ -34,6 +54,10 @@ export const CORPSE_OTHERS_AFTER_MS = 100_000;
 export const CORPSE_DENIAL_SKIP_MS = 10_000;
 /** Refusals before a corpse is skipped for the blacklist time (ours; VTank only skips 10 s each time). */
 export const CORPSE_DENIALS_TO_BLACKLIST = 3;
+/** ACE: a monster's corpse opens to everyone this long after it appeared (300 s TimeToRot − HalfLife 180 s, plus two 5 s heartbeats). */
+export const CORPSE_OPEN_TO_ALL_ACE_MS = 130_000;
+/** GDLE: CORPSE_MONSTER_OPEN_TIME 60 s (the AC1999 server's 15 s is inside it), plus a little. */
+export const CORPSE_OPEN_TO_ALL_GDLE_MS = 65_000;
 /** A corpse whose description never came is skipped after this many tries. */
 export const CORPSE_DESCRIPTION_TRIES = 3;
 
@@ -57,6 +81,18 @@ export function isCorpseDenial(line: string): boolean {
     || /^You do not yet have the right to loot the (Corpse|Treasure) of /.test(line)
     || /^You may not loot the (Corpse|Treasure) of .* because /.test(line)
     || /^You do not have permission to loot that corpse!$/.test(line);
+}
+
+/**
+ * The server refusing you a corpse's loot rights (not "in use"): ACE's "You do not yet have the right to loot …",
+ * GDLE / AC1999's "You do not have permission to loot that corpse!". `never`: ACE's "You may not loot … because …"
+ * (a rare's corpse, a player killer's kill), which no wait opens. Null for any other line ("in use" included).
+ */
+export function corpseRightsDenial(line: string): { openAfterMs: number } | 'never' | null {
+  if (/^You may not loot the (Corpse|Treasure) of .* because /.test(line)) return 'never';
+  if (/^You do not yet have the right to loot the (Corpse|Treasure) of /.test(line)) return { openAfterMs: CORPSE_OPEN_TO_ALL_ACE_MS };
+  if (/^You do not have permission to loot that corpse!$/.test(line)) return { openAfterMs: CORPSE_OPEN_TO_ALL_GDLE_MS };
+  return null;
 }
 
 export interface CorpseBookSettings {
@@ -93,6 +129,10 @@ interface Entry {
   deniedAt?: number;
   denials?: number;
   blacklistedAt?: number;
+  /** Refused its loot rights: not tried before this (ms), unless the fellowship changes. */
+  rightsUntil?: number;
+  /** Refused for good (a rare's corpse, a player killer's kill): never while it is remembered. */
+  never?: boolean;
 }
 
 export interface CorpseOwnerContext {
@@ -149,14 +189,32 @@ export class CorpseBook {
   /** Looted (or found empty): never again while it is remembered. */
   complete(g: number, now: number): void { const e = this.entry(g, now); e.done = true; e.openTries = 0; e.blacklistedAt = undefined; }
   /**
-   * The server refused it ("in use", "no right"): skipped for 10 s. Ours: the third refusal skips it for the
-   * blacklist time (a player's corpse, say, refuses for good, and isn't asked every 10 s).
+   * The server refused it. `line` is what it said. "In use": skipped for 10 s; ours, the third refusal skips it for
+   * the blacklist time. Loot rights ("no right", corpseRightsDenial): set aside until the server could open it to you,
+   * the server's open-to-all time after it was first seen; refused after that, for the blacklist time (or until the
+   * fellowship changes); "may not loot … because" never. Returns when it may be tried again (ms), null for never.
    */
-  denied(g: number, now: number, s: CorpseBookSettings): void {
+  denied(g: number, now: number, s: CorpseBookSettings, line = ''): number | null {
     const e = this.entry(g, now);
+    const rights = corpseRightsDenial(line);
+    if (rights === 'never') { e.never = true; return null; }
+    if (rights) {
+      const openAt = e.firstSeen + rights.openAfterMs;
+      e.rightsUntil = now < openAt ? openAt : now + s.blacklistSeconds * 1000;
+      return e.rightsUntil;
+    }
     e.deniedAt = now;
     e.denials = (e.denials ?? 0) + 1;
-    if (e.denials >= CORPSE_DENIALS_TO_BLACKLIST) { e.denials = 0; e.blacklistedAt = now; }
+    if (e.denials >= CORPSE_DENIALS_TO_BLACKLIST) { e.denials = 0; e.blacklistedAt = now; return now + s.blacklistSeconds * 1000; }
+    return now + CORPSE_DENIAL_SKIP_MS;
+  }
+
+  /**
+   * Your fellowship changed (joined, left, a member came or went, loot sharing switched): a corpse set aside for its
+   * loot rights may be open to you now (ACE: a fellow's kill with sharing on), so each is tried again.
+   */
+  fellowshipChanged(): void {
+    for (const e of this.entries.values()) e.rightsUntil = undefined;
   }
   /** An open that never answered. True when that was the last try and it is now skipped for the blacklist time. */
   openFailed(g: number, now: number, s: CorpseBookSettings): boolean {
@@ -169,11 +227,15 @@ export class CorpseBook {
   }
   openTries(g: number): number { return this.entries.get(g)?.openTries ?? 0; }
 
-  /** Not to be tried now: looted, refused within 10 s, or skipped for the blacklist time. */
+  /** Not to be tried now: looted, refused within 10 s, set aside for its loot rights, or skipped for the blacklist time. */
   skipped(g: number, now: number, s: CorpseBookSettings): boolean {
     const e = this.entries.get(g);
     if (!e) return false;
-    if (e.done) return true;
+    if (e.done || e.never) return true;
+    if (e.rightsUntil !== undefined) {
+      if (now < e.rightsUntil) return true;
+      e.rightsUntil = undefined;
+    }
     if (e.deniedAt !== undefined && now - e.deniedAt < CORPSE_DENIAL_SKIP_MS) return true;
     if (e.blacklistedAt !== undefined) {
       if (now - e.blacklistedAt < s.blacklistSeconds * 1000) return true;

@@ -30,6 +30,7 @@ import { attackHeightForAction, type AttackHeightName } from '../controllers/Att
 import { quickslotCommand, CREATE_SHORTCUT_ACTION } from '../network/itemShortcutRestore.js';
 import { OPTION_KEYBIND_ACTIONS } from '../era/EraFeatures.js';
 import { PLAYER_OPTIONS } from '../ui/PlayerOptions.js';
+import type { StopMovingBy } from '../scene/CameraController.js';
 
 /** The GameUI methods the commands call (GameUI satisfies it structurally). */
 export interface ActionUI {
@@ -64,7 +65,7 @@ export interface ActionUI {
 
 /** The CameraController methods the camera commands call. */
 export interface ActionCamera {
-  stopMoving(): void;
+  stopMoving(by?: StopMovingBy): void;
   startZoom(dir: number): void;
   resetZoom(): void;
   enterHead(): void;
@@ -152,8 +153,14 @@ const SELECT_CYCLES: Readonly<Record<number, readonly [SelectionType, SelectCycl
   [ACT.SelectNextPlayer]: [SelectionType.Player, 'next'],
 };
 
+/**
+ * The input a command came from (OBS.stop-moving-input-source): a trusted key, an untrusted keydown, a bound mouse
+ * control, a UI control. Only Stop Moving reads it today (its movement event's source).
+ */
+export type ActionInput = Exclude<StopMovingBy, 'agent'>;
+
 /** Dispatch a resolved one-shot command. Returns true when handled (the key is consumed). */
-export function dispatchGameAction(id: number, h: ActionHost): boolean {
+export function dispatchGameAction(id: number, h: ActionHost, input: ActionInput = 'key'): boolean {
   const { ui, camera } = h;
   const emote = h.emoteMotion(id);
   if (emote !== undefined) { h.triggerEmote(emote); return true; }
@@ -197,7 +204,7 @@ export function dispatchGameAction(id: number, h: ActionHost): boolean {
     case ACT.PreviousSpellTab: ui.switchSpellBarTab('prev'); return true;
     case ACT.FirstSpellTab: ui.switchSpellBarTab('first'); return true;
     case ACT.LastSpellTab: ui.switchSpellBarTab('last'); return true;
-    case ACT.StopMoving: camera.stopMoving(); return true;
+    case ACT.StopMoving: camera.stopMoving(input); return true;
     // Combat
     case ACT.ToggleCombatMode: h.toggleCombatMode(); return true;
     // SWEEP1999.input CM-5 — HandleCombatAction @ 0056d600 (1999: 0x0058b300 / 0058b390).

@@ -23,11 +23,10 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { SpellDefinition } from '@ac/shared';
-import { handleMagicUpdateSpell } from '../packages/renderer/src/magic/SpellLearn.js';
+import { handleMagicUpdateSpell, spellbookFromDescription } from '../packages/renderer/src/magic/SpellLearn.js';
 
 const REPO = resolve(__dirname, '..');
 const SPELL_ENGINE = readFileSync(resolve(REPO, 'packages/shared/src/magic/SpellEngine.ts'), 'utf8');
-const MAIN = readFileSync(resolve(REPO, 'packages/renderer/src/main.ts'), 'utf8');
 import { spellShortcutTooltip } from '../packages/renderer/src/ui/HudTooltips.js';
 const SPELL_TABLE = readFileSync(resolve(REPO, 'packages/dat-parser/src/file-types/SpellTable.ts'), 'utf8');
 
@@ -53,11 +52,15 @@ describe('SpellTable parses desc (FAITHFUL.309 anchor)', () => {
 
 describe('main.ts spell construction copies desc through (FAITHFUL.309)', () => {
   it('PlayerDesc spell-list learn copies sb.desc', () => {
-    // Look for the `desc: sb.desc` line near the learnSpell call from
-    // the spell-list branch (around L4429-4441 in main.ts).
-    const block = MAIN.match(/magicController\.learnSpell\(\{[\s\S]+?id:\s*spellId,[\s\S]+?\}\)/);
-    expect(block).not.toBeNull();
-    expect(block![0]).toMatch(/desc:\s*sb\.desc/);
+    // Behavioral (was a main.ts source pin): the PlayerDescription list goes through
+    // spellbookFromDescription (magic/SpellLearn.ts) into MagicController.replaceSpellbook.
+    const DESC = "Increases the caster's Strength attribute by 10 for the duration.";
+    const book = spellbookFromDescription([157, 999999], {
+      spells: new Map([[157, { name: 'Strength Self I', desc: DESC, school: 2, power: 1, baseMana: 10, formula: [], duration: 30 }]]),
+    });
+    expect(book).toHaveLength(1);
+    expect(book[0].desc).toBe(DESC);
+    expect(spellbookFromDescription([157], null)).toEqual([]);
   });
 
   it('MagicUpdateSpell learn path copies the DAT desc onto the spellbook entry', () => {

@@ -24,6 +24,10 @@ import { findUst, planSalvageCombine, salvageRefusal } from './macro/salvagePlan
 import { isRecall, nearestStart, objectAt, openDoorOnTheWay, runCheckpoint, runRecall, runUseStep, stopsAt, walksTo, type NodeCtx } from './routeNodes.ts';
 import { BEING_CAST_AT_S, PULL_LAND_MS, RECALL_MOVE_M, RECALL_WAIT_MS, awayWord, beyondSetting, holdAllows, pullLanded } from './beyondVtank.ts';
 import { isCorpseDenial } from './macro/corpseBook.ts';
+/** A corpse's refusal, any server (corpseBook.ts isCorpseDenial), as a chat wait's pattern. */
+const CORPSE_DENIAL_WAIT = 'already in use by|do not yet have the right to loot|may not loot the|permission to loot that corpse';
+/** How long an unanswered corpse open waits for a late refusal before it counts as an open that never answered. */
+const LATE_REFUSAL_WAIT_MS = 1500;
 import { LootExtras } from './macro/lootExtras.ts';
 import { propertyDumpLines, testItemLine } from './macro/lootTest.ts';
 import type { AgentObject, AgentObservation, AgentResult, AgentSelf } from './types.ts';
@@ -1373,7 +1377,7 @@ export class RoutineEngine {
     }
     // A kill is loot to fetch until its own corpse is looted (one try per corpse), so every kill of a ring or arc gets looted;
     // with LootFellowCorpses / LootAllCorpses, so is another's corpse once VTank may take it (corpseBook.ts).
-    if (looting) this.loot.book.observe(obs.nearby.filter((o) => o.kind === 'corpse').map((o) => o.guid), this.now(), this.loot.settings(st));
+    if (looting) { this.loot.book.observe(obs.nearby.filter((o) => o.kind === 'corpse').map((o) => o.guid), this.now(), this.loot.settings(st)); this.loot.watchFellowship(); }
     const lootDue = looting && (truthySetting(st.LootOnlyRareCorpses) ? this.rarePending : this.killsToLoot().length > 0 || this.othersDue(obs.nearby, reach));
     // A profile with VirindiTank's tabs: its planners decide recharge, combat and buffs (vtMacro.ts).
     if (p.vtank) {
@@ -1568,7 +1572,7 @@ export class RoutineEngine {
     }
     // The run's own kills (a fight off during the yield leaves corpses): looted and salvaged as ever.
     const looting = truthySetting(st.EnableLooting) && p.modules.looting;
-    if (looting) this.loot.book.observe(obs.nearby.filter((o) => o.kind === 'corpse').map((o) => o.guid), this.now(), this.loot.settings(st));
+    if (looting) { this.loot.book.observe(obs.nearby.filter((o) => o.kind === 'corpse').map((o) => o.guid), this.now(), this.loot.settings(st)); this.loot.watchFellowship(); }
     const lootDue = looting && (truthySetting(st.LootOnlyRareCorpses) ? this.rarePending : this.killsToLoot().length > 0 || this.othersDue(obs.nearby, reach));
     if (this.lootUpkeep(p)) { hold.phase = 'looting'; return true; }
     if (lootDue) {
@@ -1618,14 +1622,27 @@ export class RoutineEngine {
     return Math.max(CORPSE_OPEN_RANGE_M, Number(this.settings['CorpseApproachRange-Max']) || 0);
   }
 
-  /** LootFellowCorpses / LootAllCorpses: some corpse within reach still to look at, or that VTank may take now. */
+  /**
+   * LootFellowCorpses / LootAllCorpses: some corpse within reach still to look at, or that VTank may take now. Either
+   * way, a corpse its description names as your own kill that isn't looted or set aside (one the server refused a
+   * while, "in use", is looted once it may be tried again, after its kill's two minutes too).
+   */
   private othersDue(nearby: ReadonlyArray<{ guid: number; kind: string; dist: number }>, reach: number): boolean {
     const bs = this.loot.settings(this.settings);
-    if (!bs.lootAll && !bs.lootFellow) return false;
     const me = this.api.self()?.name ?? '';
-    const ctx = { me, fellows: this.loot.fellows(), settings: bs, now: this.now() };
-    return nearby.some((o) => o.kind === 'corpse' && o.dist <= reach && !this.loot.book.skipped(o.guid, ctx.now, bs)
-      && (this.loot.book.needsDescription(o.guid) || this.loot.book.mayLoot(o.guid, ctx) === true));
+    const book = this.loot.book;
+    const t = this.now();
+    if (!bs.lootAll && !bs.lootFellow) return nearby.some((o) => o.kind === 'corpse' && o.dist <= reach && book.isOwn(o.guid, me) && !book.skipped(o.guid, t, bs));
+    const ctx = { me, fellows: this.loot.fellows(), settings: bs, now: t };
+    return nearby.some((o) => o.kind === 'corpse' && o.dist <= reach && !book.skipped(o.guid, t, bs)
+      && (book.needsDescription(o.guid) || book.mayLoot(o.guid, ctx) === true));
+  }
+
+  /** A corpse in sight its description names as your own kill, not looted and not set aside now. */
+  private ownDue(me: string, meters: number): boolean {
+    const bs = this.loot.settings(this.settings);
+    const book = this.loot.book;
+    return this.api.look({ radius: meters, max: 30 }).nearby.some((o) => o.kind === 'corpse' && book.isOwn(o.guid, me) && !book.skipped(o.guid, this.now(), bs));
   }
 
   /**
@@ -2320,10 +2337,23 @@ export class RoutineEngine {
     } : { close: true };
     const since = this.api.currentSeq();
     const r = await this.api.loot(corpse.guid, null, decide, opts);
-    // Refused by the server ("in use", "no right"): skipped for 10 s, then tried again.
-    if (this.api.eventsSince(since).some((e) => e.type === 'chat' && !/^\((say|tell|emote|channel)\) /.test(e.text) && isCorpseDenial(e.text.replace(/^\([a-z]+\) /, '')))) {
-      book.denied(corpse.guid, now(), bs);
-      return { ...r, message: `${r.message}; refused, skipping it for 10 s` };
+    // Refused by the server: "in use" skips it 10 s; a loot-rights refusal sets it aside until the server could open
+    // it to you (corpseBook.ts denied). Before, every refusal skipped 10 s, so another player's corpse was asked for
+    // again and again (17 refusals in 5 min, trace d98e7a4e082e5f81, 2026-11-25; BUG.macro-loot-rights-loop).
+    const refusalSince = () => this.api.eventsSince(since).map((e) => (e.type === 'chat' && !/^\((say|tell|emote|channel)\) /.test(e.text) ? e.text.replace(/^\([a-z]+\) /, '') : ''))
+      .find((t) => t && isCorpseDenial(t));
+    let refusal = refusalSince();
+    // An open that timed out may still be refused: the server answers once its walk to the corpse ends, which can be
+    // after VTank's short CorpseOpenTimeoutSeconds. Its refusal is waited for a moment, else it was lost (the next
+    // pass starts a new mark) and the corpse counted only an unanswered open, tried again at once.
+    if (refusal === undefined && !r.ok && /never opened/.test(r.message)) {
+      await this.api.waitFor({ types: ['chat'], sinceSeq: since, chatMatch: CORPSE_DENIAL_WAIT }, LATE_REFUSAL_WAIT_MS);
+      refusal = refusalSince();
+    }
+    if (refusal !== undefined) {
+      const until = book.denied(corpse.guid, now(), bs, refusal);
+      const wait = until === null ? 'not trying it again' : `skipping it for ${Math.max(1, Math.round((until - now()) / 1000))} s`;
+      return { ...r, message: `${r.message}; refused, ${wait}` };
     }
     // Never opened: an attempt; after BlacklistCorpseOpenAttemptCount it is skipped for BlacklistCorpseOpenTimeoutSeconds.
     if (!r.ok && /never opened/.test(r.message)) {
@@ -2507,14 +2537,19 @@ export class RoutineEngine {
         const now = () => this.now();
         const pending = this.killsToLoot();
         const others = (bs.lootAll || bs.lootFellow) && !truthySetting(st.LootOnlyRareCorpses);
-        if (!pending.length && !others) return { ok: true, message: 'nothing of ours to loot', idle: true };
         const meName = this.api.self()?.name ?? '';
+        if (!pending.length && !others && !this.ownDue(meName, a.meters ?? 20)) return { ok: true, message: 'nothing of ours to loot', idle: true };
         const ctx = () => ({ me: meName, fellows: this.loot.fellows(), settings: bs, now: now() });
         const wanted = new Set(pending.map((k) => `Corpse of ${k.name}`));
-        const look = () => this.api.look({ radius: a.meters ?? 20, max: 30 }).nearby
-          .filter((o) => o.kind === 'corpse' && !book.skipped(o.guid, now(), bs) && (wanted.has(o.name) || others));
-        let cands = look();
-        for (let w = 0; pending.length && !cands.some((c) => wanted.has(c.name)) && w < 10; w++) { await sleep(500); cands = look(); }
+        // Every corpse in reach, then the ones to try now: a kill's by name, the others with those options, and your own
+        // kill by its description whatever the options (set aside a while, "in use", it is still yours to loot after).
+        const corpses = () => this.api.look({ radius: a.meters ?? 20, max: 30 }).nearby.filter((o) => o.kind === 'corpse');
+        const tryNow = (all: ReturnType<typeof corpses>) => all.filter((o) => !book.skipped(o.guid, now(), bs) && (wanted.has(o.name) || others || book.isOwn(o.guid, meName)));
+        let all = corpses();
+        // A fresh kill's corpse appears a second or two after the death: waited for only while it isn't there at all
+        // (one set aside is there: no 5 s wait for it).
+        for (let w = 0; pending.length && !all.some((c) => wanted.has(c.name)) && w < 10; w++) { await sleep(500); all = corpses(); }
+        const cands = tryNow(all);
         book.observe(cands.map((c) => c.guid), now(), bs);
         // Each one not yet described is examined (one look this pass; VTank asks every corpse as it appears).
         for (const c of cands) if (book.needsDescription(c.guid)) await this.loot.describe(c.guid, st);
@@ -2561,9 +2596,13 @@ export class RoutineEngine {
       case 'release-position': this.hold = null; return { ok: true, message: 'position released' };
       case 'pull': return this.pull(a);
       case 'loot-corpse': {
+        // The nearest by that name the corpse book hasn't set aside (looted, refused: a rule that keeps firing must not
+        // ask the server for a corpse it just refused, every few seconds).
         const want = a.name.trim().toLowerCase();
-        const c = this.api.look({ radius: a.meters ?? 40, max: 60 }).nearby.filter((o) => o.kind === 'corpse' && o.name.toLowerCase() === want).sort((x, y) => x.dist - y.dist)[0];
-        if (!c) return { ok: true, message: `no ${a.name} within ${a.meters ?? 40} m`, idle: true };
+        const named = this.api.look({ radius: a.meters ?? 40, max: 60 }).nearby.filter((o) => o.kind === 'corpse' && o.name.toLowerCase() === want).sort((x, y) => x.dist - y.dist);
+        const bs = this.loot.settings(this.settings);
+        const c = named.find((o) => !this.loot.book.skipped(o.guid, this.now(), bs));
+        if (!c) return { ok: true, message: named.length ? `${a.name}: set aside (looted, or the server refused it a moment ago)` : `no ${a.name} within ${a.meters ?? 40} m`, idle: true };
         return this.lootOne(c, undefined, p);
       }
       case 'recall': return this.recall(a);

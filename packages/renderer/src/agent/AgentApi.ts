@@ -38,7 +38,7 @@ import { parseMapCoordsText, isPartialMapCoordsText, missileShot, getProjectileS
 import { RoutineEngine, type ItemPalette } from './RoutineEngine.ts';
 import type { RoutineSyncResult } from './RoutineSync.ts';
 import { vtankExprHost, vtankExpressions } from './VtankExprHost.ts';
-import { CAST_NOT_LANDED } from './macro/castReply.ts';
+import { CAST_NOT_LANDED, SPELL_NOT_KNOWN } from './macro/castReply.ts';
 import { fellowVitaeText, vitaeBuffName, vitaeHeadline, VITAE_SPELL, type FellowshipXpState, type VitaeState } from './vitaeFacts.ts';
 import { buildCombatFamilies, casterAttackSpell, indexMonsterTable, type CombatFamilies, type MonsterFacts } from './macro/combatPlan.ts';
 import { fullSchoolName } from './macro/vtMacro.ts';
@@ -428,6 +428,12 @@ export interface AgentHost {
    */
   attacking?(): boolean;
   cast(spellId: number, target: number | null): boolean;
+  /**
+   * The server refused a cast of `spellId` as not in your book ("You don't know that spell!", WeenieError 0x03FE): the
+   * client's spellbook held a spell the server's doesn't. The host drops it from the spellbook, so neither the routine's
+   * planners nor ac_cast pick it again (a later MagicUpdateSpell teaches it back). Absent: nothing is dropped.
+   */
+  spellNotKnown?(spellId: number): void;
   /**
    * The era client's target-type bits that let a non-Self spell be cast at you (EraClientRules.spellSelfTargetableTypeMask:
    * end of retail 0x8107, 1999 0). Absent: end of retail's.
@@ -1264,7 +1270,7 @@ const WIELD_REFUSED_FOR_YOU = /not skilled enough to use that|not powerful enoug
 const WEAR_REFUSED_BY_GEAR = /must remove your .* to wear that|already wearing/i;
 const INVENTORY_REFUSAL = /can't be|cannot|can not|you can only|too busy|too encumbered|unable to|not experienced enough|not skilled enough|not powerful enough|another race|must unwield|already wearing|you need|you must/i;
 /** A cast's outcome among its reply lines (AgentApi.castOnce waits for one): it landed, fizzled, was refused or resisted, did damage, restored or drained a vital, or the target died. */
-const CAST_OUTCOME = /you cast|fizzle|do not have|don't have|can't|cannot|not enough|unable|refuse|too busy|out of range|resists?|you fail to affect|invalid target|you are not|your spell|\bpoints? with\b|\byou (?:restore|drain) [\d,]+ points? of\b|hit the environment|you've earned [\d,]+ experience/i;
+const CAST_OUTCOME = /you cast|fizzle|do not have|don't have|don't know that spell|can't|cannot|not enough|unable|refuse|too busy|out of range|resists?|you fail to affect|invalid target|you are not|your spell|\bpoints? with\b|\byou (?:restore|drain) [\d,]+ points? of\b|hit the environment|you've earned [\d,]+ experience/i;
 /** ACE Player.OnExhausted's transient line: your stamina reached 0. Not a cast's outcome (it comes with the swings at you). */
 const EXHAUSTED_LINE = /^you're exhausted!?$/i;
 /** A combat line about something hitting (or missing) you: "Drudge Servant stabs your lower arm for 11 points…",
@@ -7789,6 +7795,19 @@ export class AgentApi {
     return ` (waited ${(ms / 1000).toFixed(1)} s for the cast or use already under way${whose} to finish: sent sooner, the server answers "You're too busy!")`;
   }
 
+  /**
+   * The server said a cast's spell is not in your book ("You don't know that spell!"). The client's spellbook is the
+   * list every planner and ac_cast choose from (AgentHost.spells), so the host drops the spell from it: the routine
+   * never tries it again this session and says so once. Seedsow's macro cast an earlier character's spells 8 times
+   * in 2 min, each refused so, and the reply wasn't even read as a failure (trace 92313d167e79eab8, 2026-11-25).
+   */
+  private spellNotKnownResult(s: AgentSpell, tg: number | null): AgentResult {
+    this.host.spellNotKnown?.(s.id);
+    const note = `the server says you don't know ${s.name} (spell ${s.id}): it is not in this character's spellbook on the server, so it is out of your spell list now and neither your routine nor ac_cast tries it again (it comes back if you learn it)`;
+    this.push('chat', `(system) [Agent] ${note[0].toUpperCase()}${note.slice(1)}`);
+    return { ok: false, message: `${s.name} not cast${tg && tg !== this.host.self()?.guid ? ` at ${this.nameOf(tg)}` : ''}: ${note}` };
+  }
+
   /** Casts asked for and not yet answered (yours sent together): each waits for the one before (waitNotBusy). */
   private castCallsOpen = 0;
   /** One cast; `info` (the repeat's) learns whether it went out and what came back, and can stop it before it goes. */
@@ -7894,6 +7913,7 @@ export class AgentApi {
     // A repeat stopped (replaced, stopped, you died) while this cast waited: nothing more goes out.
     if (info?.abort()) return { ok: false, message: `${s.name} not cast: stopped` };
     const since = this.seqN;
+    const weSince = this.weenieErrorN;
     const sentInPortal = this.host.screen() === 'portal-space';
     // How far the target was as the cast went out: the server checks the range again when the windup ends (ACE
     // VerifySpellRange, "called both before and after windup"), so a target that runs off meanwhile is "Out of Range!".
@@ -7921,6 +7941,9 @@ export class AgentApi {
     // ACE Player_Magic.cs when it can't find the target, e.g. one that died out of your sight) is the outcome too,
     // and must be reported: "Casting X" alone read as a landed cast on a phantom (Arcanist, 2026-10-11).
     const refusals = (): string[] => this.eventsSince(since).filter((e) => e.type === 'use-failed').map((e) => e.text);
+    // "You don't know that spell!" (WeenieError 0x03FE: GDLE / AC1999 WERROR_MAGIC_UNLEARNED_SPELL), by its code or its line.
+    const notKnown = (): boolean => this.weenieErrors.some((w) => w.n > weSince && w.code === WeenieError.YouDontKnowThatSpell)
+      || said().some((l) => SPELL_NOT_KNOWN.test(l)) || refusals().some((l) => SPELL_NOT_KNOWN.test(l));
     // A bolt at a target: once it is out (its words said) and the client is free again (the server's UseDone ends the
     // cast's motion), only a short flight is waited for its damage line. A bolt that missed (or flew into something the
     // server didn't say) has no line at all, and was waited on for the whole 8 s: the client sat free 4 s before each
@@ -7930,7 +7953,7 @@ export class AgentApi {
     let freeAt: number | null = null;
     // Free AGAIN: the cast's busy count was seen held (the client's IncrementBusyCount at the send) and has gone.
     let sawBusy = this.host.busy();
-    for (let w = 0; w < 40 && !((said().some((l) => outcome.test(l)) || died() || refusals().length) && !this.host.busy()); w++) {
+    for (let w = 0; w < 40 && !((said().some((l) => outcome.test(l)) || died() || refusals().length || notKnown()) && !this.host.busy()); w++) {
       if (w >= 15 && !said().length && !refusals().length) break; // no reply at all after 3 s: no wand, wrong mode, …
       if (this.host.busy()) sawBusy = true;
       if (bolt && sawBusy && said().some((l) => /^You say, /.test(l)) && !this.host.busy()) {
@@ -7944,6 +7967,7 @@ export class AgentApi {
     const head = `casting ${s.name}${tg && tg !== me ? ` at ${tname} #${tg.toString(16)}` : ' on yourself'}${picked ? ` (${picked})` : ''}${this.waitedText(busyWaited0, airWaited)}`;
     const refused = refusals();
     if (info) { info.lines = said(); info.refused = refused; }
+    if (notKnown()) return this.spellNotKnownResult(s, tg);
     if (refused.length) {
       // The refusal's own text (when the client showed one) is already in the chat lines: say it once, as the refusal.
       const lines = said().filter((l) => !refused.some((r) => r.startsWith(l.split(' (not this cast: ')[0])));

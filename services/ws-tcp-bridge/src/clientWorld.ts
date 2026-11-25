@@ -583,8 +583,16 @@ export const MOVE_STATE_FIELDS = [
 ] as const;
 /** renderer MovementSync MOVE_SEND_ORIGINS. */
 export const MOVE_SEND_ORIGINS = ['event', 'update_state', 'update_jump', 'update_turn', 'held', 'position'] as const;
-/** renderer CameraController MOVEMENT_EVENT_SOURCES. */
-export const MOVEMENT_EVENT_SOURCES = ['key_down', 'key_up', 'autorun', 'stop_moving', 'mouse_left', 'mouse_turn', 'mouse_look'] as const;
+/**
+ * renderer CameraController MOVEMENT_EVENT_SOURCES (agent_key_down / agent_key_up: keys the agent API pressed;
+ * OBS.stop-moving-input-source: Stop Moving by input (mouse_ / ui_ / agent_ / synthetic_stop_moving), untrusted
+ * keydowns (synthetic_*), a mouse button holding a movement (mouse_button_*); an older client never sends them).
+ */
+export const MOVEMENT_EVENT_SOURCES = [
+  'key_down', 'key_up', 'autorun', 'stop_moving', 'mouse_left', 'mouse_turn', 'mouse_look', 'agent_key_down', 'agent_key_up',
+  'mouse_stop_moving', 'ui_stop_moving', 'agent_stop_moving', 'synthetic_stop_moving', 'synthetic_key_down', 'synthetic_key_up',
+  'synthetic_autorun', 'mouse_button_down', 'mouse_button_up',
+] as const;
 const MOVE_LIMITER_DRIVERS = ['player', 'agent'] as const;
 const MOVE_LIMITER_KINDS = ['macro', 'meta', 'rules'] as const;
 /** List lengths kept (renderer: 15 fields, 6 recent sends, 8 recent events). */

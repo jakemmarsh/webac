@@ -51,7 +51,38 @@ function removeFrom(list: string[], entry: string): void {
 }
 
 /** Where a movement event came from (BUG.movetostate-burst-abuse-close telemetry). */
-export const MOVEMENT_EVENT_SOURCES = ['key_down', 'key_up', 'autorun', 'stop_moving', 'mouse_left', 'mouse_turn', 'mouse_look'] as const;
+/**
+ * `agent_key_down` / `agent_key_up`: a key the agent API pressed (a routine or macro, or Claude: AgentApi.key → the
+ * host's key → simulateKeyDown / Up with 'agent'), so a move_limiter event tells them from the player's own keys
+ * (BUG.macro-loot-rights-loop, 2026-11-25: a macro's budget event read only key_down / key_up).
+ */
+/**
+ * OBS.stop-moving-input-source (trace 330560b65d77850b, 2026-11-25: a `repeat` limiter whose last 8 sources were all
+ * `stop_moving`, agent=false): Stop Moving is named by the input that ran it. `stop_moving` stays the keyboard's (a
+ * trusted keydown dispatched through the keymap); `mouse_stop_moving` a bound mouse button or wheel notch
+ * (mouseControlHandler); `ui_stop_moving` a UI control firing the action (an indicator's InputAction, onInputAction);
+ * `agent_stop_moving` the agent API (AgentApi.stopMoving → the host's stopMovingAction). A keydown the page did not get
+ * from the user (`isTrusted` false: the agent's ac_press, which dispatches a KeyboardEvent, an extension or a script)
+ * reads `synthetic_*`: `synthetic_stop_moving`, `synthetic_key_down` / `synthetic_key_up` (a movement key),
+ * `synthetic_autorun`. A mouse button bound to a movement command holds that movement as `mouse_button_down` /
+ * `mouse_button_up` rather than as a key. An OS key repeat never reaches any of them (GameKeyDown / handleKeyDown
+ * swallow it), so no repeat flag is carried.
+ */
+export const MOVEMENT_EVENT_SOURCES = [
+  'key_down', 'key_up', 'autorun', 'stop_moving', 'mouse_left', 'mouse_turn', 'mouse_look', 'agent_key_down', 'agent_key_up',
+  'mouse_stop_moving', 'ui_stop_moving', 'agent_stop_moving', 'synthetic_stop_moving', 'synthetic_key_down', 'synthetic_key_up',
+  'synthetic_autorun', 'mouse_button_down', 'mouse_button_up',
+] as const;
+/** Who pressed a simulated key: the player's own input (the debug simulateKey, tests) or the agent API. */
+export type SimulatedKeyBy = 'player' | 'agent';
+/**
+ * The input that ran Stop Moving: a trusted key, an untrusted (synthetic) keydown, a bound mouse control, a UI control
+ * (an indicator button), the agent API.
+ */
+export type StopMovingBy = 'key' | 'synthetic' | 'mouse' | 'ui' | 'agent';
+const STOP_MOVING_SOURCE: Record<StopMovingBy, MovementEventSource> = {
+  key: 'stop_moving', synthetic: 'synthetic_stop_moving', mouse: 'mouse_stop_moving', ui: 'ui_stop_moving', agent: 'agent_stop_moving',
+};
 export type MovementEventSource = typeof MOVEMENT_EVENT_SOURCES[number];
 const MOVEMENT_EVENT_SOURCES_KEPT = 8;
 
@@ -885,7 +916,7 @@ export class CameraController {
    * Autorun toggles the run lock, everything else is pressed. True when the
    * key was consumed (the browser default is prevented).
    */
-  handleKeyDown(physical: string, repeat = false, alt = false): boolean {
+  handleKeyDown(physical: string, repeat = false, alt = false, trusted = true): boolean {
     // A chord binding first (the retail KeyMap binds Strafe Right / Left to
     // Alt+D / Alt+A as well as C / Z), else the bare key.
     const chord = alt ? this.keyTranslator(`Alt+${physical}`) : null;
@@ -896,16 +927,16 @@ export class CameraController {
     // DirectInput key transitions, which carry no OS auto-repeat, so a
     // held key toggles once.
     if (code === 'NumLock') {
-      if (!repeat) this.toggleAutoRun();
+      if (!repeat) this.toggleAutoRun(trusted ? 'autorun' : 'synthetic_autorun');
       return true;
     }
     this.keyTranslations.set(physical, code);
-    this.pressKey(code);
+    this.pressKey(code, trusted ? 'key_down' : 'synthetic_key_down');
     return false;
   }
 
   /** A physical key coming up: released under the code it was pressed as. */
-  handleKeyUp(physical: string): void {
+  handleKeyUp(physical: string, trusted = true): void {
     // COMPAT.mac-cmd-keyup — macOS browsers (Safari, Chrome, Firefox) deliver
     // no keyup for a key released while Cmd is held, so a movement or camera
     // key let go during a Cmd chord stayed pressed (the character kept
@@ -918,7 +949,7 @@ export class CameraController {
     }
     const code = this.keyTranslations.get(physical) ?? this.keyTranslator(physical);
     this.keyTranslations.delete(physical);
-    if (code !== null) this.releaseKey(code);
+    if (code !== null) this.releaseKey(code, trusted ? 'key_up' : 'synthetic_key_up');
   }
 
   /**
@@ -930,14 +961,14 @@ export class CameraController {
     element.addEventListener('keydown', (e) => {
       const tag = (document.activeElement as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      const consumed = this.handleKeyDown(e.code, e.repeat, e.altKey);
+      const consumed = this.handleKeyDown(e.code, e.repeat, e.altKey, e.isTrusted !== false);
       // The arrows / Space / Page keys walk and jump; they never also scroll
       // the panel last clicked (retail panels take no keyboard focus).
       // COMPAT.firefox-quick-find — nor does a printable key open Firefox's find bar.
       if (consumed || suppressesBrowserKeyDefault(e, document.activeElement)) e.preventDefault();
     });
     // Always process keyup to avoid stuck keys when focus changes mid-press
-    element.addEventListener('keyup', (e) => this.handleKeyUp(e.code));
+    element.addEventListener('keyup', (e) => this.handleKeyUp(e.code, e.isTrusted !== false));
     // Retail default mouse-look: held MIDDLE button (KeyMap 0x14000002
     // DefaultMap, input map 5: device 1 control 0xe → Toggle Mouselook
     // 0x3d, "Toggles mouselook on/off while depressed"). The right button
@@ -960,7 +991,7 @@ export class CameraController {
         const movement = this.keyTranslator(bare);
         if (movement !== null && movement !== bare) {
           this.mouseButtonHeld.set(e.button, { code: movement, movement: true });
-          this.pressKey(movement);
+          this.pressKey(movement, 'mouse_button_down');
           return;
         }
         if (this.mouseControlHandler?.(code, true)) {
@@ -982,7 +1013,7 @@ export class CameraController {
       const held = this.mouseButtonHeld.get(e.button);
       if (held) {
         this.mouseButtonHeld.delete(e.button);
-        if (held.movement) this.releaseKey(held.code);
+        if (held.movement) this.releaseKey(held.code, 'mouse_button_up');
         else this.mouseControlHandler?.(held.code, false);
         return;
       }
@@ -1184,8 +1215,8 @@ export class CameraController {
   /**
    * Simulate key press (for testing).
    */
-  simulateKeyDown(code: string): void {
-    this.pressKey(code);
+  simulateKeyDown(code: string, by: SimulatedKeyBy = 'player'): void {
+    this.pressKey(code, by === 'agent' ? 'agent_key_down' : 'key_down');
   }
 
   /**
@@ -1196,7 +1227,7 @@ export class CameraController {
    * autorun (Stop Moving, 0x2b, is stopMoving()). The press then joins the
    * head of its CommandList.
    */
-  private pressKey(code: string): void {
+  private pressKey(code: string, source: 'key_down' | 'agent_key_down' | 'synthetic_key_down' | 'mouse_button_down' = 'key_down'): void {
     if (this.keys.has(code)) return;
     this.keys.add(code);
     const list = this.listFor(code);
@@ -1208,7 +1239,7 @@ export class CameraController {
     if (code === 'KeyW' || code === 'KeyS') { this.onAbortAutomaticAttack?.(); this.setAutoRun(false); this.forwardStopped = false; this.transientPosture = false; this._rawForwardHoldRun = false; }
     const wasActive = list ? list.length > 0 : false;
     list?.unshift(code);
-    if (list) this.raiseMovementEvent('key_down');
+    if (list) this.raiseMovementEvent(source);
     if (!wasActive && list === this.turnList) this.turnSince = ++this.motionClock;
     if (!wasActive && list === this.sidestepList) this.sidestepSince = ++this.motionClock;
   }
@@ -1219,7 +1250,7 @@ export class CameraController {
    * otherwise HandleKeyboardCommand runs TakeControlFromServer first, whose
    * AbortAutomaticAttack still cancels an automatic attack.
    */
-  private releaseKey(code: string): void {
+  private releaseKey(code: string, source: 'key_up' | 'agent_key_up' | 'synthetic_key_up' | 'mouse_button_up' = 'key_up'): void {
     // Only a key that is down comes up: CInputManager deactivates an action it
     // activated (DirectInput's buffer has no key-up without its key-down), so
     // HandleKeyboardCommand never sees the release of a key not held and no
@@ -1241,7 +1272,7 @@ export class CameraController {
     if (!list.length && list === this.turnList && this.sidestepList.length) this.sidestepSince = ++this.motionClock;
     // NukeCommand re-applies a new head (a Stop Moving forward no longer holds).
     if (list === this.substateList && wasHead && list.length && !this.transientPosture) this.forwardStopped = false;
-    if (!controlled) this.raiseMovementEvent('key_up');
+    if (!controlled) this.raiseMovementEvent(source);
   }
 
   /** CommandInterpreter::LoseControlToServer @ 006b3170: the server moves us; autorun and a jump charge end. */
@@ -1323,10 +1354,10 @@ export class CameraController {
   private _rawForwardHoldRun = false;
 
   /** CommandInterpreter::ToggleAutoRun @ 006b3cc0: SetAutoRun(auto_run == 0, 1). */
-  toggleAutoRun(): void {
+  toggleAutoRun(source: 'autorun' | 'synthetic_autorun' = 'autorun'): void {
     this.setAutoRun(!this._autoRun);
     if (!this._autoRun) this._rawForwardHoldRun = false;
-    this.raiseMovementEvent('autorun');
+    this.raiseMovementEvent(source);
   }
 
   /**
@@ -1338,9 +1369,10 @@ export class CameraController {
    * HandleNewForwardMovement: AbortAutomaticAttack, SetAutoRun off),
    * MovePlayer → DoMotion(Ready) — the forward command stops even with
    * Move Forward still held (forwardStopped), a sit / crouch ends — and a
-   * movement event. Sidestep and turn are untouched.
+   * movement event. Sidestep and turn are untouched. `by` names the input
+   * that ran it in the movement event's source (OBS.stop-moving-input-source).
    */
-  stopMoving(): void {
+  stopMoving(by: StopMovingBy = 'key'): void {
     this.transientPosture = false;
     this.takeControlFromServer();
     this.onAbortAutomaticAttack?.();
@@ -1348,7 +1380,7 @@ export class CameraController {
     this._rawForwardHoldRun = false;
     if (this.substateList.length) this.forwardStopped = true;
     this.onStopMovingSubstate?.();
-    this.raiseMovementEvent('stop_moving');
+    this.raiseMovementEvent(STOP_MOVING_SOURCE[by]);
   }
 
   /**
@@ -1405,8 +1437,8 @@ export class CameraController {
   /**
    * Simulate key release (for testing).
    */
-  simulateKeyUp(code: string): void {
-    this.releaseKey(code);
+  simulateKeyUp(code: string, by: SimulatedKeyBy = 'player'): void {
+    this.releaseKey(code, by === 'agent' ? 'agent_key_up' : 'key_up');
   }
 
   /**

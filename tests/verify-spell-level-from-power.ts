@@ -24,7 +24,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { spellLevelFromPower, MIN_POWER_BY_LEVEL, MAX_SPELL_LEVEL } from '@ac/shared';
 import type { SpellDefinition } from '@ac/shared';
-import { handleMagicUpdateSpell } from '../packages/renderer/src/magic/SpellLearn.js';
+import { handleMagicUpdateSpell, spellbookFromDescription } from '../packages/renderer/src/magic/SpellLearn.js';
 
 const REPO = resolve(__dirname, '..');
 const MAIN = readFileSync(resolve(REPO, 'packages/renderer/src/main.ts'), 'utf8');
@@ -93,12 +93,15 @@ describe('main.ts call sites use the helper (FAITHFUL.331)', () => {
     expect(MAIN).not.toMatch(/Math\.ceil\(sb\.power\s*\/\s*50\)/);
   });
 
-  it('PlayerDescription bulk-learn calls spellLevelFromPower(sb.power)', () => {
-    // Anchor near the surrounding bulk-learn fields so this catches
-    // accidental deletion or move of this call site.
-    expect(MAIN).toMatch(
-      /school: sb\.school as MagicSchool,\s*\n\s*level: spellLevelFromPower\(sb\.power\),/,
-    );
+  it('PlayerDescription bulk-learn derives level via spellLevelFromPower', () => {
+    // Behavioral (was a main.ts source pin): the PlayerDescription list goes through
+    // spellbookFromDescription (magic/SpellLearn.ts, BUG.spellbook-stale-char-switch).
+    for (const power of [1, 50, 51, 100, 101, 150, 200, 250, 300, 350, 400]) {
+      const [s] = spellbookFromDescription([7], {
+        spells: new Map([[7, { name: 'Test Spell', school: 2, power, baseMana: 10, formula: [], duration: 0 }]]),
+      });
+      expect(s.level).toBe(spellLevelFromPower(power));
+    }
   });
 
   it('the MagicUpdateSpell learn path derives level via spellLevelFromPower', () => {
