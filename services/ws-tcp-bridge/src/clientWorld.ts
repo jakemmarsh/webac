@@ -284,8 +284,15 @@ function perfFields(b: Record<string, unknown>): Partial<ClientFirstMinuteEvent>
  * move-to chain besides a MoveToState (`chainBreaks`, `chainBreakTypes`: GameActionType codes).
  * OBS.portal-use-pk-status: `pk`, the player's raw PlayerKillerStatus (PropertyInt 134) when the watch began (a
  * non-negative integer, else null): PK 0x04 / PKLite 0x40 = ACE walked the use on server physics (FastTick).
+ * OBS.portal-use-late-reply: after a `portal_use_failed` the page listens 30 s more and sends one `portal_late_reply`
+ * (trigger, wcid, the failure's waitedMs): `lateReplyType` (PORTAL_LATE_REPLY_TYPES) = the first UseDone, server
+ * movement of the player, teleport or WeenieError, else none / new_try / left_world; `lateReplyMs` = the try → that
+ * answer; `lateCode` = its UseDone / WeenieError code or MovementType; `lateActions` = GameActions (not movement) the
+ * page sent after the verdict (0: the answer can only be the try's).
  */
-export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_cancelled', 'portal_rim_brush', 'portal_used'] as const;
+export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_cancelled', 'portal_rim_brush', 'portal_used', 'portal_late_reply'] as const;
+/** The renderer's LATE_REPLY_TYPES (telemetry/PortalUseReporter.ts). */
+export const PORTAL_LATE_REPLY_TYPES = ['use_done', 'server_move', 'teleport', 'weenie_error', 'none', 'new_try', 'left_world'] as const;
 export const PORTAL_TRIGGERS = ['use', 'walk_in'] as const;
 export const PORTAL_USE_HELD = ['stale', 'busy', 'decided'] as const;
 /** The renderer's MOVE_TO_ENDS (telemetry/PortalUseReporter.ts) and MOVE_TO_PHASES (controllers/MoveToManager.ts). */
@@ -373,6 +380,17 @@ export interface ClientPortalUsedEvent extends WorldIds {
   attempts: number | null;
 }
 
+export interface ClientPortalLateReplyEvent extends WorldIds {
+  outcome: 'portal_late_reply';
+  trigger: typeof PORTAL_TRIGGERS[number] | null;
+  wcid: number | null;
+  waitedMs: number | null;
+  lateReplyType: typeof PORTAL_LATE_REPLY_TYPES[number] | null;
+  lateReplyMs: number | null;
+  lateCode: number | null;
+  lateActions: number | null;
+}
+
 /** A finite number within ±max, rounded to `decimals` places (metres). */
 function metres(v: unknown, max: number, decimals: 1 | 2): number | null {
   if (typeof v !== 'number' || !Number.isFinite(v) || Math.abs(v) > max) return null;
@@ -394,7 +412,19 @@ export function sanitizeClientPortal(body: unknown): ClientPortalEvent | null {
   return sanitizePortal(outcome, worldIds(b), b);
 }
 
-function sanitizePortal(outcome: typeof PORTAL_OUTCOMES[number], ids: WorldIds, b: Record<string, unknown>): ClientPortalUseFailedEvent | ClientPortalUsedEvent {
+function sanitizePortal(outcome: typeof PORTAL_OUTCOMES[number], ids: WorldIds, b: Record<string, unknown>): ClientPortalEvent {
+  if (outcome === 'portal_late_reply') {
+    return {
+      outcome, ...ids,
+      trigger: pick(b.trigger, PORTAL_TRIGGERS),
+      wcid: uint(b.wcid, U32),
+      waitedMs: uint(b.waitedMs, PORTAL_WAIT_MS),
+      lateReplyType: pick(b.lateReplyType, PORTAL_LATE_REPLY_TYPES),
+      lateReplyMs: uint(b.lateReplyMs, PORTAL_WAIT_MS),
+      lateCode: uint(b.lateCode, U32),
+      lateActions: uint(b.lateActions, 100_000),
+    };
+  }
   const common = {
     trigger: pick(b.trigger, PORTAL_TRIGGERS),
     wcid: uint(b.wcid, U32),
@@ -633,7 +663,7 @@ export function sanitizeClientMoveLimiter(body: unknown): ClientMoveLimiterEvent
 }
 
 export type ClientWorldEvent = ClientFirstMinuteEvent | ClientWorldLeftEvent;
-export type ClientPortalEvent = ClientPortalUseFailedEvent | ClientPortalUsedEvent;
+export type ClientPortalEvent = ClientPortalUseFailedEvent | ClientPortalUsedEvent | ClientPortalLateReplyEvent;
 
 function pick<T extends string>(v: unknown, allowed: readonly T[]): T | null {
   return allowed.find(a => a === v) ?? null;

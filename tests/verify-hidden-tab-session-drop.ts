@@ -34,8 +34,8 @@ import { Connection1999 } from '../packages/network/src/era1999/Connection1999.j
 import { buildPacket1999 } from '../packages/network/src/era1999/Packet1999.js';
 import { LinkCheck, deadSessionCause } from '../packages/renderer/src/session/LinkCheck.js';
 import { NetWorkerClient, SNAPSHOT_EXTRAPOLATION_MAX_MS, type NetWorkerEndpoint } from '../packages/renderer/src/network/NetWorkerClient.js';
-import { linkDeadCause, linkSampleIsDead } from '../packages/renderer/src/ui/ConnectionNotices.js';
-import { ThreadStallClock, silenceIsOwnStall, STALE_RECEIVE_GRACE_MS } from '../packages/network/src/ThreadStall.js';
+import { linkDeadCause, linkSampleIsDead, LINK_DEAD_SILENCE_CAP_S } from '../packages/renderer/src/ui/ConnectionNotices.js';
+import { ThreadStallClock, silenceIsOwnStall, STALE_RECEIVE_GRACE_MS, FROZEN_GAP_MIN_MS } from '../packages/network/src/ThreadStall.js';
 import { WorldReporter, type WorldEvent } from '../packages/renderer/src/telemetry/WorldReporter.js';
 import { sanitizeClientWorld } from '../services/ws-tcp-bridge/src/clientWorld.js';
 import { resolveBridgeConfig } from '../services/ws-tcp-bridge/src/bridgeUtil.js';
@@ -744,5 +744,164 @@ describe('session_close says how long the page and the server had been quiet', (
     } finally {
       server.close();
     }
+  });
+});
+
+// ── BUG.linkcheck-verdict-after-freeze ──
+//
+// Production 2026-11-25 (The Tower, end of retail, trace ccfa9efc0203d258): logout to character
+// select, then 45 s later a `dropped` link_dead whose own diagnostics show the worker stopped twice
+// inside the 40.7 s silence (txRecent: the 3 s keepalive went out at -47.9 / -44.8 / -41.8 s, then
+// nothing until -21.4 s, then -18.2 / -14.8 s, then nothing until 3 ms before the verdict;
+// tickGapMaxMs 18669), the verdict 4 ms after it woke, and the bridge had forwarded 29 more packets
+// (every ACE ack / echo reply of that window; serverQuietMs 390) than the page had counted.
+describe('BUG.linkcheck-verdict-after-freeze: the 40 s counts the time the receiving thread ran', () => {
+  function linkCheckOn(sample: () => ReturnType<NetWorkerClient['getLinkStatus']>) {
+    const dead: string[] = [];
+    const lc = new LinkCheck({ sample, show: () => {}, dead: (cause) => dead.push(cause) });
+    lc.start();
+    return { lc, dead };
+  }
+  /** The thread (and the page with it) does not run for `ms`: no timer fires, no packet is handled. */
+  const freeze = (ms: number) => vi.setSystemTime(Date.now() + ms);
+
+  /** The production shape: heard, 1 s running, a 18.7 s stop, 6.5 s running, a 14.7 s stop, then the worker's first tick. */
+  function productionFreezes() {
+    vi.advanceTimersByTime(1000);
+    freeze(18_669);
+    vi.advanceTimersByTime(6_500);
+    freeze(14_700);
+    vi.advanceTimersByTime(300); // the worker's first tick and snapshot after waking, then the page's link tick
+  }
+
+  it('end of retail at character select: the production freezes do not end a live session; its queued packets then arrive', () => {
+    const s = workerSession();
+    s.ws.receive(serverMessage(2));
+    const { lc, dead } = linkCheckOn(() => s.client.getLinkStatus(Date.now()));
+    productionFreezes();
+    const sample = s.client.getLinkStatus(Date.now());
+    expect(sample.secondsSinceLastPacket).toBeGreaterThan(40); // the old verdict: 40 s of wall clock
+    expect(linkSampleIsDead({ ...sample, frozenMs: 0 })).toBe(true);
+    expect(sample.frozenMs!).toBeGreaterThanOrEqual(18_669 + 14_700);
+    expect(linkSampleIsDead(sample)).toBe(false);
+    expect(deadSessionCause(s.client)).toBeNull(); // a send (Enter, FINISH) goes too
+    expect(dead).toEqual([]);
+    expect(lc.running).toBe(true);
+    expect(s.client.getDiagnostics().rxFrozenMs!).toBeGreaterThanOrEqual(18_669 + 14_700);
+    // The packets the bridge had forwarded reach the worker; the session talks on.
+    for (let seq = 3; seq <= 31; seq++) s.ws.receive(serverMessage(seq));
+    for (let seq = 32; seq <= 72; seq++) { vi.advanceTimersByTime(3000); s.ws.receive(serverMessage(seq)); }
+    vi.advanceTimersByTime(300); // the worker's next snapshot
+    expect(dead).toEqual([]);
+    expect(s.client.getLinkStatus(Date.now()).frozenMs).toBe(0);
+    expect(s.disconnects()).toHaveLength(0);
+  });
+
+  it('the same freezes with the server really gone: link_dead once the thread has run 40 s of the silence', () => {
+    const s = workerSession();
+    s.ws.receive(serverMessage(2));
+    const { dead } = linkCheckOn(() => s.client.getLinkStatus(Date.now()));
+    productionFreezes(); // ~7.8 s of it running
+    vi.advanceTimersByTime(31_000);
+    expect(dead).toEqual([]);
+    vi.advanceTimersByTime(3_000);
+    expect(dead).toEqual(['link_dead']);
+  });
+
+  it('a machine that keeps freezing in pieces under 40 s, with the server gone, still ends by twice DISCONNECT_TIME (client_suspended)', () => {
+    const s = workerSession();
+    s.ws.receive(serverMessage(2));
+    const heardAt = Date.now();
+    const { dead } = linkCheckOn(() => s.client.getLinkStatus(Date.now()));
+    while (dead.length === 0 && Date.now() - heardAt < 200_000) { freeze(10_000); vi.advanceTimersByTime(1_000); }
+    expect(dead).toEqual(['client_suspended']);
+    const at = Date.now() - heardAt;
+    expect(at).toBeGreaterThan(LINK_DEAD_SILENCE_CAP_S * 1000);
+    expect(at).toBeLessThanOrEqual(LINK_DEAD_SILENCE_CAP_S * 1000 + 11_000 + SNAPSHOT_EXTRAPOLATION_MAX_MS);
+  });
+
+  it('a running thread is judged as retail: a short stop BEFORE the last receive discounts nothing', () => {
+    const s = workerSession();
+    s.ws.receive(serverMessage(2));
+    const { dead } = linkCheckOn(() => s.client.getLinkStatus(Date.now()));
+    vi.advanceTimersByTime(1000);
+    freeze(20_000);
+    s.ws.receive(serverMessage(3)); // handed over on waking, before the worker's first tick
+    vi.advanceTimersByTime(300);
+    expect(s.client.getLinkStatus(Date.now()).frozenMs).toBe(0);
+    vi.advanceTimersByTime(39_000);
+    expect(dead).toEqual([]);
+    vi.advanceTimersByTime(2_500);
+    expect(dead).toEqual(['link_dead']);
+  });
+
+  it('a stop longer than DISCONNECT_TIME is not discounted: a 60 s sleep still reads client_suspended at once', () => {
+    const s = workerSession();
+    s.ws.receive(serverMessage(2));
+    const { dead } = linkCheckOn(() => s.client.getLinkStatus(Date.now()));
+    vi.advanceTimersByTime(1000);
+    freeze(60_000);
+    vi.advanceTimersByTime(300);
+    expect(s.client.getLinkStatus(Date.now()).frozenMs).toBe(0);
+    expect(dead).toEqual(['client_suspended']);
+  });
+
+  it('AC1999 at character select: the production freezes do not end a live session', () => {
+    const s = session1999();
+    const keepalive = buildPacket1999({ sequence: 0, flags: 0x202, recipient: 0, time: 0 });
+    s.sock.deliver(keepalive);
+    const { dead } = linkCheckOn(() => s.conn.getLinkStatus(Date.now()));
+    productionFreezes();
+    expect(s.conn.getLinkStatus(Date.now()).secondsSinceLastPacket).toBeGreaterThan(40);
+    expect(dead).toEqual([]);
+    s.sock.deliver(keepalive);
+    for (let i = 0; i < 12; i++) { vi.advanceTimersByTime(5000); s.sock.deliver(keepalive); }
+    expect(dead).toEqual([]);
+    expect(s.disconnects()).toHaveLength(0);
+    // Its silence is still caught at 40 s on a running thread.
+    vi.advanceTimersByTime(41_000);
+    expect(dead).toEqual(['link_dead']);
+  });
+
+  it('ThreadStallClock.frozenSinceReceive: sums stops of FROZEN_GAP_MIN_MS..THREAD_STALL_MIN_MS after the last receive', () => {
+    const c = new ThreadStallClock();
+    c.reset(1000);
+    c.received(1000);
+    c.tick(1100);
+    c.tick(1100 + FROZEN_GAP_MIN_MS); // exactly the minimum: timers, not a stop
+    expect(c.frozenSinceReceive(1100 + FROZEN_GAP_MIN_MS)).toBe(0);
+    let t = 1100 + FROZEN_GAP_MIN_MS;
+    c.tick(t += 18_000);
+    expect(c.frozenSinceReceive(t)).toBe(18_000);
+    expect(c.frozenSinceReceive(t + 12_000)).toBe(30_000); // one still in progress counts
+    c.tick(t += 12_000);
+    c.tick(t += 50_000); // longer than THREAD_STALL_MIN_MS: `stall`, not this
+    expect(c.frozenSinceReceive(t)).toBe(30_000);
+    expect(c.frozenSinceReceive(t + 50_000)).toBe(30_000);
+    c.received(t);
+    expect(c.frozenSinceReceive(t)).toBe(0);
+    // A receive handed over before the first tick after a stop: that stop was before it.
+    c.received(t + 20_000);
+    c.tick(t + 20_100);
+    expect(c.frozenSinceReceive(t + 20_100)).toBe(0);
+    c.reset();
+    expect(c.frozenSinceReceive(10_000_000)).toBe(0);
+  });
+
+  it('linkSampleIsDead / linkDeadCause on the production numbers', () => {
+    // rxAgoMs 40734 + the page's 2 s snapshot age; the worker stopped >= 18669 + 11750 of it.
+    const prod = { connected: true, secondsSinceLastPacket: 42.7, stall: null, frozenMs: 30_419 };
+    expect(linkSampleIsDead(prod)).toBe(false);
+    expect(linkSampleIsDead({ ...prod, frozenMs: 0 })).toBe(true);
+    expect(linkDeadCause({ ...prod, frozenMs: 0 })).toBe('link_dead');
+    // Ran more than 40 s of the silence: the server's.
+    expect(linkSampleIsDead({ ...prod, secondsSinceLastPacket: 71 })).toBe(true);
+    expect(linkDeadCause({ ...prod, secondsSinceLastPacket: 71 })).toBe('link_dead');
+    // Past the cap whatever the stops: ours when the thread ran under 40 s of it.
+    expect(linkSampleIsDead({ ...prod, secondsSinceLastPacket: 80.1, frozenMs: 70_000 })).toBe(true);
+    expect(linkDeadCause({ ...prod, secondsSinceLastPacket: 80.1, frozenMs: 70_000 })).toBe('client_suspended');
+    expect(linkSampleIsDead({ ...prod, secondsSinceLastPacket: 80, frozenMs: 70_000 })).toBe(false);
+    // Not connected is dead as before.
+    expect(linkSampleIsDead({ connected: false, secondsSinceLastPacket: 0 })).toBe(true);
   });
 });

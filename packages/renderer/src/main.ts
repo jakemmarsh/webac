@@ -377,6 +377,7 @@ import { selectionQueryFor } from './ui/ToolbarSelection.js';
 import { PHYSICS_STATE_KEY, fadedMaterialVariant } from './models/ObjectTranslucency.js';
 import { decideUseObject, BF_VENDOR, usingItemEffects, USAGE_CONFIRMATION_TEXT, type UseSubject, COMPONENT_PACKS_DID_MAPPER_ID, isComponentPack, containedUseSubject, ownedUseSubject, type OwnedUseItem } from './input/UseObject.js';
 import { targetCompatibleWithObject } from './input/TargetCompatible.js';
+import { resolveUseTarget, type UseTargetObject, type UseTargetRecord } from './input/UseTargetObject.js';
 import { WorldRightClick } from './ui/WorldRightClick.js';
 import { applyLocalOptionEffects, applyToggledOptionEffect, LOCAL_EFFECT_OPTION_KEYS, type LocalOptionSinks } from './ui/LocalOptionEffects.js';
 import { formatAcTime } from './utils/formatAcTime.js';
@@ -4315,31 +4316,30 @@ async function main() {
    * target: ship GameActionUseWithTarget (sourceGuid + targetGuid, per
    * ACE GameActionUseWithTarget.cs) and disarm. Returns true when consumed.
    */
-  function consumePendingUseWithTarget(targetGuid: number, targetName: string, targetItemType: number): boolean {
+  function consumePendingUseWithTarget(targetGuid: number): boolean {
     if (!pendingUseWithTargetGuid || !sendGameAction) return false;
     const src = playerState.inventory.getItem(pendingUseWithTargetGuid);
     pendingUseWithTargetGuid = 0;
     updateWorldCursor(); // GAP.84 — disarm TargetedUse cursor immediately
     if (!src) return false;
+    // BUG.use-with-blank-target-name — the target's name, ItemType and ownership come from the one
+    // weenie the client keeps for it (GetWeenieObject), whatever gesture found it; an object the
+    // client does not know is refused silently, as retail's first check does (no line, no send).
+    const tgt = useTargetObjectFor(targetGuid);
     // INV-8 (every era) — ItemHolder::TargetCompatibleWithObject @ 00587520 / the 1999 one
     // @ 0x004e6630 (input/TargetCompatible.ts): the ownership, wield, trade and self checks, then
     // `source._targetType & target itemType` (BUG.weenie-targettype-discarded; 0 = no
     // restriction), each refusal a 0x1a line with nothing sent; a pass prints "Using the X
     // with the Y" / "… on <player>" before the request.
-    const tgtOwned = targetGuid === aceCharGuid || !!heldItemById(targetGuid);
-    const tgtObj = serverObjectManager?.getObject(targetGuid);
+    const srcName = getAppropriateName(src.name, src.pluralName, src.stackSize);
     const compat = targetCompatibleWithObject(
-      { name: src.name, useability: src.usable ?? 0, targetType: src.targetType ?? 0, ownedByPlayer: true },
-      {
-        guid: targetGuid, name: targetName, itemType: targetItemType, ownedByPlayer: tgtOwned,
-        isPlayer: targetGuid === aceCharGuid || ((tgtObj?.objectDescFlags ?? 0) & ObjectDescriptionFlag.Player) !== 0,
-        beingTraded: gameUI.tradeStateGuids().has(targetGuid),
-      },
+      { name: srcName, useability: src.usable ?? 0, targetType: src.targetType ?? 0, ownedByPlayer: true },
+      tgt && { ...tgt, beingTraded: gameUI.tradeStateGuids().has(tgt.guid) },
       aceCharGuid ?? 0, eraRules.useWithTargetText,
     );
-    gameUI.displayErrorText(compat.line);
-    if (!compat.ok) {
-      console.log(`[AC] UseWithTarget blocked client-side: src=0x${src.id.toString(16)} targetType=0x${(src.targetType ?? 0).toString(16)} tgt=0x${targetGuid.toString(16)} itemType=0x${targetItemType.toString(16)}: ${compat.line}`);
+    if (compat.line !== null) gameUI.displayErrorText(compat.line);
+    if (!compat.ok || !tgt) {
+      console.log(`[AC] UseWithTarget blocked client-side: src=0x${src.id.toString(16)} targetType=0x${(src.targetType ?? 0).toString(16)} tgt=0x${(targetGuid >>> 0).toString(16)} itemType=0x${(tgt?.itemType ?? 0).toString(16)}: ${compat.line ?? 'target not known'}`);
       return true; // gesture consumed (disarmed), nothing sent — retail parity
     }
     // RECON.craft-confirmations-and-gesture — the rest of ItemHolder::
@@ -4349,17 +4349,15 @@ async function main() {
     // success-chance option hands the question to the server
     // (TargetedUsageConfirmation_Salvage @ 005669f0). Yes sends
     // (TargetedUsageCallback @ 00565960).
-    const tgtFlags = playerState.inventory.getItem(targetGuid)?.objectDescFlags
-      ?? serverObjectManager?.getObject(targetGuid)?.objectDescFlags;
     const decision = targetAcquiredDecision(
-      { name: src.name, itemType: src.itemType, uiEffects: src.uiEffects },
-      { name: targetName, objectDescFlags: tgtFlags },
+      { name: srcName, itemType: src.itemType, uiEffects: src.uiEffects },
+      { name: tgt.name, objectDescFlags: tgt.objectDescFlags },
       gameUI.optionsSettings.useCraftingChanceOfSuccessDialog === true,
     );
     const send = sendGameAction;
     const sendUse = (how: string): void => {
       send(GameActionType.UseWithTarget, buildUseWithTargetPayload(src.id, targetGuid));
-      console.log(`[AC] Sent UseWithTarget (${how}): src=0x${src.id.toString(16)} "${src.name}" tgt=0x${targetGuid.toString(16)} "${targetName}"`);
+      console.log(`[AC] Sent UseWithTarget (${how}): src=0x${src.id.toString(16)} "${src.name}" tgt=0x${targetGuid.toString(16)} "${tgt.name}"`);
     };
     if (!eraRules.targetedUseConfirmations) {
       // INV-9 — the 1999 target completion (0x004e65c0) sends at once: no mana-stone or salvage question.
@@ -4399,7 +4397,7 @@ async function main() {
 
   /** Helper: select a target by guid and update HUD + name labels. */
   function selectTarget(obj: import('./world/ServerObjectManager.js').ServerObject): void {
-    consumePendingUseWithTarget(obj.guid, obj.name, obj.itemType);
+    consumePendingUseWithTarget(obj.guid);
     currentTargetGuid = obj.guid;
     let targetType: TargetType = radarColorToTargetType(obj.radarColor);
     if (targetType === 'item' && (obj.itemType & ItemType.Creature)) targetType = 'creature';
@@ -4557,7 +4555,7 @@ async function main() {
    */
   function selectSelfAction(): void {
     if (!myPlayerGuid) return;
-    if (pendingUseWithTargetGuid) { consumePendingUseWithTarget(myPlayerGuid, playerState.name || '', ItemType.Creature); return; }
+    if (pendingUseWithTargetGuid) { consumePendingUseWithTarget(myPlayerGuid); return; }
     selectGuid(myPlayerGuid);
     if (worldTargetModeController.current === 'examine') {
       worldTargetModeController.disarm();
@@ -4732,8 +4730,7 @@ async function main() {
       }
       if (found && 'ownGuid' in found) {
         selectionLighting.objectFound(found.ownGuid, SearchReason.Select, selectionNow());
-        const held = heldItemById(found.ownGuid);
-        consumePendingUseWithTarget(found.ownGuid, found.name, held ? held.itemType ?? 0 : ItemType.Creature);
+        consumePendingUseWithTarget(found.ownGuid);
         selectGuid(found.ownGuid);
         return;
       }
@@ -4745,7 +4742,7 @@ async function main() {
       selectionLighting.objectFound(serverHit?.guid ?? 0, SearchReason.Select, selectionNow());
       currentTargetGuid = selectionAfterFind(currentTargetGuid, serverHit?.guid ?? 0);
       if (serverHit) {
-        consumePendingUseWithTarget(serverHit.guid, serverHit.name, serverHit.itemType);
+        consumePendingUseWithTarget(serverHit.guid);
         // Determine type from radarColor (ACE RadarColor enum)
         let targetType: TargetType = radarColorToTargetType(serverHit.radarColor);
         if (targetType === 'item' && (serverHit.itemType & ItemType.Creature)) targetType = 'creature';
@@ -5271,27 +5268,44 @@ async function main() {
    * and the NAME_APPROPRIATE name. null = unknown object.
    */
   function spellTargetObjectFor(id: number): SpellTargetObject | null {
-    if (myPlayerGuid && id === myPlayerGuid) {
-      return {
-        isSelf: true, itemType: ItemType.Creature, stackSize: 0, isPlayer: true,
-        objectDescFlags: serverObjectManager?.playerDescFlags ?? ObjectDescriptionFlag.Player, petOwner: 0,
-        name: playerState.name || '',
-      };
-    }
-    const obj = serverObjectManager?.getObject(id);
-    if (obj) {
-      const flags = obj.objectDescFlags >>> 0;
-      return {
-        isSelf: false, itemType: obj.itemType, stackSize: obj.stackSize, isPlayer: (flags & ObjectDescriptionFlag.Player) !== 0,
-        objectDescFlags: flags, petOwner: obj.petOwner ?? 0, name: obj.name,
-      };
-    }
-    const held = heldItemById(id);
-    if (!held) return null;
+    // BUG.use-with-blank-target-name sweep — the same weenie lookup as a use-with target, so a
+    // corpse's or chest's item, a trade partner's or a vendor's is known here too (it was 'unknown',
+    // silently refused, while retail holds a weenie for each).
+    const o = useTargetObjectFor(id);
+    if (!o) return null;
+    const isSelf = !!myPlayerGuid && (id >>> 0) === (myPlayerGuid >>> 0);
+    const world = isSelf ? undefined : serverObjectManager?.getObject(id);
     return {
-      isSelf: false, itemType: held.itemType ?? 0, stackSize: held.stackSize, isPlayer: false,
-      objectDescFlags: held.objectDescFlags, petOwner: 0, name: held.name,
+      isSelf, itemType: o.itemType, stackSize: o.stackSize, isPlayer: o.isPlayer,
+      objectDescFlags: o.objectDescFlags, petOwner: world?.petOwner ?? 0,
+      // NAME_APPROPRIATE: a stack is refused before its name is read, so the singular stands.
+      name: o.name,
     };
+  }
+  /**
+   * BUG.use-with-blank-target-name — GetWeenieObject(id) as ItemHolder::TargetCompatibleWithObject
+   * @ 00587520 reads a use-with target (input/UseTargetObject.ts): the player, an owned item, then
+   * every other object the client keeps — the 3D world, a corpse's or chest's contents (kept with
+   * the open container and worldObjectRecords, never the ServerObjectManager), a trade partner's
+   * item and the vendor's merchandise. null = not known.
+   */
+  function useTargetObjectFor(id: number): UseTargetObject | null {
+    return resolveUseTarget(id, {
+      playerGuid: myPlayerGuid ?? aceCharGuid ?? 0,
+      playerName: playerState.name || worldCharacterName || '',
+      playerDescFlags: serverObjectManager?.playerDescFlags ?? ObjectDescriptionFlag.Player,
+      held: (g) => heldItemById(g),
+      others: [
+        (g) => serverObjectManager?.getObject(g),
+        (g) => worldObjectRecords.sourceOf(g) as UseTargetRecord | null,
+        (g) => openContainer.items().find((i) => i.guid >>> 0 === g),
+        (g) => gameUI.getTradeData().theirItems.find((i) => i.guid >>> 0 === g),
+        (g) => {
+          const v = activeVendorBuyItems.find((i) => i.guid >>> 0 === g);
+          return v && { name: v.name, pluralName: v.pluralName, stackSize: v.descStackSize, itemType: v.itemType, objectDescFlags: v.objectDescFlags };
+        },
+      ],
+    });
   }
   /** The player's own id (the main pack): the guid the pack column's top cell holds. */
   const isPlayerSelf = (id: number): boolean => id !== 0 && (id === aceCharGuid || id === myPlayerGuid);
@@ -5558,11 +5572,9 @@ async function main() {
       return true;
     }
     if (pendingUseWithTargetGuid) {
-      // A shortcut to the main pack targets the player (a kit on yourself), as the self-click path does.
-      if (isPlayerSelf(id)) { consumePendingUseWithTarget(id, playerState.name || '', ItemType.Creature); return true; }
-      const held = heldItemById(id);
-      const obj = held ? null : serverObjectManager?.getObject(id);
-      consumePendingUseWithTarget(id, held?.name ?? obj?.name ?? '', held?.itemType ?? obj?.itemType ?? 0);
+      // A shortcut to the main pack targets the player (a kit on yourself), as the self-click path does;
+      // an item cell of any list (pack, corpse, trade, vendor, fellow row) its own object.
+      consumePendingUseWithTarget(id);
       return true;
     }
     return false;
@@ -5710,7 +5722,7 @@ async function main() {
   // CORE.17.k.b.b.c.c.a.a.a — gmSlumlordUI::m_iidOwner: the slumlord whose
   // HouseProfile the dialog shows (OnObjectRangeExit compares against it).
   let activeSlumlordGuid = 0;
-  let activeVendorBuyItems: Array<{ guid: number; weenieClassId: number; name: string; price: number; burden: number; iconDid?: number; iconOverlayDid?: number; iconUnderlayDid?: number; uiEffects?: number; cooldownId?: number; cooldownDuration?: number; structure?: number; maxStructure?: number }> = [];
+  let activeVendorBuyItems: Array<{ guid: number; weenieClassId: number; name: string; pluralName?: string; itemType?: number; objectDescFlags?: number; descStackSize?: number; price: number; burden: number; iconDid?: number; iconOverlayDid?: number; iconUnderlayDid?: number; uiEffects?: number; cooldownId?: number; cooldownDuration?: number; structure?: number; maxStructure?: number }> = [];
   // FAITHFUL.470 — cache the vendor's merchandise filter + buyPrice
   // while the panel is open so the sell tab can be re-computed from
   // the latest inventory whenever it changes. ACE doesn't push a
@@ -8381,21 +8393,17 @@ async function main() {
           console.log(`[AC] Endowment use: no target selected for ${item.name}`);
           return;
         }
-        // TargetCompatibleWithObject(selectedID, item, false, true): INV-8's full check and line.
-        const selObj = serverObjectManager?.getObject(selectedGuid);
+        // TargetCompatibleWithObject(selectedID, item, false, true): INV-8's full check and line,
+        // the selection read from its weenie (BUG.use-with-blank-target-name: not the HUD strip's copy).
+        const tgt = useTargetObjectFor(selectedGuid);
         const compat = targetCompatibleWithObject(
-          { name: item.name, useability: item.usable ?? 0, targetType: item.targetType ?? 0, ownedByPlayer: true },
-          {
-            guid: selectedGuid, name: t.name, itemType: spellTargetObjectFor(selectedGuid)?.itemType ?? t.itemType ?? 0,
-            ownedByPlayer: selectedGuid === aceCharGuid || !!heldItemById(selectedGuid),
-            isPlayer: selectedGuid === aceCharGuid || ((selObj?.objectDescFlags ?? 0) & ObjectDescriptionFlag.Player) !== 0,
-            beingTraded: gameUI.tradeStateGuids().has(selectedGuid),
-          },
+          { name: getAppropriateName(item.name, item.pluralName, item.stackSize), useability: item.usable ?? 0, targetType: item.targetType ?? 0, ownedByPlayer: true },
+          tgt && { ...tgt, beingTraded: gameUI.tradeStateGuids().has(tgt.guid) },
           aceCharGuid ?? 0, eraRules.useWithTargetText,
         );
-        gameUI.displayErrorText(compat.line);
+        if (compat.line !== null) gameUI.displayErrorText(compat.line);
         if (!compat.ok) {
-          console.log(`[AC] Endowment use blocked client-side: src=0x${item.id.toString(16)} targetType=0x${(item.targetType ?? 0).toString(16)} tgt=0x${selectedGuid.toString(16)} itemType=0x${(t.itemType ?? 0).toString(16)}`);
+          console.log(`[AC] Endowment use blocked client-side: src=0x${item.id.toString(16)} targetType=0x${(item.targetType ?? 0).toString(16)} tgt=0x${selectedGuid.toString(16)} itemType=0x${(tgt?.itemType ?? 0).toString(16)}: ${compat.line ?? 'target not known'}`);
           return;
         }
         sendGameAction(GameActionType.UseWithTarget, buildUseWithTargetPayload(item.id, selectedGuid));
@@ -8727,6 +8735,8 @@ async function main() {
   const sessionLiveness = new SessionLiveness();
   // BUG.beforeunload-silent-disconnect — the session pagehide closes is a drop if the page comes back (bfcache).
   const pageHideClose = new PageHideClose();
+  // BUG.hidden-tab-close-read-as-drop — a socket close held under the hidden page is a drop once the player is back.
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') pageHideClose.visible(); });
   reportConnectAttempts(aceConnection, (account, password) => {
     sessionLiveness.noteConnectAttempt();
     pageHideClose.connectAttempt();
@@ -8773,6 +8783,7 @@ async function main() {
     },
     after: () => pageStorage('session').setItem('aceDisconnectTime', Date.now().toString()),
     closing: () => pageHideClose.closing(),
+    leaving: () => pageHideClose.leaving(),
     restored: (persisted) => {
       if (persisted) console.log('[AC] page restored from the back/forward cache');
       pageHideClose.shown(persisted);
@@ -9065,6 +9076,9 @@ async function main() {
    * resume, else the Disconnected screen (UnexpectedDrop.handleUnexpectedDrop).
    */
   const endDeadSession = (cause: LinkDeadCause, net = aceConnection.getDiagnostics()): void => {
+    // BUG.hidden-tab-close-read-as-drop — the socket's own close is held under the hidden page: it is
+    // this drop (with its real cause), handled once.
+    if (pageHideClose.release()) return;
     linkCheck.stop();
     // BUG.preworld-link-dead-finish — before the world the drop is a pre-world `dropped` with why
     // (link_dead / client_suspended + the diagnostics), as the socket's own close reports it
@@ -19951,7 +19965,11 @@ async function main() {
         }
 
         case 'disconnected':
-          pageHideClose.ended((pageHideDrop) => onSessionEnded(event, pageHideDrop));
+          // BUG.hidden-tab-close-read-as-drop — a socket closed under a hidden page waits a moment: the
+          // browser closes it first when it is unloading the page, and pagehide follows.
+          pageHideClose.ended((pageHideDrop) => onSessionEnded(event, pageHideDrop), {
+            socketDrop: event.endCause === 'socket_closed' && sessionDropped(event),
+          });
           break;
 
         case 'loginUnanswered': {

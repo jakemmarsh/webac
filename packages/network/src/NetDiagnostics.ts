@@ -66,6 +66,12 @@ export interface NetDiagnostics {
   /** Since the connection's service tick last ran, and its longest gap this session (a stalled worker clock). */
   tickAgoMs: number | null;
   tickGapMaxMs: number;
+  /**
+   * BUG.linkcheck-verdict-after-freeze — of the silence since the last receive,
+   * how long the service tick was stopped in shorter stops (ThreadStallClock.frozenSinceReceive):
+   * the part of rxAgoMs the 40 s link check does not count against the server.
+   */
+  rxFrozenMs?: number;
   /** Packets received / sent and bytes received this session. */
   rxPkts: number;
   txPkts: number;
@@ -183,7 +189,7 @@ export function msAgo(now: number, at: number): number | null {
 const HEX_RE = /^0x[0-9a-f]{1,8}$/;
 const MS_KEYS = [
   'rxAgoMs', 'rxMsgAgoMs', 'rxSeqAgoMs', 'nakAgoMs', 'srvNakAgoMs', 'txAgoMs', 'txSeqAgoMs', 'tickAgoMs', 'snapAgeMs',
-  'srvAckAgoMs', 'srvAckAdvAgoMs',
+  'srvAckAgoMs', 'srvAckAdvAgoMs', 'rxFrozenMs',
 ] as const;
 const COUNT_KEYS = [
   'rxAck', 'rxHigh', 'rxHeld', 'rxMissing', 'fragHeld', 'naks', 'txSeq', 'txUnacked', 'txPaced', 'txAckedBySrv',

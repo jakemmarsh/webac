@@ -94,6 +94,8 @@ export function closeSessionOnUnload(module: PlayerModuleFlush, connection: { di
  * closed): the reporters are live again (`reporter.pageRestored`) and
  * `restored` runs (main.ts: PageHideClose.shown, the drop's resume).
  * `closing` runs before the disconnect, only when a session is connected.
+ * `leaving` runs first on every pagehide (a socket close held under the hidden
+ * page was the page going, BUG.hidden-tab-close-read-as-drop).
  */
 export interface PageLeaveTarget {
   addEventListener(type: 'pagehide' | 'pageshow', listener: (ev: { persisted?: boolean }) => void): void;
@@ -107,10 +109,13 @@ export function installUnloadSessionClose(
     reporter?: { pageUnloading(): void; pageRestored?(): void } | null;
     after?: () => void;
     closing?: () => void;
+    /** Every pagehide, first, live session or not (main.ts: PageHideClose.leaving, BUG.hidden-tab-close-read-as-drop). */
+    leaving?: () => void;
     restored?: (persisted: boolean) => void;
   },
 ): void {
   win.addEventListener('pagehide', () => {
+    try { o.leaving?.(); } catch { /* never blocks the save */ }
     try { o.reporter?.pageUnloading(); } catch { /* reporting must never block the save */ }
     if (o.connection.isConnected !== false) {
       try { o.closing?.(); } catch { /* never blocks the save */ }

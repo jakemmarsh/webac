@@ -136,12 +136,16 @@ describe('PortalUseReporter: a used portal that does nothing', () => {
 
   it('reports a portal at most once a minute', () => {
     const g = rig();
+    // OBS.portal-use-late-reply — each failure's follow-up is not a failure: count failures only.
+    const failures = () => g.events.filter((e) => e.outcome !== 'portal_late_reply');
     for (let i = 0; i < 3; i++) { g.r.useAttempt(PORTAL_GUID, portalObj, true); g.run(PORTAL_REPLY_MS + 100); }
-    expect(g.events).toHaveLength(1);
+    expect(failures()).toHaveLength(1);
+    // The second try ended the first failure's late window.
+    expect(g.events.filter((e) => e.outcome === 'portal_late_reply')).toMatchObject([{ lateReplyType: 'new_try' }]);
     g.run(PORTAL_RATE_MS);
     g.r.useAttempt(PORTAL_GUID, portalObj, true);
     g.run(PORTAL_REPLY_MS + 100);
-    expect(g.events).toHaveLength(2);
+    expect(failures()).toHaveLength(2);
   });
 
   it('drops a watch whose portal is gone (nothing to report)', () => {

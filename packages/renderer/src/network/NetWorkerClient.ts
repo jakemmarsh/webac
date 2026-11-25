@@ -121,7 +121,7 @@ export class NetWorkerClient implements NetConnection {
     if (!link.connected) return { connected: false, secondsSinceLastPacket: 0 };
     const age = Math.min(Math.max(0, now - at), SNAPSHOT_EXTRAPOLATION_MAX_MS);
     const stall = link.stall ? { ...link.stall, agoMs: link.stall.agoMs + age } : null;
-    return { connected: true, secondsSinceLastPacket: link.secondsSinceLastPacket + age / 1000, stall };
+    return { connected: true, secondsSinceLastPacket: link.secondsSinceLastPacket + age / 1000, stall, frozenMs: link.frozenMs ?? 0 };
   }
 
   getPacketLossPercentage(): number { return this.snap.loss; }

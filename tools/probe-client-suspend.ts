@@ -37,6 +37,21 @@
  * 140 s drop. MODE=charselect-silent does the same at character select: the
  * character-select resume must land back there.
  *
+ * MODE=charselect-freeze (BUG.linkcheck-verdict-after-freeze) freezes the
+ * browser in pieces at character select while the server keeps talking: every
+ * Chromium process SIGSTOPped FREEZE1_S (18), running RUN_S (6), stopped
+ * FREEZE2_S (15) again, the relay left running (the bridge's packets wait in
+ * the stopped browser's socket, as production 2026-11-25's did). More than
+ * 40 s of wall-clock silence, under 40 s of it with the browser running: the
+ * page must NOT end the session (no "No server data", no new session, still at
+ * character select) over WATCH_S (20) after the second wake. Before the fix
+ * the link check's first tick after the wake read link_dead.
+ *
+ * MODE=hidden-close (BUG.hidden-tab-close-read-as-drop) closes the session's
+ * socket under a hidden tab at character select and leaves the page
+ * CLOSE_AFTER_MS (1800) later: pagehide must win (no drop handled, no resume).
+ * KEEP=1 keeps the page: the character-select resume must still run.
+ *
  *   AC_BASE=http://localhost:<vite>/ AC_ACCOUNT=testacjs3 PAUSE_S=50 npx tsx tools/probe-client-suspend.ts [--gpu]
  *   Another era: BRIDGE_PORT=<that era's bridge> AC_URL='http://localhost:<vite>/?ace&bridge=x&account=…&password=…&era=<id>'
  *
@@ -108,6 +123,14 @@ async function main(): Promise<void> {
       await runCharSelectSilent(page, lines, relay);
       return;
     }
+    if (MODE === 'charselect-freeze') {
+      await runCharSelectFreeze(page, lines);
+      return;
+    }
+    if (MODE === 'hidden-close') {
+      await runHiddenClose(page, lines, allLines, (r) => { relay = r; }, relay);
+      return;
+    }
     await page.goto(gameUrl({ cb: 'client-suspend' }), { waitUntil: 'load' });
     if (!(await waitForWorld(page, { timeoutMs: 240_000 }))) throw new Error('never entered the world');
     console.log('in world; settling 10 s');
@@ -139,9 +162,7 @@ async function main(): Promise<void> {
       process.exitCode = back && plateSeen ? 0 : 1;
       return;
     }
-    const pids = descendants(process.pid).filter((p) => {
-      try { return /chrom/i.test(execFileSync('ps', ['-o', 'comm=', '-p', String(p)]).toString()); } catch { return false; }
-    });
+    const pids = browserPids();
     // MODE=sleep-hidden (BUG.sleep-darkwake-resume-loop): another tab in front first, so the game tab is
     // hidden while the machine "sleeps" (a closed lid). The resume must hold until the game tab is shown.
     if (MODE === 'sleep-hidden') {
@@ -334,6 +355,110 @@ async function runCharSelectSilent(page: Page, lines: string[], relay: ChildProc
   const atCharSelect = await page.evaluate("window.__ac.gameUI.ui.currentScreen === 'character-select' && !window.__ac.gameUI.connectingScreenShown").catch(() => false);
   const pass = caught && newSession && !disconnected && !!atCharSelect;
   console.log(`RESULT charselect-silent caught=${caught} (after ${caughtAfterS} s) new_session=${newSession} at_char_select=${atCharSelect} disconnected=${disconnected} => ${pass ? 'PASS' : 'FAIL'}`);
+  process.exitCode = pass ? 0 : 1;
+}
+
+/** Every Chromium process this run launched (browser, renderer, GPU, network). */
+function browserPids(): number[] {
+  return descendants(process.pid).filter((p) => {
+    try { return /chrom/i.test(execFileSync('ps', ['-o', 'comm=', '-p', String(p)]).toString()); } catch { return false; }
+  });
+}
+
+/**
+ * MODE=charselect-freeze (BUG.linkcheck-verdict-after-freeze): at character
+ * select, the browser stopped twice (FREEZE1_S, RUN_S running, FREEZE2_S) while
+ * the relay and the server keep going. The wall-clock silence passes 40 s but
+ * the browser ran under 40 s of it: no link-check verdict, no new session,
+ * still at character select WATCH_S after the second wake.
+ */
+async function runCharSelectFreeze(page: Page, lines: string[]): Promise<void> {
+  const freeze1 = Number(process.env.FREEZE1_S ?? 18);
+  const run = Number(process.env.RUN_S ?? 6);
+  const freeze2 = Number(process.env.FREEZE2_S ?? 15);
+  const watch = Number(process.env.WATCH_S ?? 20);
+  const CHAR_LIST = /\[AC\] ACE: Got character list/;
+  const count = (re: RegExp): number => lines.filter((l) => re.test(l)).length;
+  await page.goto(gameUrl({ cb: 'charselect-freeze', autoenter: false }), { waitUntil: 'load' });
+  const listEnd = Date.now() + 240_000;
+  while (count(CHAR_LIST) === 0 && Date.now() < listEnd) await page.waitForTimeout(250);
+  if (count(CHAR_LIST) === 0) throw new Error('no character list');
+  // Let the session go quiet as an idle character select is, then stop the browser just after a receive.
+  await page.waitForTimeout(5000);
+  const listsBefore = count(CHAR_LIST);
+  const pids = browserPids();
+  const stopAll = (sig: 'SIGSTOP' | 'SIGCONT') => { for (const p of pids) try { process.kill(p, sig); } catch { /* gone */ } };
+  console.log(`at character select; browser (${pids.length} processes) stopped ${freeze1} s, running ${run} s, stopped ${freeze2} s; the server keeps talking`);
+  stopAll('SIGSTOP');
+  await new Promise((r) => setTimeout(r, freeze1 * 1000));
+  stopAll('SIGCONT');
+  await new Promise((r) => setTimeout(r, run * 1000));
+  stopAll('SIGSTOP');
+  await new Promise((r) => setTimeout(r, freeze2 * 1000));
+  stopAll('SIGCONT');
+  await page.waitForTimeout(watch * 1000);
+  const verdict = lines.find((l) => /No server data for \d+ s/.test(l));
+  const newSession = count(CHAR_LIST) > listsBefore;
+  const disconnected = lines.some((l) => /Disconnected screen/.test(l));
+  const atCharSelect = await page.evaluate("window.__ac.gameUI.ui.currentScreen === 'character-select' && !window.__ac.gameUI.connectingScreenShown").catch(() => false);
+  const pass = !verdict && !newSession && !disconnected && !!atCharSelect;
+  console.log(`RESULT charselect-freeze verdict=${verdict ? JSON.stringify(verdict.slice(0, 120)) : 'none'} new_session=${newSession} disconnected=${disconnected} at_char_select=${atCharSelect} => ${pass ? 'PASS' : 'FAIL'}`);
+  process.exitCode = pass ? 0 : 1;
+}
+
+/**
+ * MODE=hidden-close (BUG.hidden-tab-close-read-as-drop): at character select,
+ * the game tab hidden, the session's socket closed under it (the relay killed:
+ * the page sees 1006, as when the browser closed a page's socket before
+ * unloading it), then the page leaves CLOSE_AFTER_MS later (navigated away, so
+ * pagehide runs). The close must be held and pagehide must win: the page logs
+ * "… ms before pagehide: the page was going" and never handles the drop
+ * ("[AC] ACE: Disconnected", a resume, a new socket). KEEP=1 is the inverse
+ * (a real network drop on a hidden tab): the page stays, hidden, and the
+ * character-select resume must still bring a new session's list back within
+ * the hold (HIDDEN_CLOSE_HOLD_MS, 5 s) + the first attempt (2 s), the relay
+ * back NET_BACK_S after the cut.
+ */
+async function runHiddenClose(page: Page, lines: string[], allLines: string[], setRelay: (r: ChildProcess) => void, relay: ChildProcess): Promise<void> {
+  const CHAR_LIST = /\[AC\] ACE: Got character list/;
+  const count = (re: RegExp): number => lines.filter((l) => re.test(l)).length;
+  const waitLine = async (re: RegExp, ms: number, atLeast = 1): Promise<boolean> => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) { if (count(re) >= atLeast) return true; await page.waitForTimeout(250); }
+    return false;
+  };
+  const keep = process.env.KEEP === '1';
+  const closeAfterMs = Number(process.env.CLOSE_AFTER_MS ?? 1800);
+  await page.goto(gameUrl({ cb: 'hidden-close', autoenter: false }), { waitUntil: 'load' });
+  if (!(await waitLine(CHAR_LIST, 240_000))) throw new Error('no character list');
+  await page.waitForTimeout(5000);
+  await setGameTabHidden(page, true);
+  const listsBefore = count(CHAR_LIST);
+  const mark = allLines.length;
+  console.log(`at character select, tab ${await page.evaluate('document.visibilityState')}; closing the session's socket${keep ? '; the page stays (KEEP=1)' : `; leaving the page ${closeAfterMs} ms later`}`);
+  relay.kill('SIGKILL');
+  if (!keep) {
+    await page.waitForTimeout(closeAfterMs);
+    const handledBefore = allLines.slice(mark).some((l) => /\[AC\] ACE: Disconnected|resum|WebSocket connected to bridge/i.test(l));
+    await page.goto('about:blank').catch(() => {});
+    await new Promise((r) => setTimeout(r, 1000));
+    const after = allLines.slice(mark);
+    const won = after.some((l) => /before pagehide: the page was going/.test(l));
+    const handled = after.some((l) => /\[AC\] ACE: Disconnected|resum|WebSocket connected to bridge/i.test(l));
+    const pass = won && !handled && !handledBefore;
+    console.log(`RESULT hidden-close pagehide_won=${won} drop_handled=${handled} => ${pass ? 'PASS' : 'FAIL'}`);
+    process.exitCode = pass ? 0 : 1;
+    return;
+  }
+  await new Promise((r) => setTimeout(r, NET_BACK_S * 1000));
+  setRelay(spawn(process.execPath, ['-e', RELAY_JS], { stdio: 'ignore' }));
+  const handled = await waitLine(/\[AC\] ACE: Disconnected/, 15_000);
+  const newSession = handled && (await waitLine(CHAR_LIST, 60_000, listsBefore + 1));
+  await page.waitForTimeout(2000);
+  const disconnected = lines.some((l) => /Disconnected screen/.test(l));
+  const atCharSelect = await page.evaluate("window.__ac.gameUI.ui.currentScreen === 'character-select' && !window.__ac.gameUI.connectingScreenShown").catch(() => false);
+  const pass = handled && newSession && !disconnected && !!atCharSelect;
+  console.log(`RESULT hidden-close KEEP=1 drop_handled=${handled} new_session=${newSession} at_char_select=${atCharSelect} disconnected=${disconnected} => ${pass ? 'PASS' : 'FAIL'}`);
   process.exitCode = pass ? 0 : 1;
 }
 

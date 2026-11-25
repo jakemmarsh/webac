@@ -679,7 +679,7 @@ describe('OBS.dm-stall-tx-ring — which of our packets the server stopped ackno
     const big = fullDiag({
       rxAgoMs: 604_800_000, rxMsgAgoMs: 604_800_000, rxSeqAgoMs: 604_800_000, nakAgoMs: 604_800_000, srvNakAgoMs: 604_800_000,
       txAgoMs: 604_800_000, txSeqAgoMs: 604_800_000, tickAgoMs: 604_800_000, snapAgeMs: 604_800_000,
-      srvAckAgoMs: 604_800_000, srvAckAdvAgoMs: 604_800_000,
+      srvAckAgoMs: 604_800_000, srvAckAdvAgoMs: 604_800_000, rxFrozenMs: 604_800_000,
       rxFlags: '0xffffffff', rxOpcode: '0xffffffff', rxEvent: '0xffffffff',
       rxAck: 0xffffffff, rxHigh: 0xffffffff, rxHeld: 0xffffffff, rxMissing: 0xffffffff, fragHeld: 0xffffffff, naks: 0xffffffff,
       txSeq: 0xffffffff, txUnacked: 0xffffffff, txAckedBySrv: 0xffffffff, srvNaks: 0xffffffff, resent: 0xffffffff,

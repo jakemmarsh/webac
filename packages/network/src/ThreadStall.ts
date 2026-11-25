@@ -42,6 +42,16 @@ export const THREAD_STALL_MIN_MS = 40_000;
  */
 export const STALE_RECEIVE_GRACE_MS = 10_000;
 
+/**
+ * BUG.linkcheck-verdict-after-freeze — the shortest gap between two of the
+ * receiving thread's ticks that counts as the thread stopped, not just slow
+ * timers (a background worker ticks at 1 Hz at worst; its 3 s keepalive
+ * already starves past this). Stops from this up to THREAD_STALL_MIN_MS are
+ * summed per silence (ThreadStallClock.frozenSinceReceive): a machine that
+ * freezes in pieces, none long enough to be a stop of its own.
+ */
+export const FROZEN_GAP_MIN_MS = 5_000;
+
 /** The receiving thread's most recent stop: how long ago it ended and how long it lasted. */
 export interface ThreadStall {
   agoMs: number;
@@ -59,6 +69,14 @@ export interface LinkSample {
   connected: boolean;
   secondsSinceLastPacket: number;
   stall?: ThreadStall | null;
+  /**
+   * BUG.linkcheck-verdict-after-freeze — how much of the current silence the
+   * receiving thread spent stopped in stops of FROZEN_GAP_MIN_MS up to
+   * THREAD_STALL_MIN_MS (ThreadStallClock.frozenSinceReceive). A thread that
+   * is not running hears nothing, so that part of the silence is not the
+   * server's. Longer stops are `stall`, not this.
+   */
+  frozenMs?: number;
 }
 
 /** Fed by a connection's own tick loop; remembers its most recent stop longer than THREAD_STALL_MIN_MS. */
@@ -69,6 +87,9 @@ export class ThreadStallClock {
   /** Our last sent sequence when the latest stop ended (null: not tracked by this connection). */
   private sentAtWake: number | null = null;
   private answered = false;
+  /** Sum of the shorter stops (FROZEN_GAP_MIN_MS..THREAD_STALL_MIN_MS) since the last receive, and that receive's time. */
+  private frozenSinceRx = 0;
+  private lastReceiveAt = 0;
 
   /** A new session: forget past stops; `now` = the loop's start (0 = the first tick starts it). */
   reset(now = 0): void {
@@ -76,11 +97,13 @@ export class ThreadStallClock {
     this.stallEndAt = this.stallMs = 0;
     this.sentAtWake = null;
     this.answered = false;
+    this.frozenSinceRx = this.lastReceiveAt = 0;
   }
 
   /** One tick of the loop; `sentSeq` = the last sequence we have sent so far (for serverAcked). */
   tick(now: number, sentSeq?: number): void {
     const gap = this.lastTickAt ? now - this.lastTickAt : 0;
+    this.frozenSinceRx += this.frozenPart(now);
     this.lastTickAt = now;
     if (gap > THREAD_STALL_MIN_MS) {
       this.stallEndAt = now;
@@ -88,6 +111,33 @@ export class ThreadStallClock {
       this.sentAtWake = sentSeq ?? null;
       this.answered = false;
     }
+  }
+
+  /** A packet from the server was handled now: a new silence starts (BUG.linkcheck-verdict-after-freeze). */
+  received(now: number): void {
+    this.lastReceiveAt = now;
+    this.frozenSinceRx = 0;
+  }
+
+  /**
+   * BUG.linkcheck-verdict-after-freeze — how long, since the last receive,
+   * the thread was stopped in stops of FROZEN_GAP_MIN_MS..THREAD_STALL_MIN_MS
+   * (one still in progress counts). 0 before any.
+   */
+  frozenSinceReceive(now: number): number {
+    return this.frozenSinceRx + this.frozenPart(now);
+  }
+
+  /**
+   * The gap from the last tick to `now` when it is a shorter stop, and none
+   * when a receive came inside it: a packet handed over on waking, before the
+   * first tick, means the stop ended before that receive, and the silence
+   * starts after it.
+   */
+  private frozenPart(now: number): number {
+    const gap = this.lastTickAt ? now - this.lastTickAt : 0;
+    if (gap <= FROZEN_GAP_MIN_MS || gap > THREAD_STALL_MIN_MS || this.lastReceiveAt > this.lastTickAt) return 0;
+    return gap;
   }
 
   /** The server acknowledged our packets through `seq` (its AckSequence: the highest it received). */

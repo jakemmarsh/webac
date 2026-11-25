@@ -174,7 +174,7 @@
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 import type { MoveToPhase } from '../controllers/MoveToManager.js';
 
-export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_cancelled', 'portal_rim_brush', 'portal_used'] as const;
+export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_cancelled', 'portal_rim_brush', 'portal_used', 'portal_late_reply'] as const;
 export type PortalOutcome = typeof PORTAL_OUTCOMES[number];
 
 /** How the player tried the portal. */
@@ -329,6 +329,24 @@ export const PORTAL_REPLY_MS = 5_000;
 export const PORTAL_MAX_WAIT_MS = 30_000;
 export const PORTAL_RATE_MS = 60_000;
 export const MAX_FAILED_EVENTS = 20;
+/**
+ * OBS.portal-use-late-reply (2026-11-24) — how long the reporter keeps listening after a `portal_use_failed`.
+ * Coldeve (ACE), trace 43bdfafbf10157a2: a Gateway use got no movement, no UseDone, no refusal and no teleport
+ * in 5 s. Stock ACE answers every Use it processes at once (a MoveToPosition / TurnToObject for the player, or a
+ * UseDone; Player_Use.cs HandleActionUseItem, Player_Move.cs CreateMoveToChain), and its portal walk's UseDone
+ * comes only at arrival or the 15 s chain timeout (Player_Move.cs defaultMoveToTimeout). So a failure could not tell
+ * "the server answered late" from "the server never answered" (an exception in the handler, the Use lost). After
+ * the verdict the first server answer within LATE_REPLY_WINDOW_MS is reported as one `portal_late_reply`
+ * (LATE_REPLY_TYPES), or `none` when the window closes with nothing.
+ */
+export const LATE_REPLY_WINDOW_MS = 30_000;
+/**
+ * What ended the late window: the first UseDone, a server movement of the player (MoveTo / TurnTo), a teleport
+ * (PlayerTeleport, portal space), a WeenieError; `none` = nothing in LATE_REPLY_WINDOW_MS; `new_try` = the player
+ * tried a portal again first; `left_world` = the world was left first (sent at the next world entry: reset()).
+ */
+export const LATE_REPLY_TYPES = ['use_done', 'server_move', 'teleport', 'weenie_error', 'none', 'new_try', 'left_world'] as const;
+export type LateReplyType = typeof LATE_REPLY_TYPES[number];
 export const MAX_USED_EVENTS = 30;
 /** WeenieError codes kept per event. */
 export const MAX_ERROR_CODES = 4;
@@ -727,7 +745,26 @@ export interface PortalUsedEvent extends Ids {
   attempts: number;
 }
 
-export type PortalEvent = PortalUseFailedEvent | PortalUsedEvent;
+/** OBS.portal-use-late-reply — the follow-up to a `portal_use_failed`: what the server said after the verdict. */
+export interface PortalLateReplyEvent extends Ids {
+  outcome: 'portal_late_reply';
+  trigger: PortalTrigger;
+  wcid: number;
+  /** The failure's waitedMs (the try → its verdict). */
+  waitedMs: number;
+  lateReplyType: LateReplyType;
+  /** The try → the late answer, ms (the same clock as waitedMs); null when nothing answered (none / new_try / left_world). */
+  lateReplyMs: number | null;
+  /** The UseDone or WeenieError code, or the MovementType of a server movement; null otherwise. */
+  lateCode: number | null;
+  /**
+   * GameActions other than movement the page sent between the verdict and the late answer (a cast's UseDone or a "You're too busy!"
+   * answers its own action): 0 = the answer can only be this try's.
+   */
+  lateActions: number;
+}
+
+export type PortalEvent = PortalUseFailedEvent | PortalUsedEvent | PortalLateReplyEvent;
 
 export interface PortalUseReporterOptions {
   endpoint: string | null;
@@ -848,6 +885,8 @@ export class PortalUseReporter {
   /** BUG.portal-rim-brush-telemetry — the last two points of the path the server was told (prev → last is its latest swept move). */
   private prevSent: SentPoint | null = null;
   private lastSent: SentPoint | null = null;
+  /** OBS.portal-use-late-reply — a `portal_use_failed` still listening for a late answer. */
+  private late: { trigger: PortalTrigger; wcid: number; startedAt: number; verdictAt: number; waitedMs: number; actions: number } | null = null;
 
   constructor(private readonly opts: PortalUseReporterOptions) {
     this.now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
@@ -969,7 +1008,7 @@ export class PortalUseReporter {
    */
   serverMovement(type?: number, start?: { started: boolean; at: MovePoint | null; target: MovePoint | null }): void {
     const w = this.watch;
-    if (!w) return;
+    if (!w) { this.lateReply('server_move', type === undefined || !Number.isFinite(type) ? null : u32(type)); return; }
     const at = this.now();
     w.serverWalk = true;
     w.serverMoves++;
@@ -1013,6 +1052,7 @@ export class PortalUseReporter {
    * a Use of the watched portal is an attempt, counted there.
    */
   actionSent(actionType: number, useTarget?: number): void {
+    if (this.late) this.late.actions++;
     const w = this.watch;
     if (!w || w.firstSendAt === null) return;
     const t = u32(actionType);
@@ -1025,7 +1065,7 @@ export class PortalUseReporter {
   /** UseDone came back (0 = done). */
   useDone(code: number): void {
     const w = this.watch;
-    if (!w) return;
+    if (!w) { this.lateReply('use_done', u32(code)); return; }
     if (w.useDone === null || code !== 0) w.useDone = u32(code);
     const at = this.now();
     w.progressAt = at;
@@ -1038,6 +1078,7 @@ export class PortalUseReporter {
   weenieError(code: number): void {
     const w = this.watch;
     if (!w) {
+      this.lateReply('weenie_error', u32(code));
       if (PORTAL_REFUSAL_CODES.has(u32(code))) this.hold({ code: u32(code), chatTemplate: null, chatType: null });
       return;
     }
@@ -1061,6 +1102,7 @@ export class PortalUseReporter {
 
   /** PlayerTeleport: the server took us (portal space starts). The watch ends well; overlaps re-baseline. */
   teleported(): void {
+    this.lateReply('teleport', null);
     this.overlapping = null;
     this.early = null;
     this.prevSent = null;
@@ -1079,6 +1121,7 @@ export class PortalUseReporter {
 
   /** Entered or left the world (any way): a watch from the last session is dropped unreported. */
   reset(): void {
+    this.lateReply('left_world', null);
     this.watch = null;
     this.overlapping = null;
     this.early = null;
@@ -1099,6 +1142,7 @@ export class PortalUseReporter {
     moveTo?: { at: MovePoint; phase: MoveToPhase | null } | null;
   }): void {
     this.outbox.retry();
+    if (this.late && this.now() - this.late.verdictAt >= LATE_REPLY_WINDOW_MS) this.lateReply('none', null);
     const w = this.watch;
     if (!w) return;
     const st = typeof state === 'boolean' ? { serverWalking: state, playerMoving: false, dead: false, moveTo: null } : state;
@@ -1175,6 +1219,27 @@ export class PortalUseReporter {
       chainBreakTypes: [...w.chainBreakTypes],
       pk: pkOf(s.pk),
     });
+    if (outcome === 'portal_use_failed') {
+      this.late = { trigger: w.trigger, wcid: u32(s.wcid), startedAt: w.startedAt, verdictAt: at, waitedMs: Math.max(0, Math.round(at - w.startedAt)), actions: 0 };
+    }
+  }
+
+  /**
+   * OBS.portal-use-late-reply — end the late window of the last `portal_use_failed` with what came (or did not):
+   * one `portal_late_reply`. Nothing listening: nothing.
+   */
+  private lateReply(type: LateReplyType, code: number | null): void {
+    const l = this.late;
+    if (!l) return;
+    this.late = null;
+    const answered = type !== 'none' && type !== 'new_try' && type !== 'left_world';
+    this.post({
+      outcome: 'portal_late_reply', ...this.ids(), trigger: l.trigger, wcid: l.wcid, waitedMs: l.waitedMs,
+      lateReplyType: type,
+      lateReplyMs: answered ? Math.max(0, Math.round(this.now() - l.startedAt)) : null,
+      lateCode: answered ? code : null,
+      lateActions: l.actions,
+    });
   }
 
   /** online → retry; a hidden or leaving page sends what waits by beacon. */
@@ -1199,6 +1264,7 @@ export class PortalUseReporter {
     if (!snap) return;
     // A walk-in reaches only a portal that reports collisions (walkInActs); a Gateway must be used.
     if (trigger === 'walk_in' && !walkInActs(snap.physicsState)) return;
+    this.lateReply('new_try', null);
     this.watch = {
       guid: guid >>> 0, trigger, startedAt: at, progressAt: at, snap,
       useSent: sent, held, attempts: trigger === 'use' ? 1 : 0, overlapped: trigger === 'walk_in', closest: null,

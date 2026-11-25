@@ -480,11 +480,40 @@ export function characterErrorCodesHandled(): number[] {
 }
 
 /**
+ * BUG.linkcheck-verdict-after-freeze — the wall-clock silence past which a
+ * link is dead however much of it our own thread spent stopped
+ * (LinkSample.frozenMs): a machine that keeps freezing in pieces, or a timer
+ * loop slowed past FROZEN_GAP_MIN_MS while the server really is gone, still
+ * ends at twice DISCONNECT_TIME.
+ */
+export const LINK_DEAD_SILENCE_CAP_S = 2 * DISCONNECT_TIME_S;
+
+/** The silence our receiving thread was running for (the wall-clock silence less its shorter stops). */
+function runningSilenceS(sample: { secondsSinceLastPacket: number; frozenMs?: number }): number {
+  return sample.secondsSinceLastPacket - Math.max(0, sample.frozenMs ?? 0) / 1000;
+}
+
+/**
  * CPlayerSystem::UseTime's ServerDied trigger for one link sample:
  * `DISCONNECT_TIME < seconds since the last packet || !connected`.
+ *
+ * BUG.linkcheck-verdict-after-freeze — retail ran its network in the same
+ * frame as this check, so the check's clock and the network's stopped
+ * together. Ours receives on another thread (the worker), and its stops are
+ * time it heard nothing whatever the server did: 2026-11-25 production (The
+ * Tower, character select), a freezing machine stopped the worker ~19 s and
+ * ~12-15 s inside a 40.7 s silence, the verdict came 4 ms after it woke, and
+ * the bridge had forwarded the server's every packet of that window. So the
+ * 40 s is counted over the time the thread ran: the silence less its stops of
+ * FROZEN_GAP_MIN_MS..THREAD_STALL_MIN_MS (LinkSample.frozenMs). A stop longer
+ * than DISCONNECT_TIME is not discounted (`stall`, client_suspended, as
+ * before), and past LINK_DEAD_SILENCE_CAP_S of silence the link is dead
+ * regardless. A running thread (frozenMs 0) is judged exactly as retail.
  */
-export function linkSampleIsDead(sample: { connected: boolean; secondsSinceLastPacket: number }): boolean {
-  return !sample.connected || sample.secondsSinceLastPacket > DISCONNECT_TIME_S;
+export function linkSampleIsDead(sample: { connected: boolean; secondsSinceLastPacket: number; frozenMs?: number }): boolean {
+  if (!sample.connected) return true;
+  if (sample.secondsSinceLastPacket <= DISCONNECT_TIME_S) return false;
+  return runningSilenceS(sample) > DISCONNECT_TIME_S || sample.secondsSinceLastPacket > LINK_DEAD_SILENCE_CAP_S;
 }
 
 /**
@@ -498,6 +527,10 @@ export function linkSampleIsDead(sample: { connected: boolean; secondsSinceLastP
  * throttled hidden page whose worker kept running heard a really silent server.
  */
 export function linkDeadCause(sample: LinkSample): 'link_dead' | 'client_suspended' {
-  return sample.connected && silenceIsOwnStall(sample.stall, sample.secondsSinceLastPacket * 1000, DISCONNECT_TIME_S * 1000)
+  if (!sample.connected) return 'link_dead';
+  if (silenceIsOwnStall(sample.stall, sample.secondsSinceLastPacket * 1000, DISCONNECT_TIME_S * 1000)) return 'client_suspended';
+  // BUG.linkcheck-verdict-after-freeze — dead only by LINK_DEAD_SILENCE_CAP_S: the thread ran
+  // less than DISCONNECT_TIME of the silence, so its own stops are what the silence was.
+  return (sample.frozenMs ?? 0) > 0 && sample.secondsSinceLastPacket > DISCONNECT_TIME_S && runningSilenceS(sample) <= DISCONNECT_TIME_S
     ? 'client_suspended' : 'link_dead';
 }

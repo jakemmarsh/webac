@@ -29,6 +29,11 @@
  * connection's own 'disconnected' event (main.ts onSessionEnded), and a
  * sample from a session still in its handshake (ClientConnection: below
  * AuthConnected) reads not connected.
+ *
+ * The 40 s is counted over the time the receiving thread ran
+ * (BUG.linkcheck-verdict-after-freeze, ConnectionNotices.linkSampleIsDead):
+ * a machine that froze the worker in pieces under 40 s read a live session as
+ * link_dead on the first tick after it woke.
  */
 import type { LinkSample } from '@ac/network';
 import { linkDeadCause, linkSampleIsDead } from '../ui/ConnectionNotices.js';

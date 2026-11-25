@@ -11,7 +11,7 @@
 /** "ms ago" fields: 0..7 days, or null (never). */
 export const NET_DIAG_MS_FIELDS = [
   'rxAgoMs', 'rxMsgAgoMs', 'rxSeqAgoMs', 'nakAgoMs', 'srvNakAgoMs', 'txAgoMs', 'txSeqAgoMs', 'tickAgoMs', 'snapAgeMs',
-  'srvAckAgoMs', 'srvAckAdvAgoMs',
+  'srvAckAgoMs', 'srvAckAdvAgoMs', 'rxFrozenMs',
 ] as const;
 /** Counters and sequence numbers: 0..2^32-1. */
 export const NET_DIAG_COUNT_FIELDS = [

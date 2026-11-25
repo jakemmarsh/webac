@@ -20,6 +20,7 @@
 import type { LinkSample } from '@ac/network';
 import type { SessionLifecycle } from './SessionLifecycle.js';
 import { deadSessionCause, type LinkDeadCause } from './LinkCheck.js';
+import { HIDDEN_CLOSE_HOLD_MS } from './RetryPolicy.js';
 
 /**
  * BUG.ac1999-relogin-resume-pingpong — the session ended because the server
@@ -168,11 +169,32 @@ function attempt<T>(f: () => T, fallback: T): T {
  *  - the page's next connect forgets an older close (nothing came of it).
  */
 export class PageHideClose {
-  private state: 'none' | 'hidden' | 'restored' = 'none';
+  private state: 'none' | 'hidden' | 'restored' | 'hiddenDrop' = 'none';
   private held: (() => void) | null = null;
+  private holdTimer: unknown = null;
+  private heldSince = 0;
+
+  constructor(
+    private readonly env: HiddenCloseEnv = DEFAULT_HIDDEN_CLOSE_ENV,
+    private readonly holdMs: number = HIDDEN_CLOSE_HOLD_MS,
+  ) {}
 
   /** pagehide is closing a live session. Call BEFORE the disconnect: a close can report at once. */
-  closing(): void { this.state = 'hidden'; this.held = null; }
+  closing(): void { this.cancelHoldTimer(); this.state = 'hidden'; this.held = null; }
+
+  /**
+   * BUG.hidden-tab-close-read-as-drop — pagehide, whether or not a session is
+   * live (installUnloadSessionClose `leaving`). A socket close held under the
+   * hidden page (`ended` with `socketDrop`) was the page going away: it stays
+   * held as a pagehide close's end is, so nothing runs unless the page comes
+   * back from the back/forward cache (`shown`), where it runs as the drop.
+   */
+  leaving(): void {
+    if (this.state !== 'hiddenDrop') return;
+    this.cancelHoldTimer();
+    this.state = 'hidden';
+    console.log(`[AC] session socket closed ${Math.round(this.env.now() - this.heldSince)} ms before pagehide: the page was going, not a drop`);
+  }
 
   /** pageshow: true when the page came back from the back/forward cache. */
   shown(persisted: boolean): void {
@@ -184,18 +206,84 @@ export class PageHideClose {
 
   /**
    * The connection's 'disconnected' event: `handle(pageHideDrop)` now, later
-   * (held across a pagehide), or with `pageHideDrop` true when the close was
-   * ours on pagehide and the page has come back.
+   * (held across a pagehide, or under a hidden page), or with `pageHideDrop`
+   * true when the close was ours on pagehide and the page has come back.
+   *
+   * `socketDrop` (BUG.hidden-tab-close-read-as-drop): the session's socket
+   * closed under us (endCause 'socket_closed', not our close). While the page
+   * is hidden that can be the browser closing the socket of a page it is
+   * about to unload (production 2026-11-24, Edge: the bridge saw 1001 "going
+   * away", the page 1006, and pagehide came 1.6-2.0 s later), so the end is
+   * held for HIDDEN_CLOSE_HOLD_MS. A pagehide inside it wins (`leaving`):
+   * nothing resumes and no drop is reported. The page turning visible
+   * (`visible`), a send that needs the session (`release`) or the window
+   * running out hand it on as the drop it is, so a real network drop on a
+   * hidden tab still resumes. A visible page's close is never held.
    */
-  ended(handle: (pageHideDrop: boolean) => void): void {
+  ended(handle: (pageHideDrop: boolean) => void, opts: { socketDrop?: boolean } = {}): void {
     if (this.state === 'hidden') { this.held = () => handle(true); return; }
+    if (this.state === 'none' && opts.socketDrop === true && safeHidden(this.env)) {
+      this.state = 'hiddenDrop';
+      this.held = () => handle(false);
+      this.heldSince = this.env.now();
+      this.holdTimer = this.env.setTimeout(() => { this.holdTimer = null; this.release(); }, this.holdMs);
+      return;
+    }
+    // A later end while one is held (a stale socket's): ordinary, and the held one keeps its place.
+    if (this.state === 'hiddenDrop') { handle(false); return; }
     const drop = this.state === 'restored';
     this.state = 'none';
     handle(drop);
   }
 
+  /** The page is visible again: a socket close held under the hidden page is a drop, now. */
+  visible(): void { this.release(); }
+
+  /**
+   * Run a socket close held under the hidden page now; true when one ran. A
+   * send that finds the session dead (main.ts endDeadSession) calls it first,
+   * so the drop is handled once, with the socket's own cause.
+   */
+  release(): boolean {
+    if (this.state !== 'hiddenDrop') return false;
+    this.cancelHoldTimer();
+    const run = this.held;
+    this.held = null;
+    this.state = 'none';
+    run?.();
+    return run !== null;
+  }
+
+  /** A socket close is held under the hidden page (not yet handled as a drop). */
+  get holdingHiddenDrop(): boolean { return this.state === 'hiddenDrop'; }
+
   /** The page starts a connect: an earlier pagehide close no longer applies. */
-  connectAttempt(): void { this.state = 'none'; this.held = null; }
+  connectAttempt(): void { this.cancelHoldTimer(); this.state = 'none'; this.held = null; }
+
+  private cancelHoldTimer(): void {
+    if (this.holdTimer === null) return;
+    this.env.clearTimeout(this.holdTimer);
+    this.holdTimer = null;
+  }
+}
+
+/** PageHideClose's view of the page: its visibility, a clock and a timer (tests pass fakes). */
+export interface HiddenCloseEnv {
+  hidden(): boolean;
+  now(): number;
+  setTimeout(fn: () => void, ms: number): unknown;
+  clearTimeout(id: unknown): void;
+}
+
+const DEFAULT_HIDDEN_CLOSE_ENV: HiddenCloseEnv = {
+  hidden: () => typeof document !== 'undefined' && document.visibilityState === 'hidden',
+  now: () => Date.now(),
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (id) => clearTimeout(id as ReturnType<typeof setTimeout>),
+};
+
+function safeHidden(env: HiddenCloseEnv): boolean {
+  try { return env.hidden(); } catch { return false; }
 }
 
 /**

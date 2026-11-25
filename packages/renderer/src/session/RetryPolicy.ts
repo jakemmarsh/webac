@@ -64,6 +64,17 @@ export const RESUME_UNREACHABLE_GAPS_MS: readonly number[] = Object.freeze([2000
 export const RESUME_ONLINE_SETTLE_MS = 1000;
 
 /**
+ * A session socket that closes under a hidden page → its drop is held this long (or until the page
+ * is visible again, whichever comes first) before path 1 sees it; a `pagehide` inside the window
+ * means the page itself was going, and nothing resumes or reports a drop (UnexpectedDrop.PageHideClose,
+ * BUG.hidden-tab-close-read-as-drop). Production 2026-11-24 (Edge, end of retail, two pages hidden
+ * 16-27 min at character select): the browser closed the socket itself (the bridge saw 1001 "going
+ * away", the page 1006) and pagehide followed 1.6-2.0 s later. 5 s covers that with room; a real
+ * network drop on a hidden tab resumes at most this much later (its first attempt waits 2 s anyway).
+ */
+export const HIDDEN_CLOSE_HOLD_MS = 5000;
+
+/**
  * A drop within this long of a resume's success → continues that resume's attempt budget instead of
  * a fresh one → a spent budget shows the Disconnected screen (resume_ended loop_chain_spent).
  *

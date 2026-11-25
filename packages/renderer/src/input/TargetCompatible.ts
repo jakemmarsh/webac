@@ -17,6 +17,11 @@
  * The 1999 ItemHolder_TargetCompatibleWithObject @ 0x004e6630 is the same without step 2, with a
  * period on the four ownership lines (EraClientRules.useWithTargetText).
  *
+ * Before step 1 retail looks both objects up (ClientObjMaintSystem::GetWeenieObject) and returns
+ * false with no line when either is unknown, so a null target here is refused silently (`line`
+ * null): BUG.use-with-blank-target-name printed "Cannot use the X with the " for a target the
+ * caller could not name (input/UseTargetObject.ts resolves every kind the client knows).
+ *
  * Pre-fix ours tested only step 5, so it sent requests neither client sent and never printed the
  * "Using …" line. A _targetType of 0 (ACE sends none for a null property) still passes step 5 to
  * the server, as before (isUseTargetCompatible).
@@ -57,10 +62,14 @@ const fmt = (t: string, ...args: string[]): string => {
   return t.replace(/%s/g, () => args[i++] ?? '');
 };
 
-/** The verdict and its line: a refusal (`ok` false) or the "Using …" announcement. */
+/**
+ * The verdict and its line: a refusal (`ok` false) or the "Using …" announcement. `line` is null
+ * only for an unknown target (retail's `GetWeenieObject == 0 → return false`: nothing printed).
+ */
 export function targetCompatibleWithObject(
-  src: TargetCompatSource, tgt: TargetCompatTarget, playerGuid: number, text: UseWithTargetText,
-): { ok: boolean; line: string } {
+  src: TargetCompatSource, tgt: TargetCompatTarget | null, playerGuid: number, text: UseWithTargetText,
+): { ok: boolean; line: string | null } {
+  if (!tgt) return { ok: false, line: null };
   if (!src.ownedByPlayer) {
     const use = leastLimitedSourceUse(src.useability);
     if (use & USEABLE_CONTAINED) return { ok: false, line: fmt(text.mustOwn, src.name) };

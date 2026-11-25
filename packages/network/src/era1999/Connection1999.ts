@@ -284,6 +284,7 @@ export class Connection1999 implements NetConnection {
       connected: this.isConnected,
       secondsSinceLastPacket: this.lastPacketAt ? (now - this.lastPacketAt) / 1000 : 0,
       stall: this.isConnected ? this.stallClock.latest(now) : null,
+      frozenMs: this.isConnected ? this.stallClock.frozenSinceReceive(now) : 0,
     };
   }
   getPacketLossPercentage(): number { return this.received ? (100 * this.lost) / (this.received + this.lost) : 0; }
@@ -322,6 +323,7 @@ export class Connection1999 implements NetConnection {
       wsBuffered: this.ws?.bufferedAmount ?? 0,
       tickAgoMs: this.serviceTimer ? msAgo(now, this.lastServiceAt) : null,
       tickGapMaxMs: Math.round(d.tickGapMax),
+      rxFrozenMs: Math.round(this.stallClock.frozenSinceReceive(now)),
       rxPkts: d.rxPkts,
       txPkts: d.txPkts,
       rxBytes: d.rxBytes,
@@ -586,6 +588,7 @@ export class Connection1999 implements NetConnection {
     if (b.length < HEADER_SIZE_1999) return;
     const h = readHeader1999(b);
     this.lastPacketAt = Date.now();
+    this.stallClock.received(this.lastPacketAt);
     this.serverTime = h.time;
     this.diag.rxFlags = h.flags;
     this.diag.rxPkts++;

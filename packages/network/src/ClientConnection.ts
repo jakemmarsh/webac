@@ -709,6 +709,7 @@ export class ClientConnection {
       connected,
       secondsSinceLastPacket: connected ? Math.max(0, (now - this.lastPacketReceivedAt) / 1000) : 0,
       stall: connected ? this.stallClock.latest(now) : null,
+      frozenMs: connected ? this.stallClock.frozenSinceReceive(now) : 0,
     };
   }
 
@@ -758,6 +759,7 @@ export class ClientConnection {
       wsBuffered: this.ws?.bufferedAmount ?? 0,
       tickAgoMs: this.keepaliveTimer ? msAgo(now, this.lastServiceAt) : null,
       tickGapMaxMs: Math.round(this.diagTickGapMax),
+      rxFrozenMs: Math.round(this.stallClock.frozenSinceReceive(now)),
       rxPkts: this.diagRxPkts,
       txPkts: this.diagTxPkts,
       rxBytes: this.diagRxBytes,
@@ -927,6 +929,7 @@ export class ClientConnection {
     this.enterWorldGranted = false;
     this.awaitingServerConnect = false;
     this.lastPacketReceivedAt = Date.now();
+    this.stallClock.received(this.lastPacketReceivedAt);
     this.serverTimeoutEmitted = false;
     this.linkStatusAverages = new LinkStatusAverages();
     this.connectionData = new ConnectionData();
@@ -1656,6 +1659,7 @@ export class ClientConnection {
     // Dead-server detection: any inbound packet counts as traffic; re-arm the
     // one-shot 'serverTimeout' event when traffic resumes.
     this.lastPacketReceivedAt = Date.now();
+    this.stallClock.received(this.lastPacketReceivedAt); // BUG.linkcheck-verdict-after-freeze: a new silence
     this.serverTimeoutEmitted = false;
     this.diagRxAt = this.lastPacketReceivedAt;
     this.diagRxFlags = header.flags;
