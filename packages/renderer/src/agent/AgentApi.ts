@@ -36,6 +36,7 @@ import { type SocialRequest, isSocialRefusal, isSocialRefusalCode } from './soci
 import type { PlanSpell, RoutineProfile } from '@ac/shared';
 import { parseMapCoordsText, isPartialMapCoordsText, missileShot, getProjectileSpeed, DEFAULT_MAX_VELOCITY, MATERIAL_NAMES, EquipMask, WeenieError, weenieErrorText, type MissileShot } from '@ac/shared';
 import { RoutineEngine, type ItemPalette } from './RoutineEngine.ts';
+import type { AgentTickMarks } from '../telemetry/MainThreadCost.ts';
 import type { RoutineSyncResult } from './RoutineSync.ts';
 import { vtankExprHost, vtankExpressions } from './VtankExprHost.ts';
 import { CAST_NOT_LANDED, SPELL_NOT_KNOWN } from './macro/castReply.ts';
@@ -16141,11 +16142,11 @@ export class AgentApi {
    * death as an event (UtilityBelt's CharacterDeath game event reads it, MagToolsRuntime's ubRuntime.tick). Nothing here
    * sends a packet unless the player configured it, or writes storage.
    */
-  private idleTick(marks?: { routineStart(): void; routineEnd(): void }): void {
+  private idleTick(marks?: AgentTickMarks): void {
     this.idled = true;
     marks?.routineStart();
     this.routine.tick();
-    marks?.routineEnd();
+    marks?.routineEnd(this.routine.tickMs);
     const s = this.host.self();
     if (s) {
       if (s.dead && !this.lastDead) this.push('death', this.recordDeath(s));
@@ -16187,7 +16188,7 @@ export class AgentApi {
    * Step the running task and the watchers. main.ts calls this ~10×/s. `marks`: told just before and after the routine's
    * tick, so the frame's phase timing (telemetry/MainThreadCost.ts) can tell the routine's time from the rest.
    */
-  tick(marks?: { routineStart(): void; routineEnd(): void }): void {
+  tick(marks?: AgentTickMarks): void {
     const on = this.agentRunning();
     if (on !== this.running) {
       this.running = on;
@@ -16197,7 +16198,7 @@ export class AgentApi {
     this.settleCorpse();
     marks?.routineStart();
     this.routine.tick();
-    marks?.routineEnd();
+    marks?.routineEnd(this.routine.tickMs);
     const now = this.host.now();
     const t = this.task;
     // Death ends whatever you were doing: a walk or use must not carry on after the respawn.

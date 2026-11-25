@@ -15,8 +15,16 @@ import { GameMessageOpcode } from '@ac/network/GameMessageOpcode.js';
 import { type FileKey, fileKey } from './DatStore.js';
 
 export interface ArrivalContext {
-  /** Our character's guid (null before Enter World). */
+  /** Our character's guid (null before Enter World; kept after a logoff). */
   playerGuid: number | null;
+  /**
+   * A world session is under way (worldSessionLive). Outside one nothing is
+   * an arrival: the server's last messages about the character can land after
+   * its CharacterLogOff (ACE flushes a tick's UIQueue before its SmartboxQueue),
+   * and holding one raised the tunnel over character select with no world to
+   * end it (production 2026-11-25, BUG.logout-tunnel-over-charselect).
+   */
+  worldSession: boolean;
   /** A PlayerTeleport arrived and its destination UpdatePosition has not. */
   teleportPending: boolean;
 }
@@ -37,9 +45,31 @@ export interface AppearanceRefs {
 
 interface MinimalEvent { type: string; data?: unknown }
 
+/** What main.ts knows about the world session (SessionLifecycle + its own gameStarted). */
+export interface WorldSessionState {
+  /** The world is up (startGame ran; teardownWorldState clears it). */
+  gameStarted: boolean;
+  /** SessionLifecycle.inWorld: PlayerCreate arrived and no logoff / drop since. */
+  inWorld: boolean;
+  /** SessionLifecycle.enterWorldPending: an enter request is under way. */
+  enterWorldPending: boolean;
+}
+
+/**
+ * Whether the session is entering or in the world: from the enter request
+ * (CPlayerSystem::LogOnCharacter) until the world is torn down. A logoff
+ * request ends inWorld at once, but the world stays up (gameStarted) until the
+ * server's CharacterLogOff, so a teleport in those seconds still arrives. After
+ * the teardown only a new enter request starts one again; a bridge handover
+ * keeps the session, so nothing here changes across it.
+ */
+export function worldSessionLive(s: WorldSessionState): boolean {
+  return s.gameStarted || s.inWorld || s.enterWorldPending;
+}
+
 /** The destination cell id (0xXXYYCCCC) an event moves our player to, or null. */
 export function arrivalCellOf(event: MinimalEvent, ctx: ArrivalContext): number | null {
-  if (ctx.playerGuid === null) return null;
+  if (ctx.playerGuid === null || !ctx.worldSession) return null;
   if (event.type === 'objectCreate') {
     const d = event.data as { guid?: number; position?: { landblock: number } | null } | undefined;
     if (d && d.guid === ctx.playerGuid && d.position) return d.position.landblock >>> 0;

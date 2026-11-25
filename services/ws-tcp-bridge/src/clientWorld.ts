@@ -124,6 +124,8 @@ export interface ClientFirstMinuteEvent extends WorldIds {
   memGb?: number | null;
   /** PERF.slow-first-minute-diagnostics, second pass: which part of the page's code the minute went to. */
   phaseMs?: Partial<Record<typeof FRAME_PHASES[number], number>> | null;
+  /** PERF.routine-phase-split: phaseMs's 'routine' by part of the routine engine's tick (sent only when it had time). */
+  routinePhaseMs?: Partial<Record<typeof ROUTINE_PHASES[number], number>> | null;
   netHandlerMs?: number | null;
   streamHandlerMs?: number | null;
   longestHandlerMs?: number | null;
@@ -186,18 +188,21 @@ export const MAX_PHASE_KEYS = 10;
 /** A per-frame phase mean, ms, at most this. */
 export const MAX_PHASE_MS = 5000;
 
+/** The routine phase's parts (renderer telemetry/MainThreadCost.ts ROUTINE_PHASES): routinePhaseMs keeps only these keys. */
+export const ROUTINE_PHASES = ['scan', 'meta', 'plan', 'loot', 'nav', 'upkeep', 'other'] as const;
+
 /** Mean ms per frame by phase: whitelisted keys, numbers 0..MAX_PHASE_MS at 0.1 ms; null when not an object. */
-function phaseMs(v: unknown): Partial<Record<typeof FRAME_PHASES[number], number>> | null {
+function phaseMs<K extends string>(v: unknown, keys: readonly K[] = FRAME_PHASES as unknown as readonly K[]): Partial<Record<K, number>> | null {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
-  const out: Partial<Record<typeof FRAME_PHASES[number], number>> = {};
+  const out: Partial<Record<K, number>> = {};
   let n = 0;
   // The page's order (largest first) is kept; unknown keys are dropped.
   for (const k of Object.keys(v)) {
-    if (!(FRAME_PHASES as readonly string[]).includes(k)) continue;
+    if (!(keys as readonly string[]).includes(k)) continue;
     const x = (v as Record<string, unknown>)[k];
     if (typeof x !== 'number' || !Number.isFinite(x) || x < 0 || x > MAX_PHASE_MS) continue;
     if (n++ >= MAX_PHASE_KEYS) break;
-    out[k as typeof FRAME_PHASES[number]] = Math.round(x * 10) / 10;
+    out[k as K] = Math.round(x * 10) / 10;
   }
   return out;
 }
@@ -231,6 +236,7 @@ function perfFields(b: Record<string, unknown>): Partial<ClientFirstMinuteEvent>
   set('cores', uint(b.cores, 256));
   set('memGb', typeof b.memGb === 'number' && MEM_GB.includes(b.memGb) ? b.memGb : null);
   set('phaseMs', phaseMs(b.phaseMs));
+  set('routinePhaseMs', phaseMs(b.routinePhaseMs, ROUTINE_PHASES));
   set('netHandlerMs', uint(b.netHandlerMs, MINUTE_MS));
   set('streamHandlerMs', uint(b.streamHandlerMs, MINUTE_MS));
   set('longestHandlerMs', uint(b.longestHandlerMs, MINUTE_MS));

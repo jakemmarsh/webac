@@ -30,7 +30,7 @@
  */
 import { boundNetDiagnostics, NET_DIAG_END_CAUSES } from '@ac/network';
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
-import { FRAME_PHASES, PHASE, opToken } from './MainThreadCost.js';
+import { FRAME_PHASES, PHASE, ROUTINE_PHASES, opToken } from './MainThreadCost.js';
 
 /** How the player left (closed set; `still_in` = in the world at 60 s). */
 export const WORLD_EXITS = ['closed_tab', 'hidden', 'logout', 'disconnected', 'still_in'] as const;
@@ -178,6 +178,12 @@ export interface FirstMinuteEvent {
    * ms per measured frame by phase (MainThreadCost FRAME_PHASES), the ten largest, 0.1 ms; null when unmeasured.
    */
   phaseMs?: Partial<Record<typeof FRAME_PHASES[number], number>> | null;
+  /**
+   * PERF.routine-phase-split (2026-11-25: 46.8 ms a frame of 'routine' with no way to tell which part) — phaseMs's
+   * 'routine' by part of the routine engine's tick (MainThreadCost ROUTINE_PHASES), mean ms per measured frame, 0.1 ms,
+   * parts with time only. Present only when the minute had routine time; phaseMs.routine stays the total.
+   */
+  routinePhaseMs?: Partial<Record<typeof ROUTINE_PHASES[number], number>>;
   /** Synchronous main-thread ms in the minute: server-message handling (onSessionEvent) and streamed-DAT landings / rebuilds. */
   netHandlerMs?: number | null;
   streamHandlerMs?: number | null;
@@ -618,6 +624,7 @@ export class WorldReporter {
   private longTaskMax = 0;
   /** Phase sums over the measured frames (FRAME_PHASES order). */
   private readonly phaseSum = new Float64Array(FRAME_PHASES.length);
+  private readonly routinePartSum = new Float64Array(ROUTINE_PHASES.length);
   private phaseFrames = 0;
   private compileSum = 0;
   /** The program-creation total at the session's start and at the last measured frame (null: no source). */
@@ -778,6 +785,7 @@ export class WorldReporter {
     this.longTaskMs = this.longTasksSupported ? 0 : null;
     this.longTaskMax = 0;
     this.phaseSum.fill(0);
+    this.routinePartSum.fill(0);
     this.phaseFrames = 0;
     this.compileSum = 0;
     const programs = safe(this.src.programsCreated, null);
@@ -797,9 +805,10 @@ export class WorldReporter {
   /**
    * One animation frame (main.ts frameStep with draw). `worldDrawn`: this frame
    * drew the 3D world with no portal space over it. Counters only. `phases`:
-   * this frame's ms per FRAME_PHASES phase (MainThreadCost FramePhaseTimer.frameMs).
+   * this frame's ms per FRAME_PHASES phase (MainThreadCost FramePhaseTimer.frameMs). `routineParts`: its
+   * routine phase by part (ROUTINE_PHASES, FramePhaseTimer.routineMs).
    */
-  frame(now: number, worldDrawn: boolean, workMs?: number, phases?: ArrayLike<number>): void {
+  frame(now: number, worldDrawn: boolean, workMs?: number, phases?: ArrayLike<number>, routineParts?: ArrayLike<number>): void {
     if (this.enterAt === null || this.minuteSent) return;
     this.frames++;
     let created = false;
@@ -815,6 +824,12 @@ export class WorldReporter {
       for (let i = 0; i < FRAME_PHASES.length; i++) {
         const v = phases[i];
         if (v > 0 && Number.isFinite(v)) this.phaseSum[i] += v;
+      }
+      if (routineParts && routineParts.length === ROUTINE_PHASES.length) {
+        for (let i = 0; i < ROUTINE_PHASES.length; i++) {
+          const v = routineParts[i];
+          if (v > 0 && Number.isFinite(v)) this.routinePartSum[i] += v;
+        }
       }
       this.phaseFrames++;
       if (created) this.compileSum += Math.max(0, phases[PHASE.render] || 0) + Math.max(0, phases[PHASE.warmup] || 0);
@@ -1127,7 +1142,7 @@ export class WorldReporter {
   }
 
   /** PERF.slow-first-minute-diagnostics, second pass: where the minute's main thread went. */
-  private costFields(): Pick<FirstMinuteEvent, 'phaseMs' | 'netHandlerMs' | 'streamHandlerMs' | 'longestHandlerMs' | 'longestHandlerOp'
+  private costFields(): Pick<FirstMinuteEvent, 'phaseMs' | 'routinePhaseMs' | 'netHandlerMs' | 'streamHandlerMs' | 'longestHandlerMs' | 'longestHandlerOp'
     | 'longTaskMaxMs' | 'programs' | 'geometries' | 'textures' | 'programsCreated' | 'compileMs' | 'sceneObjects' | 'serverObjects'> {
     let phaseMs: FirstMinuteEvent['phaseMs'] = null;
     if (this.phaseFrames > 0) {
@@ -1137,6 +1152,13 @@ export class WorldReporter {
         .slice(0, MAX_PHASE_KEYS);
       phaseMs = Object.fromEntries(means);
     }
+    // The routine's parts: only when the minute had any (the event's shape is unchanged for everyone else).
+    let routinePhaseMs: FirstMinuteEvent['routinePhaseMs'];
+    if (this.phaseFrames > 0) {
+      const parts = ROUTINE_PHASES.map((p, i) => [p, Math.min(MAX_PHASE_MS, Math.round(this.routinePartSum[i] / this.phaseFrames * 10) / 10)] as const)
+        .filter(([, v]) => v > 0);
+      if (parts.length) routinePhaseMs = Object.fromEntries(parts);
+    }
     const m = this.meters;
     const longest = m ? (m.net.longestMs >= m.stream.longestMs ? m.net : m.stream) : null;
     const longestOp = longest && longest.longestOp !== null && longest.longestMs > 0
@@ -1145,6 +1167,7 @@ export class WorldReporter {
     const programsNow = safe(this.src.programsCreated, null);
     return {
       phaseMs,
+      ...(routinePhaseMs ? { routinePhaseMs } : {}),
       netHandlerMs: m ? count(m.net.totalMs, MINUTE_CAP_MS) : null,
       streamHandlerMs: m ? count(m.stream.totalMs, MINUTE_CAP_MS) : null,
       longestHandlerMs: longestOp !== null ? count(longest!.longestMs, MINUTE_CAP_MS) : null,

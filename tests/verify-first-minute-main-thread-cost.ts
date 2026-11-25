@@ -10,14 +10,17 @@
  * Drives the real WorldReporter, MainThreadCost meters, the streaming rebuild / retry paths and the
  * bridge sanitizer.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { WorldReporter, MAX_PHASE_KEYS, type WorldEvent, type FirstMinuteEvent } from '../packages/renderer/src/telemetry/WorldReporter';
 import {
-  FRAME_PHASES, PHASE, FramePhaseTimer, HandlerMeter, ProgramCreationCounter, connectionEventOp, opToken, streamHandlerCost, timedAgentTick,
+  FRAME_PHASES, PHASE, ROUTINE_PHASES, ROUTINE_PHASE, FramePhaseTimer, HandlerMeter, ProgramCreationCounter, connectionEventOp, opToken, streamHandlerCost, timedAgentTick,
 } from '../packages/renderer/src/telemetry/MainThreadCost';
+import { AgentApi } from '../packages/renderer/src/agent/AgentApi';
+import { ALL_MODULES_OFF } from '../packages/shared/src/routines/index';
+import { FakeHost } from './_harness/agentFake';
 import { rebuildOnArrival } from '../packages/renderer/src/dat/streaming/StreamingDats';
 import { runRetryingOnArrival } from '../packages/renderer/src/dat/streaming/RetryOnArrival';
-import { sanitizeClientWorld, FRAME_PHASES as BRIDGE_PHASES } from '../services/ws-tcp-bridge/src/clientWorld';
+import { sanitizeClientWorld, FRAME_PHASES as BRIDGE_PHASES, ROUTINE_PHASES as BRIDGE_ROUTINE_PHASES } from '../services/ws-tcp-bridge/src/clientWorld';
 import { CLIENT_PREWORLD_MAX_BODY } from '../services/ws-tcp-bridge/src/clientPreworld';
 
 function rig() {
@@ -354,5 +357,104 @@ describe('the bridge keeps the new fields, bounded', () => {
     for (const k of keys) delete older[k];
     const out = Object.keys(sanitizeClientWorld(older)!);
     for (const k of keys) expect(out).not.toContain(k);
+  });
+});
+
+describe('PERF.routine-phase-split — the routine phase by part of the routine engine\'s tick', () => {
+  // Production: 46.8 ms a frame of phaseMs.routine and no way to tell which part of the tick.
+  /** A clock that moves on every read, so every timed part of a real tick gets time. */
+  const ticking = () => { const c = { t: 0 }; return { c, read: () => (c.t += 0.25) } };
+  const sum = (a: ArrayLike<number>) => Array.from(a).reduce((x, y) => x + y, 0);
+
+  function drivenTick() {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const host = new FakeHost();
+    const api = new AgentApi(host);
+    const clk = ticking();
+    api.routine.tickClock = clk.read;
+    const ph = new FramePhaseTimer(clk.read);
+    // A nav + loot macro walking a route, as in the production report.
+    api.routine.start({
+      name: 'Loop', modules: { ...ALL_MODULES_OFF, looting: true, navigation: true }, initialState: 'Default', loot: [], buffSets: [],
+      states: [{ name: 'Default', rules: [] }], macro: true, settings: { EnableCombat: false, EnableNav: true, EnableLooting: true },
+      navRoute: 'loop', routes: [{ name: 'loop', mode: 'circular', points: ['0.0N, 0.0E', '0.1N, 0.1E'] }],
+    }, 'player');
+    return { host, api, ph };
+  }
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  it('a driven tick of the real engine: named parts, summing to at most the routine phase; the routine total unchanged', () => {
+    const { host, api, ph } = drivenTick();
+    const seen = new Float64Array(ROUTINE_PHASES.length);
+    for (let i = 0; i < 6; i++) {
+      host.t += 600;
+      ph.begin();
+      ph.mark(PHASE.tags);
+      timedAgentTick({ agent: api, ubOn: false }, (p) => ph.mark(p), undefined, (ms) => ph.addRoutine(ms));
+      expect(sum(ph.routineMs)).toBeGreaterThan(0);
+      expect(sum(ph.routineMs)).toBeLessThanOrEqual(ph.frameMs[PHASE.routine] + 1e-9);
+      // The engine's own record of its tick is what the frame took.
+      expect(sum(api.routine.tickMs)).toBeCloseTo(sum(ph.routineMs), 9);
+      ph.routineMs.forEach((v, k) => { seen[k] += v; });
+    }
+    // The macro step's parts are named: its look around, the loot check, navigation, the step's own remainder.
+    expect(seen[ROUTINE_PHASE.scan]).toBeGreaterThan(0);
+    expect(seen[ROUTINE_PHASE.loot]).toBeGreaterThan(0);
+    expect(seen[ROUTINE_PHASE.nav]).toBeGreaterThan(0);
+    expect(seen[ROUTINE_PHASE.other]).toBeGreaterThan(0);
+    api.routine.stop();
+  });
+
+  it('the first_minute event carries routinePhaseMs beside phaseMs (whose routine total is as before); the bridge keeps it', () => {
+    const { r, events, clock } = rig();
+    r.enteredWorld();
+    const parts = new Float64Array(ROUTINE_PHASES.length);
+    parts[ROUTINE_PHASE.scan] = 20; parts[ROUTINE_PHASE.nav] = 18.4; parts[ROUTINE_PHASE.loot] = 3; parts[ROUTINE_PHASE.plan] = 1.2; parts[ROUTINE_PHASE.other] = 4.2;
+    for (let i = 0; i < 100; i++) {
+      clock.t += 145;
+      r.frame(clock.t, true, 60, phases({ agent: 3, routine: 46.8, render: 1.5 }), i % 2 ? parts : new Float64Array(ROUTINE_PHASES.length));
+      if (i % 3 === 0) r.tick();
+    }
+    clock.t += 50_000; r.tick();
+    const ev = first(events);
+    expect(ev.phaseMs).toMatchObject({ routine: 46.8, agent: 3, render: 1.5 });
+    expect(ev.routinePhaseMs).toEqual({ scan: 10, plan: 0.6, loot: 1.5, nav: 9.2, other: 2.1 });
+    expect(Object.values(ev.routinePhaseMs!).reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(ev.phaseMs!.routine!);
+    expect(sanitizeClientWorld(ev)).toEqual(ev);
+    // Bounded like phaseMs: known parts only, 0..MAX, 0.1 ms; an older page's event gets none added.
+    const bad = sanitizeClientWorld({ ...ev, routinePhaseMs: { scan: 3.04, render: 9, evil: 1, nav: -1, loot: 1e9 } }) as FirstMinuteEvent;
+    expect(bad.routinePhaseMs).toEqual({ scan: 3 });
+    const { routinePhaseMs: _, ...older } = ev;
+    expect(Object.keys(sanitizeClientWorld(older)!)).not.toContain('routinePhaseMs');
+  });
+
+  it('no routine time in the minute (no automation, or an older frame call): the event\'s shape is unchanged', () => {
+    for (const routineParts of [undefined, new Float64Array(ROUTINE_PHASES.length)]) {
+      const { r, events, clock } = rig();
+      r.enteredWorld();
+      for (let i = 0; i < 100; i++) { clock.t += 145; r.frame(clock.t, true, 60, phases({ render: 3 }), routineParts); if (i % 3 === 0) r.tick(); }
+      clock.t += 50_000; r.tick();
+      const ev = first(events);
+      expect(ev.phaseMs).toEqual({ render: 3 });
+      expect(ev).not.toHaveProperty('routinePhaseMs');
+    }
+  });
+
+  it('the renderer and the bridge agree on the part names', () => {
+    expect([...BRIDGE_ROUTINE_PHASES]).toEqual([...ROUTINE_PHASES]);
+  });
+
+  it('the largest event with every part at its bound still fits the body limit', () => {
+    const { r, events, clock } = rig();
+    r.enteredWorld();
+    for (let i = 0; i < 100; i++) { clock.t += 145; r.frame(clock.t, true, 60, phases({ render: 3 })); if (i % 3 === 0) r.tick(); }
+    clock.t += 50_000; r.tick();
+    const largest = {
+      ...first(events), gpuName: 'x'.repeat(96), longestHandlerOp: 'x'.repeat(24), net: undefined,
+      phaseMs: Object.fromEntries(FRAME_PHASES.slice(0, 10).map((p) => [p, 4999.9])),
+      routinePhaseMs: Object.fromEntries(ROUTINE_PHASES.map((p) => [p, 4999.9])),
+    };
+    expect(JSON.stringify(largest).length).toBeLessThan(CLIENT_PREWORLD_MAX_BODY);
   });
 });

@@ -149,6 +149,11 @@ import type { AgentScreen, AgentSelf } from './agent/types.js';
 
 /** The agent's tap on every UseDone (its WeenieError code; 0 = done), set when the agent API is on. */
 let agentUseDoneTap: ((code: number) => void) | null = null;
+/**
+ * The routine engine's login boundaries (BUG.macro-runs-across-character-change), set when the agent API is on: a
+ * deliberate logout, and each world entry with whether it is the automatic resume (RoutineEngine.loggedOut / enteredWorld).
+ */
+let agentLoginTap: { loggedOut(): void; enteredWorld(character: number | null, resumed: boolean): void } | null = null;
 /** Each skill's spell line named otherwise (spellFamilies.skillSpellLines), built from the spell table on first ask. */
 let agentSkillLines: Map<string, { skill: string; line: string }> | null = null;
 /** The agent's tap on every AttackDone (its WeenieError code), set when the agent API is on. */
@@ -509,7 +514,7 @@ import { datMissEpoch, noDatMissSince, onDatMissResolved } from '@ac/dat-parser/
 import { CellGate, GatedEventQueue, PrefetchStatus, settleBurst } from './dat/streaming/PortalSpaceGate.js';
 import { GameplayUiShow } from './session/GameplayUiShow.js';
 import { skyObjectRoots } from './dat/streaming/DatClosure.js';
-import { appearanceRoots, arrivalCellOf, queuedObjectRoots } from './dat/streaming/ArrivalEvents.js';
+import { appearanceRoots, arrivalCellOf, queuedObjectRoots, worldSessionLive } from './dat/streaming/ArrivalEvents.js';
 import { CASE_VERBATIM_RETRY_DELAY_MS, RESUME_HEALTHY_MS, RESUME_PAGE_CAP, RESUME_PAGE_CAP_WINDOW_MS, RESUME_SILENT_AGAIN_WINDOW_MS } from './session/RetryPolicy.js';
 
 // BUG.ui-text-blank-iosurface-exhaustion — CPU-backed 2D canvases before any UI exists.
@@ -6155,6 +6160,9 @@ async function main() {
     if (eraRules.worldEntryVersionLine) gameUI.addSystemMessage(eraRules.worldEntryVersionLine, chatColorFor(ChatMessageType.Broadcast), ChatMessageType.Broadcast);
     drainHandover.onEnteredWorld();
     worldReporter?.enteredWorld(worldResumePending);
+    // A run carries on through the automatic resume of its own character; any other entry is a new login, where
+    // VirindiTank's macro starts off (RoutineEngine.enteredWorld). After the session start, so its stop is in this summary.
+    try { agentLoginTap?.enteredWorld(aceCharGuid, worldResumePending); } catch (e) { console.warn('[AC] routine world-entry check threw', e); }
     portalUseReporter?.reset();
     worldResumePending = false;
     // CORE.17.k — the link check (Link Indicator + DISCONNECT_TIME): already running since this
@@ -8457,7 +8465,7 @@ async function main() {
   // AGENT.hosted-mcp-connector: the chat side of pairing Claude (set where the tab relay is built).
   let pairingChat: ((line: string) => boolean) | null = null;
   // The agent API's tick (every 100 ms), run from the frame step once the agent starts.
-  let agentFrameTick: ((mark: (phase: number) => void) => void) | null = null;
+  let agentFrameTick: ((mark: (phase: number) => void, routineParts?: (ms: ArrayLike<number>) => void) => void) | null = null;
   let connectUrl = urlLogin.server ? bridgeUrlWithServer(bridgeUrl, urlLogin.server) : bridgeUrl;
   /** The launcher world's name for the World box (null: the server's own ServerName). */
   let launcherWorldName: string | null = null;
@@ -8850,6 +8858,13 @@ async function main() {
   // session/SessionLifecycle.ts for the ACE Session.cs anchoring.
   const sessionLifecycle = new SessionLifecycle();
   resumingAfterDrop = () => sessionLifecycle.resumingAfterDrop;
+  /**
+   * BUG.logout-tunnel-over-charselect — entering or in the world (ArrivalEvents.worldSessionLive).
+   * Outside one, the old character's late teleport messages are not arrivals and not teleports.
+   */
+  const inWorldSession = (): boolean => worldSessionLive({
+    gameStarted, inWorld: sessionLifecycle.inWorld, enterWorldPending: sessionLifecycle.enterWorldPending,
+  });
   // UX.chargen-resume — the chargen draft a dropped connection leaves (session/ChargenResume.ts):
   // this tab's sessionStorage, keyed by world + account + era, never the password.
   const chargenDrafts = new ChargenDraftStore(pageStorage('session'));
@@ -10806,6 +10821,14 @@ async function main() {
         serverObjectManager!.updatePosition(data);
       },
       onPlayerTeleport: () => {
+        // BUG.logout-tunnel-over-charselect — ACE sends a tick's UIQueue (CharacterLogOff,
+        // CharacterList) before its SmartboxQueue, so a teleport begun in the logoff's last tick
+        // lands at character select. No world is left to arrive in: pendingTeleport would
+        // outlive the teardown into the next login's first position update.
+        if (!inWorldSession()) {
+          console.log('[AC] ACE: PlayerTeleport outside a world session — ignored');
+          return;
+        }
         loginCompleteOutstanding = true;
         // Server teleported us — increment teleport sequence and flag for position processing
         if (movementSync) {
@@ -13573,6 +13596,8 @@ async function main() {
         // SessionLifecycle logout intent keeps auto-enter from
         // immediately re-entering.
         sessionLifecycle.noteLoggedOut();
+        // VirindiTank's macro ends with the login (RoutineEngine.loggedOut): stopped before the session's summary goes.
+        try { agentLoginTap?.loggedOut(); } catch (e) { console.warn('[AC] routine logout stop threw', e); }
         worldReporter?.left('logout');
         gameUI.noteLogOffExecuted(); // ExecuteLogOff: logOffRequested = false
         magTools?.loggedOut();
@@ -19117,6 +19142,7 @@ async function main() {
         }
         addSystemMessage(text, color, type, targetWindowId, speech, preset);
       };
+      agentLoginTap = { loggedOut: () => agentApi.routine.loggedOut(), enteredWorld: (c, resumed) => agentApi.routine.enteredWorld(c, resumed) };
       agentAttackDoneTap = (code) => agentApi.pushAttackDone(code);
       agentMeleeSentTap = (h) => agentApi.noteMeleeSent(h);
       agentWeenieErrorTap = (code) => agentApi.pushWeenieError(code);
@@ -19130,7 +19156,7 @@ async function main() {
         const err = e as Error | null;
         errorReporter?.report('error', `automation ${part} tick: ${String(err?.message ?? e)}`, { stack: err?.stack ?? null });
       };
-      agentFrameTick = (mark) => timedAgentTick({ agent: agentApi, ub: ubRuntime, ubOn: gameUI.automationAvailable, mag: magTools }, mark, agentTickFault);
+      agentFrameTick = (mark, routineParts) => timedAgentTick({ agent: agentApi, ub: ubRuntime, ubOn: gameUI.automationAvailable, mag: magTools }, mark, agentTickFault, routineParts);
       // The routine engine catches its own step's faults (it stops the run and says why in chat); reported the same way.
       agentApi.routine.onFault = (e) => agentTickFault('routine', e);
       // AGENT.automation-panel — the player's surface over the same engine: the Automation panel
@@ -19685,6 +19711,13 @@ async function main() {
         case 'objectCreate': {
           const obj = event.data as CreateObjectData;
           if (!obj) break;
+          // BUG.logout-tunnel-over-charselect — a CreateObject outside a world session is the
+          // ended one's (ACE's SmartboxQueue goes out after the UIQueue's CharacterLogOff): the
+          // teardown cleared the objects, and one kept now would sit in the next login's world.
+          if (!inWorldSession()) {
+            console.log(`[AC] objectCreate 0x${(obj.guid >>> 0).toString(16)} outside a world session — ignored`);
+            break;
+          }
           // The weenie now exists (AttemptSendLoginCompleteNotification @ 345886).
           loginCompleteNotifier.noteObjectCreated(obj.guid);
           console.log(`[AC] objectCreate event: guid=0x${obj.guid.toString(16)} name="${obj.name}" hasPos=${!!obj.position} aceCharGuid=0x${(aceCharGuid ?? 0).toString(16)}`);
@@ -20244,7 +20277,7 @@ async function main() {
       gateFor: (e) => {
         const uiSd = streamingDats, worldSd = worldStreamingDats;
         if (!uiSd && !worldSd) return null;
-        const dest = arrivalCellOf(e, { playerGuid: aceCharGuid, teleportPending: pendingTeleport });
+        const dest = arrivalCellOf(e, { playerGuid: aceCharGuid, teleportPending: pendingTeleport, worldSession: inWorldSession() });
         if (dest === null) return null;
         // Login also waits for the player's model and the HUD's layout art (the HUD renders when the hold releases).
         const login = e.type === 'objectCreate';
@@ -20826,6 +20859,8 @@ async function main() {
    */
   const framePhases = new FramePhaseTimer();
   const frameMark = (phase: number): void => framePhases.mark(phase);
+  /** PERF.routine-phase-split — the routine tick's parts (ROUTINE_PHASES), added to the frame's. */
+  const frameRoutineParts = (ms: ArrayLike<number>): void => framePhases.addRoutine(ms);
 
   /** One frame of the game; `draw` false runs everything but the 3D draw (the background beat). */
   function frameStep(draw: boolean, frameTime?: number) {
@@ -20838,7 +20873,7 @@ async function main() {
     if (draw) { updateNametags(now); goArrow?.frame(); }
     framePhases.mark(PHASE.tags);
     // The automation tick marks its own phases (agent, routine, ub, mag).
-    if (agentFrameTick && now - agentTickAt >= 100) { agentTickAt = now; agentFrameTick(frameMark); }
+    if (agentFrameTick && now - agentTickAt >= 100) { agentTickAt = now; agentFrameTick(frameMark, frameRoutineParts); }
     portalUseCheck(now);
     const dt = Math.max(0, now - lastTime) / 1000;
     lastTime = now;
@@ -21998,7 +22033,7 @@ async function main() {
     });
     // RELEASE.first-minute — counters only (WorldReporter.frame); the world counts as drawn once no portal space covers it.
     const frameWorkMs = performance.now() - workStart;
-    if (draw) worldReporter?.frame(now, gameStarted && !gameUI.portalSpaceCovering, frameWorkMs, framePhases.frameMs);
+    if (draw) worldReporter?.frame(now, gameStarted && !gameUI.portalSpaceCovering, frameWorkMs, framePhases.frameMs, framePhases.routineMs);
     // PERF.render-adapt — dynamic resolution measures only frames that drew the world in a visible tab;
     // the frame's CPU work tells it when the CPU, not the pixel count, sets the frame (PERF.render-adapt-cpu-bound).
     if (draw) {

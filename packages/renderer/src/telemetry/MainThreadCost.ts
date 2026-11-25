@@ -43,10 +43,30 @@ export const FRAME_PHASES = [
 export type FramePhase = typeof FRAME_PHASES[number];
 export const PHASE: { readonly [K in FramePhase]: number } = Object.fromEntries(FRAME_PHASES.map((p, i) => [p, i])) as { [K in FramePhase]: number };
 
+/**
+ * PERF.routine-phase-split (2026-11-25) — the 'routine' phase split by the part of the routine engine's tick
+ * (RoutineEngine.tick) that spent it. Production showed 46.8 ms a frame of 'routine' with no way to tell which part.
+ * The first_minute event carries them as routinePhaseMs beside phaseMs (whose 'routine' total stays as it was).
+ * Each part is the synchronous time of that part of the step; the actions it starts run later, outside the tick.
+ */
+export const ROUTINE_PHASES = [
+  'scan',     // the macro's look at what is around (AgentApi.look: monsters, corpses, ranges)
+  'meta',     // the meta's rule check (dryRun: every rule's conditions in the current state)
+  'plan',     // VirindiTank's planners: combat, buffs, recharge, helpers, peace mode (VtMacro.decide and the rest)
+  'loot',     // the corpse book, kills to loot, salvage, autostack / autocram
+  'nav',      // navigation: following a leader, the nav idle watch, why nav waits, the next leg of the route
+  'upkeep',   // the stand-by profile (Run Macro off) and a paused run's upkeep (M. Charges When Off)
+  'other',    // the rest of the step (its gates, death, the watchdog, starting the chosen action)
+] as const;
+export type RoutinePhase = typeof ROUTINE_PHASES[number];
+export const ROUTINE_PHASE: { readonly [K in RoutinePhase]: number } = Object.fromEntries(ROUTINE_PHASES.map((p, i) => [p, i])) as { [K in RoutinePhase]: number };
+
 /** One frame's phase times: begin() at the frame's start, mark(phase) at the end of each phase. */
 export class FramePhaseTimer {
   /** This frame's ms per phase (FRAME_PHASES order); valid until the next begin(). */
   readonly frameMs = new Float64Array(FRAME_PHASES.length);
+  /** This frame's routine time by part (ROUTINE_PHASES order; inside frameMs[PHASE.routine]); valid until the next begin(). */
+  readonly routineMs = new Float64Array(ROUTINE_PHASES.length);
   /** Frames begun so far: a reader sampling frameMs once per animation frame (tools/measure-perf.ts) tells a new frame from one it already counted. */
   frames = 0;
   private last = 0;
@@ -55,7 +75,14 @@ export class FramePhaseTimer {
   begin(at: number = this.clock()): void {
     this.frames++;
     this.frameMs.fill(0);
+    this.routineMs.fill(0);
     this.last = at;
+  }
+
+  /** A routine tick's ms by part (RoutineEngine.tickMs), added to this frame's. */
+  addRoutine(ms: ArrayLike<number>): void {
+    const n = Math.min(ms.length, this.routineMs.length);
+    for (let i = 0; i < n; i++) { const v = ms[i]; if (v > 0 && Number.isFinite(v)) this.routineMs[i] += v; }
   }
 
   /** The time since the previous mark (or begin) belongs to `phase`. */
@@ -66,13 +93,20 @@ export class FramePhaseTimer {
   }
 }
 
+/**
+ * Told just before and after the routine engine's tick inside the agent API's tick (AgentApi.tick). `routineEnd`
+ * gets that tick's ms by part (ROUTINE_PHASES order: RoutineEngine.tickMs).
+ */
+export interface AgentTickMarks { routineStart(): void; routineEnd(ms?: ArrayLike<number>): void }
+
 /** Which part of the automation tick threw (timedAgentTick's `fault`). */
 export type AgentTickPart = 'agent' | 'ub' | 'mag';
 
 /**
  * The frame's automation tick (main.ts agentFrameTick), each part marked into its own phase: the agent API's tick
  * ('agent', with the routine engine's share inside it as 'routine'), UtilityBelt's ('ub', only where /ub runs) and
- * Mag-Tools' ('mag'). Time before the call is marked by the caller.
+ * Mag-Tools' ('mag'). Time before the call is marked by the caller. `routineParts`: the routine tick's ms by part
+ * (ROUTINE_PHASES), as the routine engine measured it (FramePhaseTimer.addRoutine).
  *
  * A part that throws is handed to `fault` and the next part still runs; nothing leaves this call. Before
  * BUG.routine-partial-profile-crash (2026-11-09) a throw here left frameStep, so every tick that threw skipped the
@@ -80,18 +114,22 @@ export type AgentTickPart = 'agent' | 'ub' | 'mag';
  */
 export function timedAgentTick(
   parts: {
-    agent: { tick(marks?: { routineStart(): void; routineEnd(): void }): void };
+    agent: { tick(marks?: AgentTickMarks): void };
     ub?: { tick(): void } | null;
     ubOn: boolean;
     mag?: { tick(): void } | null;
   },
   mark: (phase: number) => void,
   fault: (part: AgentTickPart, e: unknown) => void = () => {},
+  routineParts?: (ms: ArrayLike<number>) => void,
 ): void {
   const guard = (part: AgentTickPart, f: () => void): void => {
     try { f(); } catch (e) { try { fault(part, e); } catch { /* the reporter's fault stays its own */ } }
   };
-  guard('agent', () => parts.agent.tick({ routineStart: () => mark(PHASE.agent), routineEnd: () => mark(PHASE.routine) }));
+  guard('agent', () => parts.agent.tick({
+    routineStart: () => mark(PHASE.agent),
+    routineEnd: (ms) => { mark(PHASE.routine); if (ms && routineParts) routineParts(ms); },
+  }));
   mark(PHASE.agent);
   if (parts.ubOn) guard('ub', () => parts.ub?.tick());
   mark(PHASE.ub);

@@ -146,6 +146,14 @@ export interface ClientPreworldEvent {
   cache: typeof BOOT_CACHE_STATES[number] | null;
   caps: Array<typeof CAPABILITY_ISSUES[number]> | null;
   /**
+   * OBS.boot-page-left-progress — SHOWN_OUTCOMES on the 'boot' screen only: ms the page
+   * has been on screen in all (0: nobody ever saw it), and `prerendered` when it started
+   * as a prerender. A boot page_left with prerendered=true shownMs=0 is a discarded
+   * prerender, not a visitor. Absent otherwise.
+   */
+  shownMs?: number;
+  prerendered?: true;
+  /**
    * Each streamed set's open (how long, how much of it the warm-cache world
    * wait took, cache vs network): boot-screen events, boot_done and the
    * page's first char_list. Absent otherwise or when nothing valid came.
@@ -173,7 +181,7 @@ export interface ClientPreworldEvent {
   path?: typeof HANDOVER_PATHS[number];
   /** 'handover' only: a running macro held this long (ms) for the move (the page's DrainHandover.noteYield). */
   yieldedMs?: number;
-  /** BUG.sleep-darkwake-resume-loop — 'resume_held' only: how long the hidden tab held a resume after the machine slept (token 'released'). 'webgl_wait' (BUG.webgl-crash-block-wait): how long the boot waited out a graphics-crash block. */
+  /** BUG.sleep-darkwake-resume-loop — 'resume_held' only: how long the hidden tab held a resume after the machine slept (token 'released'), or (OBS.resume-offline-wait) how long an attempt waited for the browser to come back online (token 'back_online' / 'offline_grace'). 'webgl_wait' (BUG.webgl-crash-block-wait): how long the boot waited out a graphics-crash block. */
   heldMs?: number;
   /** 'login_retry' only: why the page retried (LOGIN_RETRY_KINDS). */
   retry?: typeof LOGIN_RETRY_KINDS[number];
@@ -286,6 +294,18 @@ export const NET_DIAG_OUTCOMES: ReadonlySet<PreworldOutcome> = new Set<PreworldO
   'dropped', 'page_left', 'page_hidden', 'connect_failed', 'login_refused', 'chargen_refused', 'enter_refused',
 ]);
 
+/**
+ * OBS.boot-page-left-progress — the outcomes that may carry shownMs / prerendered
+ * (renderer PreworldReporter SHOWN_OUTCOMES), and only from the 'boot' screen.
+ */
+export const SHOWN_OUTCOMES: ReadonlySet<PreworldOutcome> = new Set<PreworldOutcome>(['page_left', 'page_hidden', 'boot_slow', 'boot_failed']);
+
+/** `{ shownMs, prerendered }` from a boot-screen body: shownMs a whole ms within a week, prerendered exactly true; each dropped when malformed. */
+export function shownFields(b: Record<string, unknown>): Pick<ClientPreworldEvent, 'shownMs' | 'prerendered'> {
+  const shownMs = uint(b.shownMs, MAX_MS);
+  return { ...(shownMs !== null ? { shownMs } : {}), ...(b.prerendered === true ? { prerendered: true as const } : {}) };
+}
+
 /** Validate a posted body field by field; null when it is not an event. Unknown fields are dropped. */
 export function sanitizeClientPreworld(body: unknown): ClientPreworldEvent | null {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
@@ -314,6 +334,7 @@ export function sanitizeClientPreworld(body: unknown): ClientPreworldEvent | nul
     totalKB: uint(b.totalKB, MAX_KB),
     cache: pick(b.cache, BOOT_CACHE_STATES),
     caps: pickList(b.caps, CAPABILITY_ISSUES),
+    ...(SHOWN_OUTCOMES.has(outcome) && b.screen === 'boot' ? shownFields(b) : {}),
     ...streamField(b.stream),
     ...lateField(b.lateMs, MAX_MS),
     ...eidField(b.eid),

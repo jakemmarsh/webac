@@ -70,8 +70,12 @@ export type RoutineDriver = typeof ROUTINE_DRIVERS[number];
 /** A profile's kind: VirindiTank's macro (macro: true), a meta (ruleFiring 'once'), or plain rules. */
 export const ROUTINE_KINDS = ['macro', 'meta', 'rules'] as const;
 export type RoutineKind = typeof ROUTINE_KINDS[number];
-/** Why a run ended (RoutineEngine.stop): the player, the agent API, StopMacroOnDeath, its own Stop rule, another start, or a fault in its step (tickFault). */
-export const ROUTINE_STOP_REASONS = ['player', 'agent', 'died', 'rule', 'replaced', 'fault'] as const;
+/**
+ * Why a run ended (RoutineEngine.stop): the player, the agent API, StopMacroOnDeath, its own Stop rule, another start, a
+ * fault in its step (tickFault), or 'logout': the character left for good, by a deliberate logout or a new login that
+ * found the run still going (BUG.macro-runs-across-character-change: VirindiTank's macro is off at each login).
+ */
+export const ROUTINE_STOP_REASONS = ['player', 'agent', 'died', 'rule', 'replaced', 'fault', 'logout'] as const;
 export type RoutineStopReason = typeof ROUTINE_STOP_REASONS[number];
 /** Where a run's action failed (RoutineEngine): a rule's actions, Loot this Container, the macro's own steps, the engine's own step (tick). */
 export const ROUTINE_ERROR_PLACES = ['rule', 'loot', 'macro', 'tick'] as const;
@@ -222,7 +226,7 @@ function safe<T>(f: () => T, fallback: T): T {
 }
 
 const zeroStarts = (): Record<RoutineDriver, number> => ({ player: 0, agent: 0 });
-const zeroStops = (): Record<RoutineStopReason, number> => ({ player: 0, agent: 0, died: 0, rule: 0, replaced: 0, fault: 0 });
+const zeroStops = (): Record<RoutineStopReason, number> => ({ player: 0, agent: 0, died: 0, rule: 0, replaced: 0, fault: 0, logout: 0 });
 const zeroImports = (): Record<ImportOutcome, number> => ({ ok: 0, partial: 0, failed: 0 });
 const zeroGoArrow = (): Record<GoArrowReply, number> => Object.fromEntries(GOARROW_REPLIES.map((k) => [k, 0])) as Record<GoArrowReply, number>;
 
@@ -388,7 +392,9 @@ export class AutomationReporter {
     if (this.run) { runMs += Math.max(0, at - this.run.countedFrom); this.run.countedFrom = at; }
     const importsTotal = this.imports.ok + this.imports.partial + this.imports.failed;
     const used = this.barToggles > 0 || this.barClicks > 0 || this.windows.size > 0 || this.starts.player + this.starts.agent > 0
-      || this.run !== null || importsTotal > 0 || runMs > 0 || GOARROW_REPLIES.some((k) => this.goarrow[k] > 0);
+      || this.run !== null || importsTotal > 0 || runMs > 0 || GOARROW_REPLIES.some((k) => this.goarrow[k] > 0)
+      // A run stopped as the session began (a new login finding it still going: 'logout') is this session's too.
+      || ROUTINE_STOP_REASONS.some((k) => this.stops[k] > 0);
     if (used) {
       this.post({
         outcome: 'automation_summary', ...this.ids(),

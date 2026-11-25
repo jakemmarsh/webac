@@ -32,6 +32,7 @@ import { LootExtras } from './macro/lootExtras.ts';
 import { propertyDumpLines, testItemLine } from './macro/lootTest.ts';
 import type { AgentObject, AgentObservation, AgentResult, AgentSelf } from './types.ts';
 import type { NavIdleReason, RoutineDriver, RoutineErrorPlace, RoutineLifecycleEvent, RoutineStopReason } from '../telemetry/AutomationReporter.ts';
+import { ROUTINE_PHASE, ROUTINE_PHASES } from '../telemetry/MainThreadCost.ts';
 
 /** Live facts the conditions read that the observation doesn't carry. */
 export interface RoutineFacts {
@@ -536,6 +537,11 @@ export class RoutineEngine {
     if (navRoute) this.nav = this.loadNav(navRoute);
     this.activeLootSet = null;
     if (profile.lootSet && profile.lootSets?.[profile.lootSet]) { this.profile.loot = profile.lootSets[profile.lootSet]; this.activeLootSet = profile.lootSet; }
+    // The character it runs on (a new login stops it: enteredWorld); none yet before the world.
+    const screen = this.api.status().screen;
+    const inWorld = screen === 'world' || screen === 'portal-space';
+    const me = inWorld ? this.api.self() : null;
+    this.runCharacter = me ? me.guid >>> 0 : inWorld ? this.sessionCharacter : null;
     this.note(`started "${profile.name}" in "${this.state}"`);
     this.lifecycle({ type: 'start', profile, driver });
     return { ok: true, message: `running "${profile.name}" (starts in "${this.state}")` };
@@ -557,6 +563,77 @@ export class RoutineEngine {
     this.profile = null;
     this.api.stopMoving();
     return { ok: true, message: `stopped "${name}"` };
+  }
+
+  /**
+   * BUG.macro-runs-across-character-change (production 2026-11-25, trace 399de00dc21ab87c, Dark Majesty): a macro
+   * started on one character kept running through a logout and three other characters' logins, and the next one
+   * walked toward the first one's dungeon route point. VirindiTank is a Decal plugin: each login starts it afresh,
+   * with Run Macro off and the character's own profiles (docs/vtank-macro-behavior.md §1 "off at login", §2).
+   *
+   * The character the run was started on (its guid); null: started outside the world (the agent API at character
+   * select), and the next one to enter takes it.
+   */
+  private runCharacter: number | null = null;
+  /** The character this engine's per-login state (planners, kills, route positions) belongs to. */
+  private sessionCharacter: number | null = null;
+
+  /**
+   * A deliberate logout (the server's CharacterLogOff, main.ts): the run ends ('logout'), and what the engine kept for
+   * this login goes with it. Never called for an unexpected drop the page resumes (docs/reconnect.md path 1) or a
+   * bridge handover (docs/bridge-handover.md): those keep the run, its route and its nav failures.
+   */
+  loggedOut(): void {
+    if (this.profile) this.stop('stopped: you logged out', 'logout');
+    this.dropLoginState();
+    this.sessionCharacter = null;
+  }
+
+  /**
+   * The world is up for `character` (main.ts, at each world entry). `resumed`: the automatic resume after an unexpected
+   * drop, re-entering the same session's character. A run carries on through a resume of the character it was started
+   * on; any other entry (a fresh login, or a resume that came back as someone else) is a new login, where VirindiTank's
+   * macro is off: a run still going then (a session that ended without a logout: the resume failed, the tab gave the
+   * account to another, a quit from the Disconnected screen) stops ('logout'), said in chat.
+   */
+  enteredWorld(character: number | null, resumed: boolean): void {
+    const c = character === null ? null : character >>> 0;
+    const newLogin = !resumed || (c !== null && this.sessionCharacter !== null && this.sessionCharacter !== c);
+    if (this.profile) {
+      if (this.runCharacter === null) {
+        // Started outside the world (the agent API at character select): this character's run.
+        this.runCharacter = c;
+      } else if (newLogin || (c !== null && this.runCharacter !== c)) {
+        const name = this.profile.name;
+        this.stop('stopped: a new login (the macro is off at login)', 'logout');
+        this.report(`Stopped "${name}": it was running when you logged in, and VirindiTank's macro starts off at each login. Start it again from the VirindiTank window.`, 'Warnings');
+      }
+    }
+    if (newLogin) this.dropLoginState();
+    this.sessionCharacter = c;
+  }
+
+  /**
+   * What the engine keeps for one login and a new one must not inherit: VirindiTank's planners (a Force Buff round,
+   * the wand refusals, the monsters fought, debuffs cast), kills waiting for loot, salvage and pack moves under way,
+   * route positions, the route the stopped run held and doors given up on. The player's stored profiles, routes,
+   * loot sets and settings are not here: they live in the account's document (VTankWindow / RoutineSync) untouched.
+   */
+  private dropLoginState(): void {
+    this.vt = null;
+    this.kills = [];
+    this.toSalvage.clear();
+    this.warnedNoUst = false;
+    this.combineTries.clear();
+    this.combineSkip.clear();
+    this.powerAsked.clear();
+    this.doorSkip.clear();
+    this.followPortalFailed.clear();
+    this.routeIndex.clear();
+    this.tidyRun = null;
+    this.rarePending = false;
+    // A run started at character select for this login keeps the route it loaded.
+    if (!this.profile) { this.nav = null; this.follow = null; this.runCharacter = null; }
   }
 
   status(): RoutineStatus {
@@ -1246,7 +1323,34 @@ export class RoutineEngine {
    * a throw here left the page's frame step every tick, skipping the rest of that frame (the world's step and draw).
    */
   tick(): void {
+    this.tickMs.fill(0);
+    this.tickDepth = 0;
+    this.tickLast = this.tickClock();
     try { this.tickStep(); } catch (e) { this.tickFault(e); }
+    this.tickMs[ROUTINE_PHASE.other] += this.tickClock() - this.tickLast;
+  }
+
+  /**
+   * PERF.routine-phase-split — the last tick's ms by part (telemetry/MainThreadCost.ts ROUTINE_PHASES order), filled by
+   * tick(): the frame's phase timing adds them up (AgentApi.tick hands them on). They sum to the tick's own time.
+   */
+  readonly tickMs = new Float64Array(ROUTINE_PHASES.length);
+  /** The clock the parts are timed on (the page's performance.now()); tests set their own. */
+  tickClock: () => number = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  private tickLast = 0;
+  private tickDepth = 0;
+  /** Run `f` as part `phase` of this tick (a part inside another counts in the outer one). */
+  private part<T>(phase: number, f: () => T): T {
+    if (this.tickDepth > 0) return f();
+    const t0 = this.tickClock();
+    this.tickMs[ROUTINE_PHASE.other] += t0 - this.tickLast;
+    this.tickDepth++;
+    try { return f(); } finally {
+      this.tickDepth--;
+      const t1 = this.tickClock();
+      this.tickMs[phase] += t1 - t0;
+      this.tickLast = t1;
+    }
   }
 
   private tickFault(e: unknown): void {
@@ -1275,13 +1379,17 @@ export class RoutineEngine {
       const t = this.now();
       if (t - this.standbyAt < STEP_MS) return;
       this.standbyAt = t;
-      const got = this.standby?.() ?? null;
-      const sb = got ? normalizeRoutineProfile(got) : null;
-      if (sb) this.offUpkeep(sb, standbySettings(sb));
+      this.part(ROUTINE_PHASE.upkeep, () => {
+        const got = this.standby?.() ?? null;
+        const sb = got ? normalizeRoutineProfile(got) : null;
+        if (sb) this.offUpkeep(sb, standbySettings(sb));
+      });
       return;
     }
-    if (!this.paused) this.watchLeader(p);
-    this.watchNavIdle(p);
+    this.part(ROUTINE_PHASE.nav, () => {
+      if (!this.paused) this.watchLeader(p);
+      this.watchNavIdle(p);
+    });
     if (this.busy) return;
     if (this.lootThisGuid !== null) {
       const guid = this.lootThisGuid;
@@ -1294,8 +1402,8 @@ export class RoutineEngine {
         .finally(() => { this.busy = false; });
       return;
     }
-    if (this.paused) { this.offUpkeep(p, this.settings); return; }
-    if (this.isHeld()) { this.buffWhileYouWalk(p); return; }
+    if (this.paused) { this.part(ROUTINE_PHASE.upkeep, () => this.offUpkeep(p, this.settings)); return; }
+    if (this.isHeld()) { this.part(ROUTINE_PHASE.plan, () => this.buffWhileYouWalk(p)); return; }
     const t = this.now();
     if (t - this.lastStep < STEP_MS) return;
     this.lastStep = t;
@@ -1332,11 +1440,11 @@ export class RoutineEngine {
       }
     }
     // Enable Meta off (VirindiTank): the rules don't run; the macro still does.
-    if (!truthySetting(this.settings.EnableMeta)) { if (p.macro) this.macroStep(p); else if (!this.lootUpkeep(p)) this.switchLull(p); return; }
-    const verdicts = this.dryRun();
+    if (!truthySetting(this.settings.EnableMeta)) { if (p.macro) this.macroStep(p); else if (!this.part(ROUTINE_PHASE.loot, () => this.lootUpkeep(p))) this.switchLull(p); return; }
+    const verdicts = this.part(ROUTINE_PHASE.meta, () => this.dryRun());
     const at = verdicts.findIndex((v) => v.fires);
     // No rule acting: the macro, or (a rules-only profile) the loot's salvaging.
-    if (at < 0) { if (p.macro) this.macroStep(p); else if (!this.lootUpkeep(p)) this.switchLull(p); return; }
+    if (at < 0) { if (p.macro) this.macroStep(p); else if (!this.part(ROUTINE_PHASE.loot, () => this.lootUpkeep(p))) this.switchLull(p); return; }
     const rule = p.states.find((s) => s.name === this.state)!.rules[at];
     const key = `${this.state}#${at}`;
     if (p.ruleFiring === 'once') this.spent.add(key);
@@ -1359,33 +1467,36 @@ export class RoutineEngine {
     const range = Math.max(0, Number(st.AttackDistance) || 0);
     const approach = Math.max(0, Number(st.ApproachDistance) || 0);
     const reach = this.corpseReach();
-    const obs = this.api.look({ radius: Math.max(range, approach, reach, 20), max: 30 });
+    const obs = this.part(ROUTINE_PHASE.scan, () => this.api.look({ radius: Math.max(range, approach, reach, 20), max: 30 }));
     const combat = truthySetting(st.EnableCombat) && p.modules.combat;
     const looting = truthySetting(st.EnableLooting) && p.modules.looting;
     const navOn = truthySetting(st.EnableNav) && p.modules.navigation && !!this.nav && !this.nav.done && this.now() >= this.navHeldUntil;
-    this.navWhy = truthySetting(st.EnableNav) ? this.navBlocked(p) : null;
+    this.navWhy = truthySetting(st.EnableNav) ? this.part(ROUTINE_PHASE.nav, () => this.navBlocked(p)) : null;
     const monsters = obs.nearby.filter((o) => o.kind === 'monster' && !o.dying && (!this.hold || !obs.me || holdAllows(this.hold, obs.me.pos, o)));
     const inRange = combat && monsters.some((o) => o.dist <= range);
     const near = combat && truthySetting(st.EnableNav) && approach > range ? monsters.filter((o) => o.dist > range && o.dist <= approach).sort((a, b) => a.dist - b.dist)[0] : undefined;
-    if (navOn && truthySetting(st.NavPriorityBoost)) { void this.walkNav(); return; }
+    if (navOn && truthySetting(st.NavPriorityBoost)) { this.part(ROUTINE_PHASE.nav, () => void this.walkNav()); return; }
     const steps: RoutineAction[] = [];
-    // Loot Only Rare Corpses: only after the server's "<you> has discovered the <rare>!" (ACE Corpse.EnterWorld).
-    const myName = obs.me?.name;
-    for (const e of this.api.eventsSince(this.rareMark)) {
-      this.rareMark = Math.max(this.rareMark, e.seq);
-      if (myName && e.type === 'chat' && e.text.replace(/^\([a-z]+\) /, '').startsWith(`${myName} has discovered the `)) { this.rarePending = true; this.rareAt = this.now(); }
-    }
-    // A kill is loot to fetch until its own corpse is looted (one try per corpse), so every kill of a ring or arc gets looted;
-    // with LootFellowCorpses / LootAllCorpses, so is another's corpse once VTank may take it (corpseBook.ts).
-    if (looting) { this.loot.book.observe(obs.nearby.filter((o) => o.kind === 'corpse').map((o) => o.guid), this.now(), this.loot.settings(st)); this.loot.watchFellowship(); }
-    const lootDue = looting && (truthySetting(st.LootOnlyRareCorpses) ? this.rarePending : this.killsToLoot().length > 0 || this.othersDue(obs.nearby, reach));
+    const lootDue = this.part(ROUTINE_PHASE.loot, () => {
+      // Loot Only Rare Corpses: only after the server's "<you> has discovered the <rare>!" (ACE Corpse.EnterWorld).
+      const myName = obs.me?.name;
+      for (const e of this.api.eventsSince(this.rareMark)) {
+        this.rareMark = Math.max(this.rareMark, e.seq);
+        if (myName && e.type === 'chat' && e.text.replace(/^\([a-z]+\) /, '').startsWith(`${myName} has discovered the `)) { this.rarePending = true; this.rareAt = this.now(); }
+      }
+      // A kill is loot to fetch until its own corpse is looted (one try per corpse), so every kill of a ring or arc gets looted;
+      // with LootFellowCorpses / LootAllCorpses, so is another's corpse once VTank may take it (corpseBook.ts).
+      if (looting) { this.loot.book.observe(obs.nearby.filter((o) => o.kind === 'corpse').map((o) => o.guid), this.now(), this.loot.settings(st)); this.loot.watchFellowship(); }
+      return looting && (truthySetting(st.LootOnlyRareCorpses) ? this.rarePending : this.killsToLoot().length > 0 || this.othersDue(obs.nearby, reach));
+    });
     // A profile with VirindiTank's tabs: its planners decide recharge, combat and buffs (vtMacro.ts).
     if (p.vtank) {
       this.vt = this.vtReady();
       // A corpse of ours waiting and nothing in range: only recharging comes before the loot (buffs wait for idle);
       // with Boost Loot Priority it comes first outright.
       if (lootDue && truthySetting(st.LootPriorityBoost) && !inRange) { /* loot first, below */ } else {
-        const step = this.vt.decide(p as RoutineProfile & { vtank: NonNullable<RoutineProfile['vtank']> }, st, { combat, buffing: truthySetting(st.EnableBuffing) && p.modules.buffs && !(lootDue && !inRange), idle: !inRange && !lootDue });
+        const vt = this.vt;
+        const step = this.part(ROUTINE_PHASE.plan, () => vt.decide(p as RoutineProfile & { vtank: NonNullable<RoutineProfile['vtank']> }, st, { combat, buffing: truthySetting(st.EnableBuffing) && p.modules.buffs && !(lootDue && !inRange), idle: !inRange && !lootDue }));
         this.watchCombatIdle(combat && inRange && !step, monsters.find((o) => o.dist <= range)?.name ?? null);
         if (step) {
           this.acting = step.label;
@@ -1395,11 +1506,11 @@ export class RoutineEngine {
         }
       }
       // Salvage (the Salvage loot action, then CombineSalvage) before the next corpse, as VTank's loot pass does.
-      if (!inRange && this.lootUpkeep(p)) return;
+      if (!inRange && this.part(ROUTINE_PHASE.loot, () => this.lootUpkeep(p))) return;
       if (lootDue && !inRange) steps.push({ kind: 'loot-nearby', meters: reach });
       else if (!inRange && !near && (truthySetting(st.AutoStack) || truthySetting(st.AutoCram))) {
         // Enable Autostack / Autocram: one pack tidy-up at a time when nothing else is to do; the next waits for the server's answer.
-        const t = this.tidy.step({ autostack: truthySetting(st.AutoStack), autocram: truthySetting(st.AutoCram) });
+        const t = this.part(ROUTINE_PHASE.loot, () => this.tidy.step({ autostack: truthySetting(st.AutoStack), autocram: truthySetting(st.AutoCram) }));
         if (t.text) this.note(t.text);
         if (t.kind === 'moved' || t.kind === 'abandoned') return;
       }
@@ -1411,11 +1522,12 @@ export class RoutineEngine {
       }
       // A lull the macro has anyway (nothing in range, no loot, no buff due): where a server switch's yield begins.
       if (!steps.length && !inRange && this.switchLull(p)) return;
-      if (!steps.length && navOn) { void this.walkNav(); return; }
+      if (!steps.length && navOn) { this.part(ROUTINE_PHASE.nav, () => void this.walkNav()); return; }
       if (!steps.length) {
         // VTank's last rules: RandomHelperBuffs, then Peace Mode When Idle (through the macro's mode gate).
         const vp = p as RoutineProfile & { vtank: NonNullable<RoutineProfile['vtank']> };
-        const last = (p.modules.buffs ? this.vt.helperStep(vp, st) : null) ?? (truthySetting(st.IdlePeaceMode) ? this.vt.peaceStep(vp, st) : null);
+        const vt = this.vt;
+        const last = this.part(ROUTINE_PHASE.plan, () => (p.modules.buffs ? vt.helperStep(vp, st) : null) ?? (truthySetting(st.IdlePeaceMode) ? vt.peaceStep(vp, st) : null));
         if (last) {
           this.acting = last.label;
           this.busy = true;
@@ -1438,15 +1550,15 @@ export class RoutineEngine {
       this.busy = true;
       void this.api.walkTo(near.guid, { within: Math.max(1, range - 0.5), timeoutMs: 30_000 }).then((r) => this.note(`approach ${near.name}: ${r.message.split('\n')[0]}`)).finally(() => { this.busy = false; this.acting = null; });
       return;
-    } else if (this.lootUpkeep(p)) {
+    } else if (this.part(ROUTINE_PHASE.loot, () => this.lootUpkeep(p))) {
       return;
     } else if (lootDue) {
       steps.push({ kind: 'loot-nearby', meters: reach });
-    } else if (truthySetting(st.EnableBuffing) && p.modules.buffs && this.buffsDue().length) {
+    } else if (truthySetting(st.EnableBuffing) && p.modules.buffs && this.part(ROUTINE_PHASE.plan, () => this.buffsDue().length)) {
       steps.push({ kind: 'cast-buffs', set: this.macroBuffSet()!.name });
     }
     if (!steps.length && this.switchLull(p)) return;
-    if (!steps.length && navOn) { void this.walkNav(); return; }
+    if (!steps.length && navOn) { this.part(ROUTINE_PHASE.nav, () => void this.walkNav()); return; }
     if (!steps.length) {
       const mode = obs.me?.combatMode;
       if (truthySetting(st.IdlePeaceMode) && mode && mode !== 'peace' && mode !== 'unknown') void this.act({ kind: 'combat-mode', mode: 'peace' }, p);

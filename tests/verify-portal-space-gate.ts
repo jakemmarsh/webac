@@ -10,7 +10,8 @@ import { GameMessageOpcode } from '../packages/network/src/GameMessageOpcode.js'
 import { CellGate, DEFAULT_GATE_MAX_HOLD_MS, DEFAULT_GATE_TIMEOUT_MS, GatedEventQueue, PREFETCH_STATUS_POLL_MS, PrefetchStatus, settleBurst, type GateProgress } from '../packages/renderer/src/dat/streaming/PortalSpaceGate.js';
 import { DatClosure } from '../packages/renderer/src/dat/streaming/DatClosure.js';
 import { DatStore, fileKey } from '../packages/renderer/src/dat/streaming/DatStore.js';
-import { appearanceRoots, arrivalCellOf, queuedObjectRoots } from '../packages/renderer/src/dat/streaming/ArrivalEvents.js';
+import { appearanceRoots, arrivalCellOf, queuedObjectRoots, worldSessionLive } from '../packages/renderer/src/dat/streaming/ArrivalEvents.js';
+import { SessionLifecycle } from '../packages/renderer/src/session/SessionLifecycle.js';
 import { MemoryObjectCache } from '../packages/renderer/src/dat/streaming/ObjectCache.js';
 import { FakeBucket, buildManifest, buildPack } from './_harness/datSet.js';
 import { TeleportAnimation, TeleportAnimState } from '../packages/renderer/src/effects/PortalSpaceModel.js';
@@ -492,16 +493,42 @@ describe('ArrivalEvents', () => {
 
   it('login / re-creation: our CreateObject with a position', () => {
     const ev = { type: 'objectCreate', data: { guid: me, position: { landblock: 0xA9B40019 } } };
-    expect(arrivalCellOf(ev, { playerGuid: me, teleportPending: false })).toBe(0xA9B40019);
-    expect(arrivalCellOf({ type: 'objectCreate', data: { guid: 0x80000001, position: { landblock: 1 } } }, { playerGuid: me, teleportPending: false })).toBeNull();
-    expect(arrivalCellOf({ type: 'objectCreate', data: { guid: me, position: null } }, { playerGuid: me, teleportPending: false })).toBeNull();
-    expect(arrivalCellOf(ev, { playerGuid: null, teleportPending: false })).toBeNull();
+    expect(arrivalCellOf(ev, { playerGuid: me, teleportPending: false, worldSession: true })).toBe(0xA9B40019);
+    expect(arrivalCellOf({ type: 'objectCreate', data: { guid: 0x80000001, position: { landblock: 1 } } }, { playerGuid: me, teleportPending: false, worldSession: true })).toBeNull();
+    expect(arrivalCellOf({ type: 'objectCreate', data: { guid: me, position: null } }, { playerGuid: me, teleportPending: false, worldSession: true })).toBeNull();
+    expect(arrivalCellOf(ev, { playerGuid: null, teleportPending: false, worldSession: true })).toBeNull();
   });
 
   it('teleport: our UpdatePosition only while a PlayerTeleport is pending', () => {
-    expect(arrivalCellOf(updatePosition(me, 0x01F60289), { playerGuid: me, teleportPending: true })).toBe(0x01F60289);
-    expect(arrivalCellOf(updatePosition(me, 0x01F60289), { playerGuid: me, teleportPending: false })).toBeNull();
-    expect(arrivalCellOf(updatePosition(0x80000002, 0x01F60289), { playerGuid: me, teleportPending: true })).toBeNull();
+    expect(arrivalCellOf(updatePosition(me, 0x01F60289), { playerGuid: me, teleportPending: true, worldSession: true })).toBe(0x01F60289);
+    expect(arrivalCellOf(updatePosition(me, 0x01F60289), { playerGuid: me, teleportPending: false, worldSession: true })).toBeNull();
+    expect(arrivalCellOf(updatePosition(0x80000002, 0x01F60289), { playerGuid: me, teleportPending: true, worldSession: true })).toBeNull();
+  });
+
+  it('outside a world session nothing is an arrival (the old character\'s guid is kept after a logoff)', () => {
+    const create = { type: 'objectCreate', data: { guid: me, position: { landblock: 0xA9B40019 } } };
+    expect(arrivalCellOf(create, { playerGuid: me, teleportPending: false, worldSession: false })).toBeNull();
+    expect(arrivalCellOf(updatePosition(me, 0x01F60289), { playerGuid: me, teleportPending: true, worldSession: false })).toBeNull();
+  });
+
+  it('worldSessionLive: from the enter request until the world is torn down', () => {
+    const life = new SessionLifecycle();
+    let gameStarted = false;
+    const live = () => worldSessionLive({ gameStarted, inWorld: life.inWorld, enterWorldPending: life.enterWorldPending });
+    expect(live()).toBe(false); // character select
+    life.noteEnterWorldRequested(me);
+    expect(live()).toBe(true); // the enter under way (a pre-game PlayerTeleport still counts: BUG.6)
+    life.noteWorldEntered();
+    expect(live()).toBe(true); // PlayerCreate: the login hold
+    gameStarted = true;
+    life.noteLoggedOut(); // RequestLogOff's prepare
+    expect(live()).toBe(true); // the logoff's seconds: the world is still up
+    gameStarted = false; // CharacterLogOff → teardownWorldState
+    expect(live()).toBe(false);
+    life.noteEnterWorldRequested(me);
+    expect(live()).toBe(true); // the next login
+    life.noteDisconnected();
+    expect(live()).toBe(false); // a drop before the world
   });
 
   it('an object\'s appearance roots: setup, motion table, palettes, texture + part swaps', () => {
@@ -513,5 +540,222 @@ describe('ArrivalEvents', () => {
     expect(roots.length).toBe(6);
     expect(roots).toContain(fileKey('portal', 0x05000C2C));
     expect(queuedObjectRoots([{ type: 'message' }, { type: 'objectCreate', data: { setupId: 0x02000002 } }])).toEqual([fileKey('portal', 0x02000002)]);
+  });
+});
+
+/**
+ * BUG.logout-tunnel-over-charselect (production 2026-11-25, end of retail, trace
+ * 01133ebcb3d8b00c): a logout reached character select, and 80 ms after the
+ * CharacterList the portal tunnel was up over it until the tab closed (14.5 s).
+ * ACE sends a tick's UIQueue (CharacterLogOff, CharacterList) before its
+ * SmartboxQueue (PlayerTeleport, UpdatePosition, CreateObject), so the old
+ * character's last teleport can land after the logoff. The gate kept the old guid
+ * and took that position as an arrival: it opened the tunnel and held, and the
+ * released UpdatePosition found no world (onUpdatePosition needs gameStarted), so
+ * nothing ever ended the tunnel. This is main.ts's gate wiring (gateFor /
+ * passThrough / afterRelease / onPlayerTeleport / onCharacterLogOff →
+ * teardownWorldState) over the real GatedEventQueue, SessionLifecycle and
+ * ArrivalEvents; `guarded: false` is the build before the fix.
+ */
+describe('the session gate across a logout (BUG.logout-tunnel-over-charselect)', () => {
+  const me = 0x50000001;
+  const FAR = 0x01F60289; // a destination that is not resident: the gate holds for it
+  type Ev = { type: string; data?: unknown };
+  const updatePosition = (cell: number): Ev => {
+    const p = new Uint8Array(32);
+    const dv = new DataView(p.buffer);
+    dv.setUint32(0, me, true); dv.setUint32(8, cell, true);
+    return { type: 'message', data: { type: 'direct', opcode: GameMessageOpcode.UpdatePosition, payload: p } };
+  };
+  const playerTeleport: Ev = { type: 'playerTeleport' };
+  const logOff: Ev = { type: 'characterLogOff' };
+  const charList: Ev = { type: 'characterList' };
+  const login = (cell: number): Ev => ({ type: 'objectCreate', data: { guid: me, position: { landblock: cell } } });
+
+  function client(guarded: boolean) {
+    const life = new SessionLifecycle();
+    const holds: Array<() => void> = [];
+    const c = {
+      life, gameStarted: false, pendingTeleport: false, tunnel: false, tunnelOpenedByGate: false,
+      seen: [] as string[], teleportsApplied: [] as number[], screen: 'character-select',
+    };
+    const live = () => worldSessionLive({ gameStarted: c.gameStarted, inWorld: life.inWorld, enterWorldPending: life.enterWorldPending });
+    const teardown = () => { c.pendingTeleport = false; c.tunnel = false; c.tunnelOpenedByGate = false; c.gameStarted = false; };
+    const q: GatedEventQueue<Ev> = new GatedEventQueue<Ev>({
+      dispatch: (e) => {
+        c.seen.push(e.type);
+        if (e.type === 'playerTeleport') {
+          if (guarded && !live()) return;
+          c.pendingTeleport = true;
+        } else if (e.type === 'message') {
+          const cell = arrivalCellOf(e, { playerGuid: me, teleportPending: true, worldSession: true });
+          if (c.pendingTeleport && c.gameStarted && cell !== null) {
+            c.pendingTeleport = false;
+            c.teleportsApplied.push(cell);
+            c.tunnel = true; // handleTeleportToPosition → showArrivalTunnel; its load ends it later
+          }
+        } else if (e.type === 'objectCreate') {
+          if (guarded && !live()) return; // onSessionEvent: the ended session's CreateObject
+          c.gameStarted = true; c.screen = 'game'; // startGame
+        } else if (e.type === 'playerCreate') {
+          life.noteWorldEntered();
+        } else if (e.type === 'characterLogOff') {
+          life.noteLoggedOut();
+          if (c.gameStarted) teardown();
+        } else if (e.type === 'characterList') {
+          c.screen = 'character-select';
+        }
+      },
+      passThrough: (e) => {
+        if (e.type === 'disconnected') { q.clear(); life.noteDisconnected(); if (c.gameStarted) teardown(); }
+        return e.type === 'disconnected';
+      },
+      gateFor: (e) => {
+        const dest = arrivalCellOf(e, { playerGuid: me, teleportPending: c.pendingTeleport, worldSession: guarded ? live() : true });
+        if (dest === null) return null;
+        if (!c.tunnelOpenedByGate) { c.tunnel = true; c.tunnelOpenedByGate = true; }
+        return new Promise<void>((r) => holds.push(r));
+      },
+      afterRelease: () => { c.tunnelOpenedByGate = false; },
+    });
+    const enterWorld = (cell: number) => {
+      life.noteEnterWorldRequested(me);
+      q.push({ type: 'playerCreate' });
+      q.push(login(cell));
+    };
+    const releaseAll = async () => { while (holds.length) { holds.shift()!(); await new Promise((r) => setTimeout(r, 0)); } };
+    return { c, q, enterWorld, releaseAll, endTunnel: () => { c.tunnel = false; } };
+  }
+
+  async function inWorld(guarded: boolean) {
+    const k = client(guarded);
+    k.enterWorld(FAR);
+    expect(k.q.isHolding).toBe(true); // the login hold, under its own tunnel
+    expect(k.c.tunnel).toBe(true);
+    await k.releaseAll();
+    k.endTunnel(); // startGame's endPortalSpace
+    expect(k.c.gameStarted).toBe(true);
+    return k;
+  }
+
+  it('before the fix: the old character\'s late teleport raises the tunnel over character select, for good', async () => {
+    const k = await inWorld(false);
+    k.c.life.noteLoggedOut(); // RequestLogOff
+    k.q.push(logOff);
+    k.q.push(charList);
+    expect(k.c.screen).toBe('character-select');
+    expect(k.c.tunnel).toBe(false);
+    k.q.push(playerTeleport); // SmartboxQueue, after the UIQueue in ACE's last flush
+    k.q.push(updatePosition(FAR));
+    expect(k.q.isHolding).toBe(true);
+    expect(k.c.tunnel).toBe(true); // the production page_left screen="portal-space"
+    await k.releaseAll();
+    expect(k.c.teleportsApplied).toEqual([]); // no world to arrive in: nothing ends it
+    expect(k.c.tunnel).toBe(true);
+  });
+
+  it('after the fix: no hold and no tunnel at character select, and no teleport left pending for the next login', async () => {
+    const k = await inWorld(true);
+    k.c.life.noteLoggedOut();
+    k.q.push(logOff);
+    k.q.push(charList);
+    k.q.push(playerTeleport);
+    k.q.push(updatePosition(FAR));
+    k.q.push({ type: 'serverName' });
+    expect(k.q.isHolding).toBe(false);
+    expect(k.c.tunnel).toBe(false);
+    expect(k.c.pendingTeleport).toBe(false);
+    expect(k.c.seen.slice(-5)).toEqual(['characterLogOff', 'characterList', 'playerTeleport', 'message', 'serverName']);
+  });
+
+  it('the old character\'s CreateObject after the logoff neither holds nor starts a world over character select', async () => {
+    const before = await inWorld(false);
+    before.c.life.noteLoggedOut();
+    before.q.push(logOff);
+    before.q.push(charList);
+    before.q.push(login(FAR));
+    expect(before.q.isHolding).toBe(true); // the old build: a login hold over character select
+    expect(before.c.tunnel).toBe(true);
+    await before.releaseAll();
+    expect(before.c.gameStarted).toBe(true); // …then startGame with no enter request
+
+    const k = await inWorld(true);
+    k.c.life.noteLoggedOut();
+    k.q.push(logOff);
+    k.q.push(charList);
+    k.q.push(login(FAR));
+    expect(k.q.isHolding).toBe(false);
+    expect(k.c.tunnel).toBe(false);
+    expect(k.c.gameStarted).toBe(false);
+    expect(k.c.screen).toBe('character-select');
+  });
+
+  it('a teleport in the logoff\'s seconds (the world still up) is still held and still arrives', async () => {
+    const k = await inWorld(true);
+    k.c.life.noteLoggedOut(); // RequestLogOff: inWorld is over, the world is not
+    k.q.push(playerTeleport);
+    k.q.push(updatePosition(FAR));
+    expect(k.q.isHolding).toBe(true);
+    k.q.push(logOff); // waits behind the hold, in order
+    k.q.push(charList);
+    expect(k.c.gameStarted).toBe(true);
+    await k.releaseAll();
+    expect(k.c.teleportsApplied).toEqual([FAR]);
+    expect(k.c.seen.slice(-3)).toEqual(['message', 'characterLogOff', 'characterList']);
+    expect(k.c.tunnel).toBe(false); // the teardown took the arrival's tunnel with it
+    expect(k.q.isHolding).toBe(false);
+  });
+
+  it('a logout then a new login: a clean gate, and the login gets its own tunnel and hold', async () => {
+    const k = await inWorld(true);
+    k.c.life.noteLoggedOut();
+    k.q.push(logOff);
+    k.q.push(charList);
+    k.q.push(playerTeleport);
+    k.q.push(updatePosition(FAR));
+    expect(k.q.queuedCount).toBe(0);
+    k.enterWorld(0xA9B40019);
+    expect(k.q.isHolding).toBe(true);
+    expect(k.c.tunnel).toBe(true);
+    expect(k.c.tunnelOpenedByGate).toBe(true);
+    await k.releaseAll();
+    expect(k.c.gameStarted).toBe(true);
+    // In the world again, a teleport is held and delivered as before.
+    k.endTunnel();
+    k.q.push(playerTeleport);
+    k.q.push(updatePosition(FAR));
+    expect(k.q.isHolding).toBe(true);
+    await k.releaseAll();
+    expect(k.c.teleportsApplied).toEqual([FAR]);
+  });
+
+  it('a bridge handover (same session) keeps holding and delivers what queued behind the hold, in order', async () => {
+    const k = await inWorld(true);
+    k.q.push(playerTeleport);
+    k.q.push(updatePosition(FAR));
+    expect(k.q.isHolding).toBe(true);
+    // The handover swaps the socket only: no lifecycle event, the session's messages keep coming.
+    k.q.push({ type: 'handover' });
+    k.q.push({ type: 'objectCreateOther' });
+    expect(k.q.queuedCount).toBe(3);
+    await k.releaseAll();
+    expect(k.c.teleportsApplied).toEqual([FAR]);
+    expect(k.c.seen.slice(-3)).toEqual(['message', 'handover', 'objectCreateOther']);
+  });
+
+  it('a drop mid-hold drops the held events and the gate\'s tunnel; the resume\'s login holds afresh', async () => {
+    const k = await inWorld(true);
+    k.q.push(playerTeleport);
+    k.q.push(updatePosition(FAR));
+    k.q.push({ type: 'objectCreateOther' });
+    expect(k.q.isHolding).toBe(true);
+    k.q.push({ type: 'disconnected' });
+    expect(k.q.isHolding).toBe(false);
+    expect(k.q.queuedCount).toBe(0);
+    expect(k.c.tunnelOpenedByGate).toBe(false);
+    expect(k.c.tunnel).toBe(false);
+    k.enterWorld(FAR); // the resume re-enters
+    expect(k.q.isHolding).toBe(true);
+    expect(k.c.tunnel).toBe(true);
   });
 });

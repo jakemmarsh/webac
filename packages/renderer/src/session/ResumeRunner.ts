@@ -24,6 +24,17 @@
  * lid sees it reconnect. Other causes (a socket close, a drain's cut, a
  * silent server) never hold: a background window must come back from a blip.
  *
+ * OBS.resume-offline-wait (prod 2026-11-25 21:04Z, trace 532dcc84ba768e0a:
+ * an in-world socket_closed drop resumed 35 s later, and the bridge saw no
+ * attempt and no connect_failed in between) — the offline wait reported
+ * nothing but a console line, so the monitor could not tell a device with no
+ * network from a stalled resume. It now reports through the hidden-tab hold's
+ * own channel (`onHold` → PreworldReporter 'resume_held'): 'offline' when the
+ * wait begins, then 'back_online' (the 'online' event came) or 'offline_grace'
+ * (the grace ran out and the attempt went anyway), each with heldMs = how long
+ * it waited. A wait dropped by a cancel / newer schedule reports no end; an
+ * attempt due while online, or with no grace left, never reports.
+ *
  * Part of the named automatic-reconnect browser-UX exception (CLAUDE.md).
  */
 import type { SessionLifecycle } from './SessionLifecycle.js';
@@ -97,6 +108,9 @@ export function documentVisibilitySource(d: {
   };
 }
 
+/** What a held resume attempt reports (PreworldReporter 'resume_held' token). */
+export type ResumeHoldPhase = 'held' | 'released' | 'offline' | 'back_online' | 'offline_grace';
+
 export interface ResumeRunnerOptions {
   lifecycle: Pick<SessionLifecycle, 'resumingAfterDrop' | 'unreachableGraceLeftMs' | 'noteNetworkOut'> & { readonly holdWhileHidden?: boolean };
   /** Open the attempt's connection (NetConnection.connect with the session's credentials). */
@@ -104,8 +118,12 @@ export interface ResumeRunnerOptions {
   online: OnlineSource;
   /** BUG.sleep-darkwake-resume-loop — absent: never held. */
   visibility?: VisibilitySource;
-  /** A held attempt: 'held' when the wait begins, 'released' (with how long) when the page shows. */
-  onHold?(phase: 'held' | 'released', heldMs: number): void;
+  /**
+   * A held attempt. The hidden-tab hold: 'held' when the wait begins, 'released' (with how long) when
+   * the page shows. OBS.resume-offline-wait, the offline wait: 'offline' when it begins, then
+   * 'back_online' or 'offline_grace' (with how long).
+   */
+  onHold?(phase: ResumeHoldPhase, heldMs: number): void;
   log?(text: string): void;
   now?(): number;
   setTimer?(fn: () => void, ms: number): unknown;
@@ -166,6 +184,8 @@ export class ResumeRunner {
     if (left <= 0) { this.fire(gen); return; }
     this.o.log?.(`[AC] ACE: the browser is offline — waiting up to ${Math.round(left / 1000)} s for the network before the next resume attempt`);
     this.waiting = true;
+    const since = this.now();
+    this.o.onHold?.('offline', 0);
     let settled = false;
     const done = (why: 'online' | 'grace') => {
       if (settled || gen !== this.generation) return;
@@ -174,6 +194,7 @@ export class ResumeRunner {
       this.unsubscribe = null;
       if (this.timer !== null) (this.o.clearTimer ?? ((t) => clearTimeout(t as ReturnType<typeof setTimeout>)))(this.timer);
       this.timer = null;
+      this.o.onHold?.(why === 'grace' ? 'offline_grace' : 'back_online', Math.max(0, this.now() - since));
       if (why === 'grace') { this.waiting = false; this.fire(gen); return; }
       this.o.log?.('[AC] ACE: back online — resuming');
       this.arm(RESUME_ONLINE_SETTLE_MS, () => { this.waiting = false; this.fire(gen); });

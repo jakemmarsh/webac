@@ -123,3 +123,34 @@ describe('launch-filter.sh and TELEMETRY.context-restore', () => {
     expect(filter([worldLine({ ...ev, contextLost: false, contextRestored: null, contextLossCount: 0, lostForMs: null } as WorldEvent)]).trim()).toBe('');
   });
 });
+
+/** A first minute ended at 14 s by a drop with `endCause` (the page's real WorldReporter). */
+function shortDrop(endCause: string): WorldEvent {
+  const events: WorldEvent[] = [];
+  const clock = { t: 1000 };
+  const r = new WorldReporter({
+    endpoint: 'http://x/client-preworld', build: 'b1', trace: 'ac6e6987479b6043', era: () => 'eor', server: () => 'coldeve',
+    now: () => clock.t, send: (_u, b) => { events.push(JSON.parse(b) as WorldEvent); },
+  });
+  r.setSources({ screen: () => 'world', errors: () => 0 });
+  r.enteredWorld();
+  for (let t = 0; t < 14_000; t += 16) { clock.t += 16; r.frame(clock.t, true); if (clock.t % 1000 < 16) r.tick(); }
+  r.left('disconnected', { endCause } as Parameters<WorldReporter['left']>[1]);
+  return events.find((e) => e.outcome === 'first_minute')!;
+}
+
+describe('launch-filter.sh: a first minute ended by design', () => {
+  // 2026-11-25 23:23Z, trace ac6e6987479b6043: the account logged in from outside webAC twice, each within a minute.
+  it('drops account_taken / other_tab / server_boot / local first minutes', () => {
+    for (const cause of ['account_taken', 'other_tab', 'server_boot', 'local']) {
+      const ev = shortDrop(cause);
+      expect(ev).toMatchObject({ outcome: 'first_minute', exit: 'disconnected', endCause: cause });
+      expect(filter([worldLine(ev)]).trim()).toBe('');
+    }
+  });
+  it('keeps a first minute that dropped for any other cause', () => {
+    for (const cause of ['socket_closed', 'link_dead', 'server_silent']) {
+      expect(filter([worldLine(shortDrop(cause))])).toContain(`endCause="${cause}"`);
+    }
+  });
+});

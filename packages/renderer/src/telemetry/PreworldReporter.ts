@@ -31,6 +31,7 @@ import { boundNetDiagnostics, NET_DIAG_END_CAUSES, type ConnectionEvent } from '
 import { isAddressLimitReason, isProxyRefusalReason, PASSWORD_MISMATCH_BOOT_REASON } from '../session/AccountBoot.js';
 import { CharacterError, CharacterGenerationVerificationResponse, characterCreateErrorToken } from '@ac/shared';
 import type { ChargenResumeToken } from '../session/ChargenResume.js';
+import type { ResumeHoldPhase } from '../session/ResumeRunner.js';
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 import type { LoginRetryKind } from '../session/ProvenLoginRetry.js';
 import type { AfterRefusal } from '../session/LoginRefusalMemory.js';
@@ -284,6 +285,12 @@ export function bootCacheVerdict(o: { storage: boolean; fromNetwork: number; fro
 export const CAPABILITY_ISSUES = ['webgl2', 'websocket', 'memory', 'pointer', 'software_gpu'] as const;
 export type CapabilityIssue = typeof CAPABILITY_ISSUES[number];
 
+/**
+ * OBS.boot-page-left-progress — the boot-screen outcomes that say whether the page was ever
+ * seen (PreworldEvent shownMs / prerendered): each one is read as a visitor's boot only if it was.
+ */
+export const SHOWN_OUTCOMES: ReadonlySet<PreworldOutcome> = new Set<PreworldOutcome>(['page_left', 'page_hidden', 'boot_slow', 'boot_failed']);
+
 /** A boot still on screen 'boot' this long after the reporter started sends one boot_slow. */
 export const BOOT_SLOW_MS = 20_000;
 
@@ -332,6 +339,16 @@ export interface PreworldEvent {
   /** Capability problems the probe found (null when none). */
   caps: CapabilityIssue[] | null;
   /**
+   * OBS.boot-page-left-progress — page_left / page_hidden / boot_slow / boot_failed on
+   * the 'boot' screen only: how long the page has been on screen in all (visible and not
+   * a prerender), in ms. 0 on a page nobody ever saw: a prerender discarded unopened
+   * (with `prerendered`), or a tab opened in the background and closed unseen. Close to
+   * pageMs: a visitor who watched the boot. Absent elsewhere.
+   */
+  shownMs?: number;
+  /** OBS.boot-page-left-progress — with shownMs: the page started as a prerender (document.prerendering). Absent otherwise. */
+  prerendered?: true;
+  /**
    * OBS.dm-stall-diagnostics — 'dropped', when the session went silent or its
    * socket closed: the connection's NetDiagnostics, bounded (@ac/network
    * boundNetDiagnostics).
@@ -365,7 +382,7 @@ export interface PreworldEvent {
   path?: HandoverPath;
   /** 'handover' only: a running macro held this long for the move (DrainHandover.noteYield); absent: none held. */
   yieldedMs?: number;
-  /** BUG.sleep-darkwake-resume-loop — 'resume_held' with token 'released' only: how long the hidden tab held the resume. BUG.webgl-crash-block-wait — 'webgl_wait': how long the boot waited out a graphics-crash block. */
+  /** BUG.sleep-darkwake-resume-loop — 'resume_held' with token 'released' (OBS.resume-offline-wait: also 'back_online' / 'offline_grace') only: how long the resume was held. BUG.webgl-crash-block-wait — 'webgl_wait': how long the boot waited out a graphics-crash block. */
   heldMs?: number;
   /**
    * UX.gdle-first-login-retry — 'login_retry' only: why the page retried
@@ -642,6 +659,11 @@ export class PreworldReporter {
   private readonly bid: string | null;
   /** OBS.preworld-page-left-net — the session connection's getDiagnostics (setNetDiagnostics). */
   private netDiagnostics: (() => unknown) | null = null;
+  /** OBS.boot-page-left-progress — the page was a prerender when the reporter started. */
+  private readonly startedPrerendered: boolean;
+  /** On-screen time before the current shown span (ms), and when that span began (null: not shown now). */
+  private shownBefore = 0;
+  private shownSince: number | null;
 
   constructor(private readonly opts: PreworldReporterOptions) {
     this.now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
@@ -650,6 +672,8 @@ export class PreworldReporter {
     this.startedAt = this.now();
     this.screenSince = this.startedAt;
     this.bootClockFrom = this.startedAt;
+    this.startedPrerendered = this.isPrerendering();
+    this.shownSince = this.isShownNow() ? this.startedAt : null;
     this.bid = typeof opts.browserId === 'string' && BROWSER_ID_PATTERN.test(opts.browserId) ? opts.browserId : null;
   }
 
@@ -911,9 +935,16 @@ export class PreworldReporter {
    * BUG.sleep-darkwake-resume-loop — a resume after the machine slept waits while the tab is hidden
    * (session/ResumeRunner.ts): 'resume_held' with token 'held' when the wait begins, and 'released'
    * with `heldMs` when the tab is shown and the attempt goes.
+   *
+   * OBS.resume-offline-wait (prod 2026-11-25, trace 532dcc84ba768e0a) — an attempt due while the
+   * browser is offline waits for 'online': token 'offline' when the wait begins, then 'back_online'
+   * or 'offline_grace' (the grace ran out; the attempt went anyway) with `heldMs` = how long it
+   * waited. The start is sent while offline, so it waits in the outbox and goes late (lateMs); the
+   * end carries the whole fact on its own (heldMs) should the start be lost.
    */
-  resumeHeld(phase: 'held' | 'released', heldMs: number): void {
-    this.report('resume_held', { token: phase, ...(phase === 'released' ? { heldMs: Math.max(0, Math.round(heldMs)) } : {}) });
+  resumeHeld(phase: ResumeHoldPhase, heldMs: number): void {
+    const ended = phase === 'released' || phase === 'back_online' || phase === 'offline_grace';
+    this.report('resume_held', { token: phase, ...(ended ? { heldMs: Math.max(0, Math.round(heldMs)) } : {}) });
   }
 
   /**
@@ -1100,6 +1131,7 @@ export class PreworldReporter {
    * is the whole boot, with each streamed set's report).
    */
   tick(): void {
+    this.noteVisibility();
     this.outbox.retry();
     const { screen } = this.sample();
     if (this.left) return;
@@ -1122,6 +1154,30 @@ export class PreworldReporter {
       if (this.opts.hidden) return this.opts.hidden();
       return typeof document !== 'undefined' && document.visibilityState === 'hidden';
     } catch { return false; }
+  }
+
+  /** On screen: visible and not a prerender. */
+  private isShownNow(): boolean {
+    return !this.isPrerendering() && !this.pageHiddenNow();
+  }
+
+  /**
+   * OBS.boot-page-left-progress — re-read whether the page is on screen and keep the
+   * shown-time total (visibilitychange, prerenderingchange, every tick, every report).
+   */
+  noteVisibility(): void {
+    const shown = this.isShownNow();
+    if (shown && this.shownSince === null) this.shownSince = this.now();
+    else if (!shown && this.shownSince !== null) {
+      this.shownBefore += Math.max(0, this.now() - this.shownSince);
+      this.shownSince = null;
+    }
+  }
+
+  /** How long the page has been on screen in all, in ms (visible and not prerendering). */
+  shownMs(): number {
+    this.noteVisibility();
+    return Math.round(this.shownBefore + (this.shownSince !== null ? Math.max(0, this.now() - this.shownSince) : 0));
   }
 
   private isPrerendering(): boolean {
@@ -1219,7 +1275,9 @@ export class PreworldReporter {
   install(win: Pick<Window, 'addEventListener' | 'setInterval'>, doc: Pick<Document, 'addEventListener'> & { visibilityState?: string }): void {
     // Events the network refused (a drop is when it is gone) go again: online, hidden, leaving, the tick.
     win.addEventListener('pagehide', () => { this.pageLeft(); this.outbox.retry(true); });
-    doc.addEventListener('visibilitychange', () => { if (doc.visibilityState === 'hidden') { this.pageHidden(); this.outbox.retry(true); } });
+    doc.addEventListener('visibilitychange', () => { this.noteVisibility(); if (doc.visibilityState === 'hidden') { this.pageHidden(); this.outbox.retry(true); } });
+    // OBS.boot-page-left-progress — a prerender's activation starts its shown time.
+    doc.addEventListener('prerenderingchange', () => { this.noteVisibility(); });
     this.outbox.install(win);
     win.setInterval(() => { this.tick(); }, 1000);
   }
@@ -1259,6 +1317,10 @@ export class PreworldReporter {
       sinceEnterMs: f.sinceEnterMs ?? null,
       ...(screen === 'boot' ? this.bootSnapshot()
         : { stage: null, progress: null, doneKB: null, totalKB: null, cache: null, caps: null }),
+      ...(screen === 'boot' && SHOWN_OUTCOMES.has(outcome) ? {
+        shownMs: this.shownMs(),
+        ...(this.startedPrerendered ? { prerendered: true as const } : {}),
+      } : {}),
       ...((withStream || screen === 'boot') && this.streams.size > 0 ? { stream: [...this.streams.values()].map((r) => ({ ...r })) } : {}),
       ...(f.net ? { net: f.net } : {}),
       ...(f.heritage !== undefined ? { heritage: f.heritage } : {}),
