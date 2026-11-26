@@ -21,11 +21,29 @@
  * age; a cast refusal carries the spell's target type and where the selection is (and, with
  * nothing selected, what was selected last and how long ago it went). Closed tokens and numbers
  * only: no names, no guids.
+ *
+ * OBS.refusal-target-templates (2026-11-25, production trace 99a0e959553ab107): the use-on-target refusals
+ * (input/TargetCompatible.ts, the era's EraClientRules.useWithTargetText) were in no template list, so every item
+ * pair made its own text and code ("Cannot use the _ with the _s" c:583ea42c beside c:385916d7; "Cannot use the
+ * Healing _ with the Pyreals" kept item words). Every era's table is now spread in (CLIENT_REFUSAL_LINE_TEMPLATES),
+ * with the sweep's other spew refusals built from a %s template: both eras' placement lines (PlacementText,
+ * _IsContainerLegal, the 1999 legality head, AcceptDragObject's, AttemptPlaceIn3D's), the auto-wield's "You cannot
+ * wield more %s" and cannot-unwield form, the shortcut bar's two named refusals and the examine window's
+ * "Only %hs can change the inscription" (a player's name). The added templates match whole lines only.
  */
 import {
   ATTEMPT_FAILED_VERB, InventoryRequest, buildRefusalVocabulary, scrubToVocabulary,
   SERVER_REFUSAL_TEMPLATES, BASE_REFUSAL_VOCABULARY_SOURCES, type RefusalVocabulary, type ScrubResult,
+  AUTOWIELD_CANNOT_WIELD_MORE, AUTOWIELD_MOVING_TO_BACKPACK, AUTOWIELD_CANNOT_UNWIELD_SUFFIX,
 } from '@ac/shared';
+import { ERA_PROFILES } from '../era/EraProfiles.js';
+import { eraClientRules } from '../era/EraFeatures.js';
+import {
+  AC1999_CONTAINER_LEGAL_STRINGS, AC1999_PLACEMENT_TEXT, CONTAINER_LEGAL_STRINGS, ITEM_LIST_DROP_STRINGS, TOO_BIG_TO_MERGE_1999,
+} from '../inventory/ItemHolderPlacement.js';
+import { PLACE_IN_3D_STRINGS } from '../inventory/AttemptPlaceIn3D.js';
+import { shortcutDuplicateText, shortcutIneligibleText } from '../network/itemShortcutRestore.js';
+import { INSCRIPTION_STRINGS } from '../ui/examine/ExaminationWindow.js';
 import { PAPERDOLL_STRINGS } from '../inventory/PaperdollDragObject.js';
 import {
   EOR_USE_OBJECT_RULES, AC1999_USE_OBJECT_RULES, USE_STATUS_TEMPLATES, USE_TARGET_PROMPT_TEMPLATE, type UseObjectRules,
@@ -35,7 +53,6 @@ import { TRADE_NOTICE_TEMPLATES } from '../ui/SecureTradePanel.js';
 import { VENDOR_NOTICE_TEMPLATES } from '../ui/VendorSellDrag.js';
 import { SLUMLORD_SPLIT_NOTICE_TEMPLATE } from '../ui/SlumlordPanel.js';
 import { SALVAGE_ADDING_CONTENTS_TEMPLATE } from '../ui/SalvagePanel.js';
-import { TOO_BIG_TO_MERGE_1999 } from '../inventory/ItemHolderPlacement.js';
 import { EOR_ENCUMBRANCE_NOTICE, AC1999_ENCUMBRANCE_NOTICE } from '../ui/EncumbranceNotice.js';
 import { PORTAL_SPACE_NOTICE } from '../effects/PortalSpaceModel.js';
 import { portalStormPresentation } from '../network/portalStormEvents.js';
@@ -229,10 +246,53 @@ export function isServerTextNotice(text: string): boolean {
 }
 
 /**
- * Every client line template with a name slot, from the tables the client builds those lines from
- * (both eras). Templates without a slot need no entry: their text is already the template.
+ * The 1999 "full" lines whose wording swallows other messages: "%s is full" / "The %s is full" (the 1999
+ * AttemptPlaceInContainerIsLegal) would turn the server's "Your Fellowship is full" (WeenieError FellowshipFull,
+ * every era) into "_ is full", and GDLE / the AC1999 server's "The access list is full" / "The storage access list is
+ * full" (ClientEvents.cpp) into "The _ is full". Left out: the 1999 container is a known object, so the reporter's
+ * name scrub (knownObjectNames) still takes its name.
  */
-export const CLIENT_LINE_TEMPLATES: readonly string[] = Object.freeze([...new Set([
+const SERVER_LOOKALIKE_CLIENT_TEMPLATES: ReadonlySet<string> = new Set([AC1999_PLACEMENT_TEXT.playerItems, AC1999_PLACEMENT_TEXT.items]);
+
+/**
+ * OBS.refusal-target-templates (2026-11-25, trace 99a0e959553ab107) — the client's spew refusals built from a %s
+ * template that no other table here covered, read from the modules that print them:
+ * - ItemHolder::TargetCompatibleWithObject @ 00587520 / the 1999 0x004e6630 (input/TargetCompatible.ts): every
+ *   era's EraClientRules.useWithTargetText ("Cannot use the %s with the %s", "Cannot use the %s on yourself", the
+ *   ownership / wield / trade lines; the 1999 ones end in a full stop);
+ * - every era's PlacementText (the "full" lines, IsItemLegal's stuck / wielded / holds-containers lines), end of
+ *   retail's _IsContainerLegal (CONTAINER_LEGAL_STRINGS), the 1999 legality head (AC1999_CONTAINER_LEGAL_STRINGS),
+ *   AcceptDragObject's (ITEM_LIST_DROP_STRINGS) and AttemptPlaceIn3D's (PLACE_IN_3D_STRINGS) lines;
+ * - AutoWield's "You cannot wield more %s" and its "Moving %s to your backpack - cannot unwield the %s" failure;
+ * - gmToolbarUI::CreateShortcutToItem's "You cannot make a shortcut to the %s" / "There is already a shortcut to the %s";
+ * - ItemExamineUI::HandleInscriptionMousePresses @ 004ac230's "Only %hs can change the inscription" (the scribe's name).
+ * Not added (no spew refusal): dialogs (train-skill / spell-delete / character-delete confirms), button faces and
+ * tooltips (the 1999 Cast button), the book's author menu, chat lines (fellowship, salvage results, Turbine chat's
+ * "Failed to send text to channel: %s", which prints to chat, not the spew), and the two SERVER_LOOKALIKE_CLIENT_TEMPLATES above.
+ * The use-on-target lines were reported one code per item pair (production 2026-11-25: c:583ea42c "Cannot use the _
+ * with the _s"; "Cannot use the Healing _ with the Pyreals" kept item words).
+ */
+export const CLIENT_REFUSAL_LINE_TEMPLATES: readonly string[] = Object.freeze([...new Set([
+  ...Object.values(ERA_PROFILES).flatMap((p) => {
+    const r = eraClientRules(p);
+    return [...Object.values(r.useWithTargetText), ...Object.values(r.placementText)];
+  }),
+  ...Object.values(CONTAINER_LEGAL_STRINGS),
+  ...Object.values(AC1999_CONTAINER_LEGAL_STRINGS),
+  ...Object.values(ITEM_LIST_DROP_STRINGS),
+  ...Object.values(PLACE_IN_3D_STRINGS),
+  AUTOWIELD_CANNOT_WIELD_MORE,
+  AUTOWIELD_MOVING_TO_BACKPACK + AUTOWIELD_CANNOT_UNWIELD_SUFFIX,
+  shortcutIneligibleText('%s'),
+  shortcutDuplicateText('%s'),
+  ...Object.values(INSCRIPTION_STRINGS),
+].filter((t): t is string => typeof t === 'string' && SLOT.test(t) && !SERVER_LOOKALIKE_CLIENT_TEMPLATES.has(t)))]);
+
+/**
+ * The client line templates that match a line's start and keep what follows (an attempt-failed suffix, " - you're
+ * too busy"): every table below but CLIENT_REFUSAL_LINE_TEMPLATES.
+ */
+export const CLIENT_PREFIX_LINE_TEMPLATES: readonly string[] = Object.freeze([...new Set([
   ...Object.values(ATTEMPT_FAILED_VERB).map((v) => v!.template),
   ...Object.values(PAPERDOLL_STRINGS),
   ...useRuleTemplates(EOR_USE_OBJECT_RULES),
@@ -248,21 +308,39 @@ export const CLIENT_LINE_TEMPLATES: readonly string[] = Object.freeze([...new Se
   ...socialRefusalNameTemplates(SOCIAL_REFUSAL_LINES_1999),
 ].filter((t) => typeof t === 'string' && SLOT.test(t)))]);
 
+/**
+ * CLIENT_REFUSAL_LINE_TEMPLATES not already in the prefix list: whole lines only. They are short and generic ("The %s
+ * is locked"), and as prefixes they took over server lines ("The fellowship is locked, you were not added to the
+ * fellowship." became "The _ is locked, …"); the client prints each of them as a whole line.
+ */
+const WHOLE_LINE_TEMPLATES: readonly string[] = CLIENT_REFUSAL_LINE_TEMPLATES.filter((t) => !CLIENT_PREFIX_LINE_TEMPLATES.includes(t));
+
+/**
+ * Every client line template with a name slot, from the tables the client builds those lines from
+ * (every era). Templates without a slot need no entry: their text is already the template.
+ */
+export const CLIENT_LINE_TEMPLATES: readonly string[] = Object.freeze([...CLIENT_PREFIX_LINE_TEMPLATES, ...WHOLE_LINE_TEMPLATES]);
+
 interface CompiledTemplate { re: RegExp; out: string; literal: number }
 
-function compile(t: string): CompiledTemplate {
+/** `whole`: the template must be the entire line (nothing kept after it). */
+function compile(t: string, whole = false): CompiledTemplate {
   const parts = t.split(SLOT);
   const endsInSlot = parts[parts.length - 1] === '';
   let src = '^';
   parts.forEach((p, i) => {
     src += escapeRe(p);
-    if (i < parts.length - 1) src += i === parts.length - 2 && endsInSlot ? '(.+)$' : '(.+?)';
+    if (i < parts.length - 1) src += i === parts.length - 2 && (endsInSlot || whole) ? '(.+)' : '(.+?)';
   });
+  if (endsInSlot || whole) src += '$';
   return { re: new RegExp(src), out: t.replace(SLOT_G, '_'), literal: parts.join('').length };
 }
 
 /** Longest literal first, so "Using the %s on %s"-style forms win over their prefixes. */
-const COMPILED: readonly CompiledTemplate[] = CLIENT_LINE_TEMPLATES.map(compile).sort((a, b) => b.literal - a.literal);
+const COMPILED: readonly CompiledTemplate[] = [
+  ...CLIENT_PREFIX_LINE_TEMPLATES.map((t) => compile(t)),
+  ...WHOLE_LINE_TEMPLATES.map((t) => compile(t, true)),
+].sort((a, b) => b.literal - a.literal);
 
 /**
  * TELEMETRY.refusal-name-safety — the server's own templates with a value slot ('_' in the WeenieError and
@@ -273,7 +351,7 @@ const COMPILED: readonly CompiledTemplate[] = CLIENT_LINE_TEMPLATES.map(compile)
 export const SERVER_LINE_TEMPLATES: readonly string[] = Object.freeze([...new Set(SERVER_REFUSAL_TEMPLATES
   .filter((t) => t.includes('_') && (t.replace(/_/g, '').match(/[A-Za-z]+/g) ?? []).length >= 2)
   .map((t) => t.replace(/_/g, '%s')))]);
-const SERVER_COMPILED: readonly CompiledTemplate[] = SERVER_LINE_TEMPLATES.map(compile).sort((a, b) => b.literal - a.literal);
+const SERVER_COMPILED: readonly CompiledTemplate[] = SERVER_LINE_TEMPLATES.map((t) => compile(t)).sort((a, b) => b.literal - a.literal);
 
 /** A server text keyed by the server template it came from ('_' in each slot); unchanged when none matches. */
 export function matchServerTemplate(text: string): string {
@@ -295,7 +373,7 @@ export function matchClientTemplate(text: string, templates: readonly CompiledTe
 
 /** The same, against a caller's own template list (tests, other tables). */
 export function matchTemplates(text: string, templates: readonly string[]): string {
-  return matchClientTemplate(text, templates.map(compile).sort((a, b) => b.literal - a.literal));
+  return matchClientTemplate(text, templates.map((t) => compile(t)).sort((a, b) => b.literal - a.literal));
 }
 
 /**

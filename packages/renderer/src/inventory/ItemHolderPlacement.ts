@@ -514,6 +514,11 @@ export const ITEM_LIST_DROP_STRINGS = {
   itemInContainerList: 'Cannot place item in container list',
   /** The 1999 ItemList_AcceptDragObject @ 0x0053ade0: the player dropped on the player's own list (no end-of-retail twin). */
   selfInInventory1999: 'You cannot place yourself in your inventory!',
+  /**
+   * UIElement_ItemList::AcceptDragObject @ 004e4250 (.rdata 0x7bfd40): a drop on a list that still shows a pending
+   * item (%s = that item's GetObjectNameWide(id, 2)); GameUI.alreadyPlacingText.
+   */
+  alreadyPlacing: 'Already attempting to place %s here',
 } as const;
 
 export interface ItemListDrop {

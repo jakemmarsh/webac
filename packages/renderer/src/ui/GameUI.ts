@@ -526,6 +526,7 @@ import { STYLE_ARROW_PREV, STYLE_ARROW_NEXT, stepChargenStyle, clampChargenColor
 import { appearanceHeritageRules, appearanceUpdateRandomize, APPEARANCE_ROWS, APPEARANCE_CLOTHES_BUTTON, APPEARANCE_FACE_STACK, APPEARANCE_CLOTHES_STACK } from './ChargenAppearanceHeritage.js';
 import type { PaperdollDropTarget } from '../inventory/PaperdollDragObject.js';
 import { isRetailContainer, sideContainerFixedSlots } from '../inventory/RetailIsContainer.js';
+import { ITEM_LIST_DROP_STRINGS } from '../inventory/ItemHolderPlacement.js';
 import { datMissEpoch, noDatMissSince, onDatMissResolved } from '@ac/dat-parser/streaming/DatMiss.js';
 import { PanelPressGuard } from './PanelPressGuard.js';
 import { sharedDoubleClick } from './DoubleClickAcrossRedraw.js';
@@ -1095,7 +1096,7 @@ export interface PendingPackItem {
  * GetObjectNameWide(id, 2)) — the second drop waits for the first answer.
  */
 export function alreadyPlacingText(name: string): string {
-  return `Already attempting to place ${name} here`;
+  return ITEM_LIST_DROP_STRINGS.alreadyPlacing.replace('%s', () => name);
 }
 
 /** GameEventStartBarber / GameActionFinishBarber's 16 fields (GAP.barber-ui-retail: BarberModel.ts). */

@@ -146,6 +146,10 @@ export const REFUSAL_SHAPE_WORDS: readonly string[] = Object.freeze([
   // "Field of view …", "Too big to merge. Putting in _.", "I can't possibly sell you that much!") and retail's own
   // capitals in "Cannot Merge Different Stack Types.".
   'Window Radius Field Putting I Different Types',
+  // OBS.refusal-target-templates (2026-11-25): the sentence starts of two client refusal templates added to the
+  // page's list, "Already attempting to place %s here" (AcceptDragObject) and AutoWield's "Moving %s to your
+  // backpack - cannot unwield the %s".
+  'Already Moving',
 ]);
 
 /** The base vocabulary's sources: the server templates, the attempt-failed lines, the skill names and the shape words. */

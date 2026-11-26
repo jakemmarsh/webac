@@ -70,6 +70,19 @@ export interface AutoWieldStack {
 export const AUTOWIELD_CANNOT_WIELD_MORE = 'You cannot wield more %s';
 /** acclient.exe, AutoWield's ring branch when both fingers are taken (the 1999 client words it differently: EraClientRules.autoWieldRingsFullLine). */
 export const AUTOWIELD_RINGS_FULL = "You're already wearing jewelry on both hands.";
+/**
+ * CPlayerSystem::AutoWield's line when the slot's old item goes to the pack first: "Moving %s to your backpack"
+ * (acclient.exe 0x3ccd38, NAME_APPROPRIATE), with " - cannot unwield the %s" (0x3ccd04) appended when the placement
+ * sent nothing (the 1999 PanelUI_AutoWield @ 0x4fee20 writes the same). The refusal telemetry keys the failure form
+ * by its template (RefusalTemplates, OBS.refusal-target-templates).
+ */
+export const AUTOWIELD_MOVING_TO_BACKPACK = 'Moving %s to your backpack';
+export const AUTOWIELD_CANNOT_UNWIELD_SUFFIX = ' - cannot unwield the %s';
+
+/** The auto-wield's backpack line for `name`, with the cannot-unwield suffix when the placement sent nothing. */
+export function autoWieldMovingLine(name: string, sent: boolean): string {
+  return (AUTOWIELD_MOVING_TO_BACKPACK + (sent ? '' : AUTOWIELD_CANNOT_UNWIELD_SUFFIX)).replace(/%s/g, () => name);
+}
 
 export type AutoWieldResolution =
   /** Send GetAndWieldItem(item, slot) — retail UIAttemptWield with the

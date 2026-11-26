@@ -47,7 +47,7 @@ import {
   PatchStatus, PatchEventGate, StreamedPatchFeed, connectTextForLevel, patchProgressText, type PatchEvent,
   PatchStatusLatch, patchFailureText, showPatchFailureNotice, patchBootPlan, QuietPatchProgress, QUIET_PATCH_REVEAL_MS, type PatchBootPlan } from './ui/PatchScreen.js';
 import { loadDatWithCache, interrogateDat, fetchHeadMeta, OpfsDatBlobStore } from './dat/DatCache.js';
-import { PhysicsState as AcePhysicsState, EnvironChangeType, ENVIRON_FOG, ENVIRON_SOUND, isEnvironFog, isEnvironSound, OptimisticEquipmentTracker, CHARACTER_OPTION_BIT_MAP, resolveAutoWield, autoWieldRetryDue, UISlotSide } from '@ac/shared';
+import { PhysicsState as AcePhysicsState, EnvironChangeType, ENVIRON_FOG, ENVIRON_SOUND, isEnvironFog, isEnvironSound, OptimisticEquipmentTracker, CHARACTER_OPTION_BIT_MAP, resolveAutoWield, autoWieldRetryDue, autoWieldMovingLine, UISlotSide } from '@ac/shared';
 import type { InventoryItem, MtChatSpeech } from '@ac/shared';
 import { InventoryRequestTracker, InventoryRequest, characterOptionIsSet, ObjectDescriptionFlag, itemTypeLabel, vtVcsCategory } from '@ac/shared';
 import type { AttemptFailedObject } from '@ac/shared';
@@ -5159,7 +5159,7 @@ async function main() {
         const blocker = playerState.equipment.getAll().find((e) => e.id === res.blockingId);
         if (blocker) {
           const name = getAppropriateName(blocker.name, blocker.pluralName, blocker.stackSize);
-          gameUI.displayErrorText(`Moving ${name} to your backpack${sent ? '' : ` - cannot unwield the ${name}`}`);
+          gameUI.displayErrorText(autoWieldMovingLine(name, sent));
         }
       }
       return true;
