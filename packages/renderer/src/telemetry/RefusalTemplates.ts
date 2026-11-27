@@ -44,6 +44,7 @@ import {
 import { PLACE_IN_3D_STRINGS } from '../inventory/AttemptPlaceIn3D.js';
 import { shortcutDuplicateText, shortcutIneligibleText } from '../network/itemShortcutRestore.js';
 import { INSCRIPTION_STRINGS } from '../ui/examine/ExaminationWindow.js';
+import { BOOK_NOTICE_TEMPLATES } from '../ui/BookModel.js';
 import { PAPERDOLL_STRINGS } from '../inventory/PaperdollDragObject.js';
 import {
   EOR_USE_OBJECT_RULES, AC1999_USE_OBJECT_RULES, USE_STATUS_TEMPLATES, USE_TARGET_PROMPT_TEMPLATE, type UseObjectRules,
@@ -265,9 +266,12 @@ const SERVER_LOOKALIKE_CLIENT_TEMPLATES: ReadonlySet<string> = new Set([AC1999_P
  *   AcceptDragObject's (ITEM_LIST_DROP_STRINGS) and AttemptPlaceIn3D's (PLACE_IN_3D_STRINGS) lines;
  * - AutoWield's "You cannot wield more %s" and its "Moving %s to your backpack - cannot unwield the %s" failure;
  * - gmToolbarUI::CreateShortcutToItem's "You cannot make a shortcut to the %s" / "There is already a shortcut to the %s";
- * - ItemExamineUI::HandleInscriptionMousePresses @ 004ac230's "Only %hs can change the inscription" (the scribe's name).
+ * - ItemExamineUI::HandleInscriptionMousePresses @ 004ac230's "Only %hs can change the inscription" (the scribe's name);
+ * - OBS.refusal-template-sweep-2 (2026-11-26, production c:a143a3cb "Only _ of _ can change this page"): the book's two
+ *   named spew notices (ui/BookModel.ts BOOK_NOTICE_TEMPLATES): ListenToElementMessage @ 004bba10's "Only %s can change
+ *   this page" (the page's author) and SetCurPage @ 004bb570's "The %s is already open to a blank page" (the book).
  * Not added (no spew refusal): dialogs (train-skill / spell-delete / character-delete confirms), button faces and
- * tooltips (the 1999 Cast button), the book's author menu, chat lines (fellowship, salvage results, Turbine chat's
+ * tooltips (the 1999 Cast button), the book's page menu rows (menuAuthorFormat), chat lines (fellowship, salvage results, Turbine chat's
  * "Failed to send text to channel: %s", which prints to chat, not the spew), and the two SERVER_LOOKALIKE_CLIENT_TEMPLATES above.
  * The use-on-target lines were reported one code per item pair (production 2026-11-25: c:583ea42c "Cannot use the _
  * with the _s"; "Cannot use the Healing _ with the Pyreals" kept item words).
@@ -286,6 +290,7 @@ export const CLIENT_REFUSAL_LINE_TEMPLATES: readonly string[] = Object.freeze([.
   shortcutIneligibleText('%s'),
   shortcutDuplicateText('%s'),
   ...Object.values(INSCRIPTION_STRINGS),
+  ...Object.values(BOOK_NOTICE_TEMPLATES),
 ].filter((t): t is string => typeof t === 'string' && SLOT.test(t) && !SERVER_LOOKALIKE_CLIENT_TEMPLATES.has(t)))]);
 
 /**

@@ -24,6 +24,9 @@ import { shortcutDuplicateText, shortcutIneligibleText } from '../packages/rende
 import { alreadyPlacingText } from '../packages/renderer/src/ui/GameUI';
 import { inscriptionPressRefusal } from '../packages/renderer/src/ui/examine/ExaminationWindow';
 import {
+  BOOK_CANNOT_CHANGE_TEXT, BOOK_NOTICE_TEMPLATES, bookAlreadyBlankText, bookOnlyAuthorText,
+} from '../packages/renderer/src/ui/BookModel';
+import {
   AUTOWIELD_CANNOT_WIELD_MORE, SERVER_REFUSAL_TEMPLATES, autoWieldMovingLine, weenieErrorText,
 } from '../packages/shared/src/index';
 
@@ -197,6 +200,70 @@ describe('OBS.refusal-target-templates inverse — no added template takes over 
       for (const line of [fill(t, 'Zork Ulm', 'Quix Arn'), fill(t, 'Zork Ulm', 'Quix Arn') + " - you're too busy"]) {
         expect(matchClientTemplate(line), line).toBe(matchTemplates(line, CLIENT_PREFIX_LINE_TEMPLATES));
       }
+    }
+  });
+});
+
+describe('OBS.refusal-template-sweep-2 — the book\'s named notices key by their template', () => {
+  const AUTHORS = ['Asheron', 'Lord Kresovus of Dereth', "Ma'at Al-Khaliq", 'X', 'Bob the Great'];
+  const BOOK_KINDS = new Set(['Only _ can change this page', 'The _ is already open to a blank page']);
+
+  it('production\'s "Only _ of _ can change this page" and every other author shape are one code', () => {
+    const g = rig();
+    for (const a of AUTHORS) {
+      const line = bookOnlyAuthorText(a);
+      expect(line).toBe(`Only ${a} can change this page`);
+      expect(matchClientTemplate(line), line).toBe('Only _ can change this page');
+      g.r.clientSpew(line);
+    }
+    expect(g.events).toHaveLength(1);
+    expect(g.events[0]).toMatchObject({ text: 'Only _ can change this page', code: `c:${refusalHash('Only _ can change this page')}` });
+    // c:a143a3cb was the per-shape code production saw for "Only _ of _ can change this page".
+    expect(g.events[0].code).not.toBe('c:a143a3cb');
+    expect(CLIENT_REFUSAL_LINE_TEMPLATES).toContain(BOOK_NOTICE_TEMPLATES.onlyAuthor);
+    expect(CLIENT_REFUSAL_LINE_TEMPLATES).toContain(BOOK_NOTICE_TEMPLATES.alreadyBlank);
+  });
+
+  it('"You cannot change this page" stays its own kind', () => {
+    expect(matchClientTemplate(BOOK_CANNOT_CHANGE_TEXT)).toBe(BOOK_CANNOT_CHANGE_TEXT);
+    const g = rig();
+    g.r.clientSpew(bookOnlyAuthorText('Asheron'));
+    g.r.clientSpew(BOOK_CANNOT_CHANGE_TEXT);
+    expect(g.events.map((e) => e.text)).toEqual(['Only _ can change this page', 'You cannot change this page']);
+    expect(new Set(g.events.map((e) => e.code)).size).toBe(2);
+  });
+
+  it('the blank-page notice keys by its template, whatever the book', () => {
+    const g = rig();
+    for (const b of ['Book', 'Journal of the Hopeslayer', "Asheron's Diary"]) {
+      expect(matchClientTemplate(bookAlreadyBlankText(b))).toBe('The _ is already open to a blank page');
+      g.r.clientSpew(bookAlreadyBlankText(b));
+    }
+    expect(g.events.map((e) => e.text)).toEqual(['The _ is already open to a blank page']);
+  });
+
+  it('the builders print what they printed before, "$" names literal', () => {
+    expect(bookOnlyAuthorText('Asheron')).toBe('Only Asheron can change this page');
+    expect(bookAlreadyBlankText('Book')).toBe('The Book is already open to a blank page');
+    expect(bookOnlyAuthorText('$& Odd')).toBe('Only $& Odd can change this page');
+    expect(bookAlreadyBlankText("$'")).toBe("The $' is already open to a blank page");
+  });
+
+  it('inverse: lines that only share words with the book templates are not swallowed', () => {
+    for (const line of [
+      'Nobody can change this page',
+      'Only Asheron can change this page now',
+      'You cannot change this page',
+      'Only the fellowship leader can recruit',
+      'Only Bob can change the inscription',
+      'The Book is already open',
+      'The Book is already open to a blank page, sadly',
+    ]) {
+      expect(BOOK_KINDS.has(matchClientTemplate(line)), line).toBe(false);
+    }
+    expect(matchClientTemplate('Only Bob can change the inscription')).toBe('Only _ can change the inscription');
+    for (const s of SERVER_REFUSAL_TEMPLATES) {
+      expect(BOOK_KINDS.has(matchClientTemplate(s.replace(/_/g, 'Zork Ulm'))), s).toBe(false);
     }
   });
 });

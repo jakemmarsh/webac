@@ -62,8 +62,18 @@ export interface BookIO {
 }
 
 export const BOOK_BLANK_ROW = '(blank)';
-export const bookAlreadyBlankText = (bookName: string): string => `The ${bookName} is already open to a blank page`;
-export const bookOnlyAuthorText = (author: string): string => `Only ${author} can change this page`;
+/**
+ * The book's spew notices with a name slot (acclient.exe literals): SetCurPage @ 004bb570's
+ * "The %s is already open to a blank page" (%s = the book's name) and ListenToElementMessage @ 004bba10's
+ * "Only %s can change this page" (%s = the page's author). The refusal reporter keys them by these
+ * templates (telemetry/RefusalTemplates.ts CLIENT_REFUSAL_LINE_TEMPLATES), whatever the name.
+ */
+export const BOOK_NOTICE_TEMPLATES = Object.freeze({
+  alreadyBlank: 'The %s is already open to a blank page',
+  onlyAuthor: 'Only %s can change this page',
+});
+export const bookAlreadyBlankText = (bookName: string): string => BOOK_NOTICE_TEMPLATES.alreadyBlank.replace('%s', () => bookName);
+export const bookOnlyAuthorText = (author: string): string => BOOK_NOTICE_TEMPLATES.onlyAuthor.replace('%s', () => author);
 export const BOOK_CANNOT_CHANGE_TEXT = 'You cannot change this page';
 export const bookPageLabel = (index: number): string => `Page ${index + 1}`;
 
