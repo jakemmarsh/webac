@@ -83,3 +83,16 @@ describe('launch-filter.sh: a boot_slow from a page hidden for most of it', () =
     expect(filter([slow(20_856, 0)])).toMatch(/boot_slow/);
   });
 });
+
+describe('launch-filter.sh: a Custom… bridge address whose socket never opened', () => {
+  // Shapes of traces eb736c1f61d32079 (2026-11-27 02:46Z, open_failed) and a091d98e8838bdae (2026-11-26 21:37Z, open_timeout), address replaced.
+  const failed = (server: string, why: string) =>
+    `2026-11-27T02:46:14.383Z [INFO]  t="2026-11-27T02:46:14.383Z" event="client_preworld" ip="198.51.100.7" outcome="connect_failed" era="eor" server="${server}" trace="eb736c1f61d32079" build="410188f0ca8c" screen="connecting" token="ID_NetError_CantSocket" pageMs=18610 screenMs=0 eid="7bd0a281d34d" why="${why}" openMs=16 hidden=false`;
+  it('drops open_failed / open_timeout on custom-bridge', () => {
+    expect(filter([failed('custom-bridge', 'open_failed'), failed('custom-bridge', 'open_timeout')]).trim()).toBe('');
+  });
+  it('keeps the same failure on one of our worlds, and other custom-bridge reasons', () => {
+    const out = filter([failed('26d9ec3d-9fbf-4fda-95f9-8d87e005ae3a', 'open_failed'), failed('custom-bridge', 'offline'), failed('custom-bridge', 'closed_before_login')]);
+    expect(out.match(/outcome="connect_failed"/g)).toHaveLength(3);
+  });
+});
