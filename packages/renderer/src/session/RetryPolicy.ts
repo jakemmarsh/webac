@@ -75,6 +75,21 @@ export const RESUME_ONLINE_SETTLE_MS = 1000;
 export const HIDDEN_CLOSE_HOLD_MS = 5000;
 
 /**
+ * A session socket that closes with 1001 ("going away") under a VISIBLE page → its drop is held this
+ * long; a `pagehide` inside the window means the page itself was going, as under a hidden page
+ * (UnexpectedDrop.PageHideClose, BUG.visible-close-1001-read-as-drop). Production 2026-11-28
+ * (Firefox 153, Dark Majesty, in the world, trace 1d154c28689f45d7): closing the visible tab closed
+ * the socket with 1001 first and pagehide came ~300 ms later; the page reported world_left
+ * `disconnected` and began a resume. Only 1001 is held on a visible page: a network drop (1006)
+ * resumes with no added delay. Our bridge also closes with 1001 on shutdown; that close is not
+ * followed by pagehide, so it resumes this much later (the first attempt waits 2 s anyway).
+ */
+export const VISIBLE_GOING_AWAY_HOLD_MS = 1500;
+
+/** WebSocket close code 1001 "going away" (RFC 6455 7.4.1): an endpoint leaving, e.g. a page being unloaded. */
+export const WS_CLOSE_GOING_AWAY = 1001;
+
+/**
  * A drop within this long of a resume's success → continues that resume's attempt budget instead of
  * a fresh one → a spent budget shows the Disconnected screen (resume_ended loop_chain_spent).
  *

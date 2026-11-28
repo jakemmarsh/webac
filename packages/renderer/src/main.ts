@@ -421,7 +421,7 @@ import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid } fro
 import { LoginRefusalMemory } from './session/LoginRefusalMemory.js';
 import { ProvenLoginRetry, firstTimeLoginRetryAllowed, type LoginCredentials } from './session/ProvenLoginRetry.js';
 import { LoginCaseFallback, LoginCaseMemory, passwordCaseFor } from './session/LoginCredentialCase.js';
-import { PageHideClose, armDropResume, handleUnexpectedDrop, resumeAttemptRefusalIsFinal, sessionLiveForSend, silentReloginDrop, sleepDrop } from './session/UnexpectedDrop.js';
+import { PageHideClose, armDropResume, pageHideCloseOpts, handleUnexpectedDrop, resumeAttemptRefusalIsFinal, sessionLiveForSend, silentReloginDrop, sleepDrop } from './session/UnexpectedDrop.js';
 import { LinkCheck, deadSessionCause, type LinkDeadCause } from './session/LinkCheck.js';
 import { SessionLiveness, sessionDropped, characterListRole } from './session/SessionLiveness.js';
 import { ChargenDraftStore, decideChargenDraft, CHARGEN_DRAFT_OFFER_TEXT, type ChargenDraftOwner } from './session/ChargenResume.js';
@@ -19997,9 +19997,9 @@ async function main() {
         case 'disconnected':
           // BUG.hidden-tab-close-read-as-drop — a socket closed under a hidden page waits a moment: the
           // browser closes it first when it is unloading the page, and pagehide follows.
-          pageHideClose.ended((pageHideDrop) => onSessionEnded(event, pageHideDrop), {
-            socketDrop: event.endCause === 'socket_closed' && sessionDropped(event),
-          });
+          // BUG.visible-close-1001-read-as-drop — on a visible page only a 1001 ("going away") close
+          // waits (Firefox closing the tab); ClientConnection and Connection1999 both put the code on the event.
+          pageHideClose.ended((pageHideDrop) => onSessionEnded(event, pageHideDrop), pageHideCloseOpts(event));
           break;
 
         case 'loginUnanswered': {

@@ -15,12 +15,21 @@
  * wins (nothing resumes, nothing reports a drop); the page turning visible, a
  * send that needs the session, or the window running out hand it on as the
  * drop it is (inverse direction: a real drop on a hidden tab still resumes).
+ *
+ * BUG.visible-close-1001-read-as-drop — production 2026-11-28 04:21:53Z (trace
+ * 1d154c28689f45d7, Firefox 153 on Windows, Dark Majesty, a VISIBLE tab in the
+ * world): closing the tab closed the socket with 1001 "going away" first
+ * (bridge session_close ws_close peerCloseCode=1001, serverQuietMs 370), the
+ * page reported world_left disconnected socket_closed 1001 and began a resume,
+ * and pagehide came ~300 ms later. A visible page now holds a 1001 close (only
+ * 1001) for VISIBLE_GOING_AWAY_HOLD_MS; pagehide inside it wins. The bridge's
+ * own shutdown close is also 1001: it runs as the drop when the window ends.
  */
 import { describe, expect, it, vi } from 'vitest';
 import { SessionLifecycle } from '../packages/renderer/src/session/SessionLifecycle.js';
-import { PageHideClose, armDropResume, type HiddenCloseEnv } from '../packages/renderer/src/session/UnexpectedDrop.js';
+import { PageHideClose, armDropResume, pageHideCloseOpts, type HiddenCloseEnv } from '../packages/renderer/src/session/UnexpectedDrop.js';
 import { installUnloadSessionClose } from '../packages/renderer/src/session/PlayerModuleSave.js';
-import { HIDDEN_CLOSE_HOLD_MS, RESUME_DELAYS_MS } from '../packages/renderer/src/session/RetryPolicy.js';
+import { HIDDEN_CLOSE_HOLD_MS, RESUME_DELAYS_MS, VISIBLE_GOING_AWAY_HOLD_MS } from '../packages/renderer/src/session/RetryPolicy.js';
 
 /** A page's visibility, clock and timers, driven by the test. */
 class FakePage implements HiddenCloseEnv {
@@ -66,14 +75,14 @@ function page(env: FakePage) {
     leaving: () => p.leaving(),
     restored: (persisted) => p.shown(persisted),
   });
-  const socketClosed = (): void => p.ended((pageHideDrop) => {
+  const socketClosed = (closeCode?: number): void => p.ended((pageHideDrop) => {
     events.push('dropped');
     const kind = armDropResume(lc, {
       unexpected: true, wasInWorld: false, enterPending: false, screen,
       keepChargenDraft: () => false, selection: () => 'Char',
     });
     if (kind) { events.push(`resume:${kind}${pageHideDrop ? ':pagehide' : ''}`); screen = 'resuming'; }
-  }, { socketDrop: true });
+  }, pageHideCloseOpts({ endCause: 'socket_closed', everOpened: true, deliberate: false, ...(closeCode !== undefined ? { closeCode } : {}) }));
   return { p, lc, events, win, socketClosed };
 }
 
@@ -155,6 +164,127 @@ describe('inverse: a real network drop on a hidden tab still resumes', () => {
     env.advance(HIDDEN_CLOSE_HOLD_MS);
     win.fire('pagehide', { persisted: false });
     expect(events).toEqual(['dropped', 'resume:charselect', 'page_left:resuming']);
+  });
+});
+
+describe('a visible page: a 1001 close waits a moment for pagehide (BUG.visible-close-1001-read-as-drop)', () => {
+  it('the production sequence (Firefox): 1001, then pagehide 300 ms later: nothing resumes, no drop', () => {
+    const env = new FakePage();
+    env.isHidden = false;
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { lc, events, win, socketClosed } = page(env);
+    socketClosed(1001);
+    expect(events).toEqual([]);
+    env.advance(300);
+    win.fire('pagehide', { persisted: false });
+    expect(events).toEqual(['page_left:char-select']);
+    env.advance(60_000);
+    expect(events).toEqual(['page_left:char-select']);
+    expect(lc.nextResumeDelay()).toBeNull();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('with 1001 on the visible page 300 ms before pagehide'));
+    log.mockRestore();
+  });
+
+  it('a pagehide just inside the window still wins', () => {
+    const env = new FakePage();
+    env.isHidden = false;
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { events, win, socketClosed } = page(env);
+    socketClosed(1001);
+    env.advance(VISIBLE_GOING_AWAY_HOLD_MS - 1);
+    win.fire('pagehide', { persisted: false });
+    env.advance(HIDDEN_CLOSE_HOLD_MS);
+    expect(events).toEqual(['page_left:char-select']);
+    vi.restoreAllMocks();
+  });
+
+  it('inverse: a 1001 with no pagehide (our bridge shutting down) is the drop when the short window runs out', () => {
+    const env = new FakePage();
+    env.isHidden = false;
+    const { lc, events, win, socketClosed } = page(env);
+    socketClosed(1001);
+    env.advance(VISIBLE_GOING_AWAY_HOLD_MS - 1);
+    expect(events).toEqual([]);
+    env.advance(1);
+    expect(events).toEqual(['dropped', 'resume:charselect']);
+    expect(lc.nextResumeDelay()).toBe(RESUME_DELAYS_MS[0]);
+    expect(env.pending).toBe(0);
+    // The window is short, not the hidden page's 5 s.
+    expect(VISIBLE_GOING_AWAY_HOLD_MS).toBeLessThan(HIDDEN_CLOSE_HOLD_MS);
+    win.fire('pagehide', { persisted: false }); // a later pagehide changes nothing
+    expect(events).toEqual(['dropped', 'resume:charselect', 'page_left:resuming']);
+  });
+
+  it('a send that needs the session during the window releases it once', () => {
+    const env = new FakePage();
+    env.isHidden = false;
+    const { p, events, socketClosed } = page(env);
+    socketClosed(1001);
+    expect(p.holdingHiddenDrop).toBe(true);
+    expect(p.release()).toBe(true);
+    expect(events).toEqual(['dropped', 'resume:charselect']);
+    env.advance(HIDDEN_CLOSE_HOLD_MS);
+    expect(events).toEqual(['dropped', 'resume:charselect']);
+  });
+
+  it('the page going hidden then visible again during the window: the drop runs on visible', () => {
+    const env = new FakePage();
+    env.isHidden = false;
+    const { p, events, socketClosed } = page(env);
+    socketClosed(1001);
+    env.advance(200);
+    p.visible();
+    expect(events).toEqual(['dropped', 'resume:charselect']);
+    expect(env.pending).toBe(0);
+  });
+
+  it('a network drop (1006) on a visible page is the drop at once: no added delay', () => {
+    const env = new FakePage();
+    env.isHidden = false;
+    const { events, socketClosed } = page(env);
+    socketClosed(1006);
+    expect(events).toEqual(['dropped', 'resume:charselect']);
+    expect(env.pending).toBe(0);
+  });
+
+  for (const code of [1000, 1005, 1011, 1012, undefined]) {
+    it(`any other code on a visible page (${code ?? 'none'}) is unchanged: the drop at once`, () => {
+      const env = new FakePage();
+      env.isHidden = false;
+      const { events, socketClosed } = page(env);
+      socketClosed(code);
+      expect(events).toEqual(['dropped', 'resume:charselect']);
+      expect(env.pending).toBe(0);
+    });
+  }
+
+  it('a hidden page holds any code for the full 5 s, 1001 included (unchanged)', () => {
+    for (const code of [1001, 1006, undefined]) {
+      const env = new FakePage();
+      const { events, socketClosed } = page(env);
+      socketClosed(code);
+      env.advance(VISIBLE_GOING_AWAY_HOLD_MS);
+      expect(events).toEqual([]);
+      env.advance(HIDDEN_CLOSE_HOLD_MS - VISIBLE_GOING_AWAY_HOLD_MS);
+      expect(events).toEqual(['dropped', 'resume:charselect']);
+    }
+  });
+
+  it('a 1001 that is not an unexpected socket close (our own close, a never-opened socket) is never held', () => {
+    const env = new FakePage();
+    env.isHidden = false;
+    const p = new PageHideClose(env);
+    const got: boolean[] = [];
+    p.ended((d) => got.push(d), pageHideCloseOpts({ endCause: 'local', deliberate: true, everOpened: true }));
+    p.ended((d) => got.push(d), pageHideCloseOpts({ endCause: 'socket_closed', everOpened: false, closeCode: 1001 }));
+    p.ended((d) => got.push(d), pageHideCloseOpts({ endCause: 'server_silent', everOpened: true }));
+    expect(got).toEqual([false, false, false]);
+    expect(env.pending).toBe(0);
+  });
+
+  it('pageHideCloseOpts carries the close code only when the event has one', () => {
+    expect(pageHideCloseOpts({ endCause: 'socket_closed', everOpened: true, closeCode: 1001 })).toEqual({ socketDrop: true, closeCode: 1001 });
+    expect(pageHideCloseOpts({ endCause: 'socket_closed', everOpened: true })).toEqual({ socketDrop: true });
   });
 });
 

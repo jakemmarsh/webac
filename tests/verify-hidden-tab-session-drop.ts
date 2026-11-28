@@ -33,6 +33,8 @@ import {
 import { Connection1999 } from '../packages/network/src/era1999/Connection1999.js';
 import { buildPacket1999 } from '../packages/network/src/era1999/Packet1999.js';
 import { LinkCheck, deadSessionCause } from '../packages/renderer/src/session/LinkCheck.js';
+import { PageHideClose, pageHideCloseOpts } from '../packages/renderer/src/session/UnexpectedDrop.js';
+import { VISIBLE_GOING_AWAY_HOLD_MS } from '../packages/renderer/src/session/RetryPolicy.js';
 import { NetWorkerClient, SNAPSHOT_EXTRAPOLATION_MAX_MS, type NetWorkerEndpoint } from '../packages/renderer/src/network/NetWorkerClient.js';
 import { linkDeadCause, linkSampleIsDead, LINK_DEAD_SILENCE_CAP_S } from '../packages/renderer/src/ui/ConnectionNotices.js';
 import { ThreadStallClock, silenceIsOwnStall, STALE_RECEIVE_GRACE_MS, FROZEN_GAP_MIN_MS } from '../packages/network/src/ThreadStall.js';
@@ -525,6 +527,66 @@ describe('Connection1999 timeout', () => {
     const b = session1999();
     b.conn.disconnect();
     expect(b.disconnects()).toEqual([expect.objectContaining({ deliberate: true, endCause: 'local' })]);
+  });
+});
+
+// ── BUG.visible-close-1001-read-as-drop: both eras' 1001 reaches PageHideClose with its code ──
+
+describe('a visible page holds a 1001 close from either era\'s connection (main.ts wiring: pageHideCloseOpts)', () => {
+  /** A visible page over vitest's fake timers. */
+  const visiblePage = () => new PageHideClose({
+    hidden: () => false, now: () => Date.now(),
+    setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (id) => clearTimeout(id as ReturnType<typeof setTimeout>),
+  });
+  const wire = (p: PageHideClose, ev: ConnectionEvent, handled: string[]) =>
+    p.ended(() => handled.push(`drop:${ev.closeCode ?? 'none'}`), pageHideCloseOpts(ev));
+
+  it('end of retail / Dark Majesty (ClientConnection through the worker): 1001 waits for pagehide; 1006 does not', () => {
+    const a = workerSession();
+    a.ws.receive(serverMessage(2));
+    a.ws.remoteClose(1001);
+    const [ev] = a.disconnects();
+    expect(ev).toMatchObject({ deliberate: false, endCause: 'socket_closed', closeCode: 1001 });
+    const p = visiblePage();
+    const handled: string[] = [];
+    wire(p, ev, handled);
+    expect(handled).toEqual([]);
+    vi.advanceTimersByTime(300);
+    p.leaving(); // pagehide
+    vi.advanceTimersByTime(10_000);
+    expect(handled).toEqual([]);
+
+    const b = workerSession();
+    b.ws.receive(serverMessage(2));
+    b.ws.remoteClose(1006);
+    const q = visiblePage();
+    wire(q, b.disconnects()[0], handled);
+    expect(handled).toEqual(['drop:1006']);
+  });
+
+  it('AC1999 (Connection1999): 1001 waits for pagehide; with none it is the drop when the window ends', () => {
+    const a = session1999();
+    a.sock.readyState = 3;
+    a.sock.onclose?.({ code: 1001 });
+    const [ev] = a.disconnects();
+    expect(ev).toMatchObject({ deliberate: false, endCause: 'socket_closed', closeCode: 1001 });
+    const p = visiblePage();
+    const handled: string[] = [];
+    wire(p, ev, handled);
+    vi.advanceTimersByTime(300);
+    p.leaving();
+    vi.advanceTimersByTime(10_000);
+    expect(handled).toEqual([]);
+
+    const b = session1999();
+    b.sock.readyState = 3;
+    b.sock.onclose?.({ code: 1001 }); // our bridge shutting down: no pagehide follows
+    const q = visiblePage();
+    wire(q, b.disconnects()[0], handled);
+    vi.advanceTimersByTime(VISIBLE_GOING_AWAY_HOLD_MS - 1);
+    expect(handled).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(handled).toEqual(['drop:1001']);
   });
 });
 
